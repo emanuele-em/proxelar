@@ -1,3 +1,4 @@
+use man_in_the_middle_proxy as mitm;
 fn main() {
-    println!("Hello, world!");
+    mitm::say_hello();
 }
