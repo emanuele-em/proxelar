@@ -1,6 +1,5 @@
 use std::{net::TcpListener, vec};
 
-use hyper::Request;
 
 use tokio::runtime;
 
@@ -61,7 +60,7 @@ impl eframe::App for MitmApp {
         // Pick whichever suits you.
         // Tip: a good default choice is to just keep the `CentralPanel`.
         // For inspiration and more examples, go to https://emilk.github.io/egui
-        listen(ADDR, self.listener);
+        
 
         egui::TopBottomPanel::bottom("tcp_listener").show(ctx, |ui| {
             ui.label(*listener);
