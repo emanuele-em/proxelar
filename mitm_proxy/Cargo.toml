@@ -6,5 +6,10 @@ edition = "2021"
 # See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
 
 [dependencies]
+confy = "0.5.1"
 
 eframe = "0.20.0"
+egui_extras = "0.20.0"
+serde = { version = "1", features = ["derive"] }
+proxyapi = {path = "../proxyapi"}
+tokio = { version = "1", features = ["full"] }
