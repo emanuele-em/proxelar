@@ -29,12 +29,13 @@ impl App for MitmProxy {
 
         self.render_top_panel(ctx, frame);
 
-        if self.check_listener() {
-            CentralPanel::default().show(ctx, |ui| self.render_columns(ui));
-            self.fetch_requests();
-        } else {
-            CentralPanel::default().show(ctx, |ui| ui.label("waiting for connection"));
-        }
+        
+        CentralPanel::default().show(ctx, |ui|{
+
+                // self.fetch_requests();
+                self.render_columns(ui);
+
+        });
     }
 }
 
@@ -45,22 +46,18 @@ fn main() {
     // create the app with listener false
     // update listener when it is true
 
-    let (listener_tx, listener_rx) = sync_channel(1);
-    let mut rt = Runtime::new().unwrap();
+    let (tx, rx) = sync_channel(1);
+    let rt = Runtime::new().unwrap();
 
     thread::spawn(move || {
         rt.block_on( async move {
-            loop {
-                if let Ok(proxy_api) = ProxyAPI::new().await {
-                    listener_tx.send(proxy_api);
-                }
-            }
+                ProxyAPI::new(tx.clone()).await;
         })
     });
 
     run_native(
         "Man In The Middle Proxy",
         native_options,
-        Box::new(|cc| Box::new(MitmProxy::new(cc, listener_rx))),
+        Box::new(|cc| Box::new(MitmProxy::new(cc, rx))),
     )
 }

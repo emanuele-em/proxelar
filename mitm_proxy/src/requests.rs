@@ -1,5 +1,6 @@
 use eframe::egui::{self};
 use egui_extras::TableRow;
+use rand::Rng;
 
 use crate::PADDING;
 
@@ -23,16 +24,30 @@ pub struct RequestInfo {
 
 impl Default for RequestInfo {
     fn default() -> Self {
+        let mut rng = rand::thread_rng();
+        let a = rng.gen::<u32>();
         RequestInfo {
             request: Some(Request {
-                path: format!("path"),
-                method: format!("method"),
-                status: format!("status"),
-                size: format!("size"),
-                time: format!("time"),
+                path: format!("path {}", a),
+                method: format!("method{}", a),
+                status: format!("status{}", a),
+                size: format!("size{}", a),
+                time: format!("time{}", a),
             }),
-            response: None,
-            details: None,
+            response: Some(Response {
+                path: format!("path {}", a),
+                method: format!("method{}", a),
+                status: format!("status{}", a),
+                size: format!("size{}", a),
+                time: format!("time{}", a),
+            }),
+            details: Some(Details {
+                path: format!("path {}", a),
+                method: format!("method{}", a),
+                status: format!("status{}", a),
+                size: format!("size{}", a),
+                time: format!("time{}", a),
+            }),
         }
     }
 }

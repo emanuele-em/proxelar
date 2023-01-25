@@ -1,5 +1,8 @@
 use std::{
-    sync::mpsc::{channel, sync_channel, Receiver, SyncSender, Sender},
+    sync::{
+        mpsc::{channel, sync_channel, Receiver, Sender, SyncSender},
+        Arc, Mutex,
+    },
     thread,
 };
 
@@ -59,65 +62,70 @@ impl MitmProxyState {
 }
 
 pub struct MitmProxy {
-    listener_rx: Receiver<ProxyAPI>,
-    listener: Option<ProxyAPI>,
     requests: Vec<RequestInfo>,
     config: MitmProxyConfig,
     state: MitmProxyState,
-
-    tx: SyncSender<RequestInfo>,
-    rx: Receiver<RequestInfo>,
+    rx: Receiver<ProxyAPIResponse>,
 }
 
 impl MitmProxy {
-    pub fn new(cc: &eframe::CreationContext<'_>, listener_rx: Receiver<ProxyAPI>) -> Self {
+    pub fn new(cc: &eframe::CreationContext<'_>, rx: Receiver<ProxyAPIResponse>) -> Self {
         Self::configure_fonts(cc);
         let iter = (0..20).map(|a| requests::RequestInfo::default());
         let config: MitmProxyConfig = confy::load("MitmProxy", None).unwrap_or_default();
         let state = MitmProxyState::new();
 
-        let (tx, rx) = sync_channel(1);
-
         //thread::spawn(move || fetch_listener(&mut listener_tx));
 
         MitmProxy {
-            listener_rx: listener_rx,
-            listener: None,
             requests: vec![],
             config,
             state,
-            tx,
             rx
         }
         //listen here and push inside MitmProxy.requests
     }
 
     pub fn check_listener(&mut self) -> bool {
-       match self.listener_rx.try_recv(){
-        Ok(l) => {
-            self.listener = Some(l);
-            true
+        match self.rx.try_recv() {
+            Ok(l) => {
+                println!("received");
+                true
+            }
+            _ => {
+                false
+            },
         }
-        _ => false
-       }
     }
 
-    pub fn fetch_requests(&mut self) {
+    // pub fn fetch_requests(&mut self) {
+    //     let (tx, rx) = sync_channel(1);
+    //     let mut rt = Runtime::new().unwrap();
 
-        let mut rt = Runtime::new().unwrap();
+    //     let listener = self.listener.clone();
 
+    //     thread::spawn(move || {
+    //         rt.block_on(async move {
+    //             loop{
+    //                 if let Ok(request_info) = listener.as_ref().unwrap().lock().unwrap().listen().await {
+    //                     println!("proxy api response .req {:?}", request_info.req);
+    //                     println!("proxy api response .res {:?}", request_info.res);
+    //                     tx.send(RequestInfo::default());
+    //                 }
+    //             }
+    //         });
+    //     });
+    // }
 
-        rt.block_on( async move{
-                if let Ok(request_info) = self.listener
-                .as_mut()
-                .unwrap()
-                .listen()
-                .await {
-                    self.requests.push(RequestInfo::default());
-                }
-        });
-
-    }
+    // pub fn check_requests(&mut self) -> bool {
+    //     match self.rx.try_recv() {
+    //         Ok(r) => {
+    //             self.requests.push(r);
+    //             true
+    //         }
+    //         _ => false,
+    //     }
+    // }
 
     pub fn manage_theme(&mut self, ctx: &egui::Context) {
         match self.config.dark_mode {
@@ -154,8 +162,6 @@ impl MitmProxy {
 
         cc.egui_ctx.set_style(style);
     }
-
-
 
     pub fn table_ui(&mut self, ui: &mut egui::Ui) {
         let text_height = match self.config.row_height {
@@ -199,18 +205,14 @@ impl MitmProxy {
                 header.col(|_ui| ());
             })
             .body(|body| {
-                body.rows(
-                    text_height,
-                    self.requests.len(),
-                    |row_index, mut row| {
-                        self.requests[row_index].render_row(&mut row);
-                        row.col(|ui| {
-                            if ui.button("🔎").clicked() {
-                                self.state.selected_request = Some(row_index);
-                            }
-                        });
-                    },
-                )
+                body.rows(text_height, self.requests.len(), |row_index, mut row| {
+                    self.requests[row_index].render_row(&mut row);
+                    row.col(|ui| {
+                        if ui.button("🔎").clicked() {
+                            self.state.selected_request = Some(row_index);
+                        }
+                    });
+                })
             });
     }
 
@@ -246,7 +248,24 @@ impl MitmProxy {
             });
     }
 
+    pub fn update_requests(&mut self) -> Option<RequestInfo> {
+
+        match self.rx.try_recv() {
+            Ok(l) => {
+                Some(RequestInfo::default())
+            }
+            _ => {
+                None
+            },
+        }
+    }
+    
     pub fn render_columns(&mut self, ui: &mut egui::Ui) {
+
+        if let Some(request) = self.update_requests() {
+            self.requests.push(request);
+        }
+
         if let Some(i) = self.state.selected_request {
             ui.columns(2, |columns| {
                 ScrollArea::vertical()
@@ -265,6 +284,8 @@ impl MitmProxy {
                 .show(ui, |ui| self.table_ui(ui));
         }
     }
+
+    
 
     pub fn render_top_panel(&mut self, ctx: &egui::Context, frame: &mut Frame) {
         TopBottomPanel::top("top_panel").show(ctx, |ui| {
