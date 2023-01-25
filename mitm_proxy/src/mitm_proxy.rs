@@ -1,5 +1,7 @@
-
-use std::{sync::mpsc::{channel, sync_channel, SyncSender, Receiver}, thread};
+use std::{
+    sync::mpsc::{channel, sync_channel, Receiver, SyncSender, Sender},
+    thread,
+};
 
 use crate::{
     requests::{self, InfoOptions, RequestInfo},
@@ -15,8 +17,9 @@ use eframe::{
     Frame,
 };
 use egui_extras::{Column, TableBuilder};
-use proxyapi::ProxyAPI;
+use proxyapi::{ProxyAPI, ProxyAPIResponse};
 use serde::{Deserialize, Serialize};
+use tokio::runtime::Runtime;
 
 #[derive(Serialize, Deserialize)]
 struct MitmProxyConfig {
@@ -56,40 +59,65 @@ impl MitmProxyState {
 }
 
 pub struct MitmProxy {
-    listener_rx: Option<Receiver<ProxyAPI>>,
-    requests: Option<Vec<RequestInfo>>,
+    listener_rx: Receiver<ProxyAPI>,
+    listener: Option<ProxyAPI>,
+    requests: Vec<RequestInfo>,
     config: MitmProxyConfig,
-    state: MitmProxyState
+    state: MitmProxyState,
+
+    tx: SyncSender<RequestInfo>,
+    rx: Receiver<RequestInfo>,
 }
 
 impl MitmProxy {
-    pub fn new(cc: &eframe::CreationContext<'_>) -> Self {
+    pub fn new(cc: &eframe::CreationContext<'_>, listener_rx: Receiver<ProxyAPI>) -> Self {
         Self::configure_fonts(cc);
         let iter = (0..20).map(|a| requests::RequestInfo::default());
         let config: MitmProxyConfig = confy::load("MitmProxy", None).unwrap_or_default();
         let state = MitmProxyState::new();
 
-        let (mut listener_tx, listener_rx) = channel();
+        let (tx, rx) = sync_channel(1);
 
+        //thread::spawn(move || fetch_listener(&mut listener_tx));
 
-        thread::spawn( move || {
-             fetch_listener(&mut listener_tx)  
-        });
-
-        MitmProxy{
-            listener_rx,
-            requests: None,
+        MitmProxy {
+            listener_rx: listener_rx,
+            listener: None,
+            requests: vec![],
             config,
             state,
+            tx,
+            rx
         }
         //listen here and push inside MitmProxy.requests
     }
 
-    pub fn check_listener(&self) -> bool{
-        self.listener_rx.is_some()
+    pub fn check_listener(&mut self) -> bool {
+       match self.listener_rx.try_recv(){
+        Ok(l) => {
+            self.listener = Some(l);
+            true
+        }
+        _ => false
+       }
     }
 
+    pub fn fetch_requests(&mut self) {
 
+        let mut rt = Runtime::new().unwrap();
+
+
+        rt.block_on( async move{
+                if let Ok(request_info) = self.listener
+                .as_mut()
+                .unwrap()
+                .listen()
+                .await {
+                    self.requests.push(RequestInfo::default());
+                }
+        });
+
+    }
 
     pub fn manage_theme(&mut self, ctx: &egui::Context) {
         match self.config.dark_mode {
@@ -127,11 +155,7 @@ impl MitmProxy {
         cc.egui_ctx.set_style(style);
     }
 
-    pub async fn fetch_requests(&mut self) {
-        if let Ok(request) = self.listener.listen().await {
-            println!("ok");
-        }
-    }
+
 
     pub fn table_ui(&mut self, ui: &mut egui::Ui) {
         let text_height = match self.config.row_height {
@@ -175,14 +199,18 @@ impl MitmProxy {
                 header.col(|_ui| ());
             })
             .body(|body| {
-                body.rows(text_height, self.requests.unwrap().len(), |row_index, mut row| {
-                    self.requests.unwrap()[row_index].render_row(&mut row);
-                    row.col(|ui| {
-                        if ui.button("🔎").clicked() {
-                            self.state.selected_request = Some(row_index);
-                        }
-                    });
-                })
+                body.rows(
+                    text_height,
+                    self.requests.len(),
+                    |row_index, mut row| {
+                        self.requests[row_index].render_row(&mut row);
+                        row.col(|ui| {
+                            if ui.button("🔎").clicked() {
+                                self.state.selected_request = Some(row_index);
+                            }
+                        });
+                    },
+                )
             });
     }
 
@@ -212,9 +240,9 @@ impl MitmProxy {
         ScrollArea::vertical()
             .id_source("details")
             .show(ui, |ui| match self.state.detail_option {
-                InfoOptions::Request => self.requests.unwrap()[i].show_request(ui),
-                InfoOptions::Response => self.requests.unwrap()[i].show_response(ui),
-                InfoOptions::Details => self.requests.unwrap()[i].show_details(ui),
+                InfoOptions::Request => self.requests[i].show_request(ui),
+                InfoOptions::Response => self.requests[i].show_response(ui),
+                InfoOptions::Details => self.requests[i].show_details(ui),
             });
     }
 

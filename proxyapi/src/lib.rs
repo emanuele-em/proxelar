@@ -12,6 +12,7 @@ use hyper::{Method, Request, Response};
 
 use tokio::net::{TcpListener, TcpStream};
 
+#[derive(Debug)]
 pub struct ProxyAPI{
     listener: TcpListener
 }
