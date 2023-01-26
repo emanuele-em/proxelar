@@ -10,3 +10,5 @@ hyper = { version = "1.0.0-rc.2", features = ["full"] }
 tokio = { version = "1", features = ["full"] }
 http-body-util = "0.1.0-rc.2"
 bytes = "1"
+http-body = "0.4.5"
+chrono = "0.4.23"

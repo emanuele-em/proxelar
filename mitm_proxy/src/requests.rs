@@ -1,8 +1,74 @@
+use std::collections::HashMap;
+
 use eframe::egui::{self};
 use egui_extras::TableRow;
-use rand::Rng;
+use proxyapi::ProxyAPIResponse;
+use rand::{Rng, distributions::uniform::SampleBorrow};
 
 use crate::PADDING;
+
+struct Request {
+    method: String,
+    uri: String,
+    version: String,
+    headers: HashMap<String, String>,
+    body: String,
+    time: i64
+}
+
+impl Request{
+    fn new(
+        method: String,
+        uri: String,
+        version: String,
+        headers: HashMap<String, String>,
+        body: String,
+        time: i64
+    ) -> Self{
+        Self {
+            method,
+            uri,
+            version,
+            headers,
+            body,
+            time,
+        }
+    }
+}
+
+pub struct Response {
+    status: String,
+    version: String,
+    headers: HashMap<String, String>,
+    body: String,
+    time: i64,
+}
+
+impl Response{
+    fn new(
+        status: String,
+        version: String,
+        headers: HashMap<String, String>,
+        body: String,
+        time: i64
+    ) -> Self{
+        Self {
+            status,
+            version,
+            headers,
+            body,
+            time
+        }
+    }
+}
+
+pub struct Details;
+
+impl Details{
+    fn new() -> Self{
+        Self
+    }
+}
 
 #[derive(PartialEq)]
 pub enum InfoOptions {
@@ -27,66 +93,99 @@ impl Default for RequestInfo {
         let mut rng = rand::thread_rng();
         let a = rng.gen::<u32>();
         RequestInfo {
-            request: Some(Request {
-                path: format!("path {}", a),
-                method: format!("method{}", a),
-                status: format!("status{}", a),
-                size: format!("size{}", a),
-                time: format!("time{}", a),
-            }),
-            response: Some(Response {
-                path: format!("path {}", a),
-                method: format!("method{}", a),
-                status: format!("status{}", a),
-                size: format!("size{}", a),
-                time: format!("time{}", a),
-            }),
-            details: Some(Details {
-                path: format!("path {}", a),
-                method: format!("method{}", a),
-                status: format!("status{}", a),
-                size: format!("size{}", a),
-                time: format!("time{}", a),
-            }),
+            request: None,
+            response: None,
+            details: None,
         }
     }
 }
 
+impl From<ProxyAPIResponse> for RequestInfo{
+    fn from(value: ProxyAPIResponse) -> Self {
+
+        let request = if let r = value.req(){
+            Some(Request::new(
+                r.method().to_string(),
+               r.uri().to_string(),
+               r.version().to_string(),
+               r.headers().into_iter().map(|h| (h.0.to_string(), h.1.to_string())).collect(),
+               r.body().to_string(),
+               r.time()
+           ))
+        } else {
+            None
+        };
+        
+
+        let response = if let Some(r) = value.res(){
+            Some(
+                Response::new(
+                    r.status().to_string(),
+                    r.version().to_string(),
+                    r.headers().into_iter().map(|h| (h.0.to_string(), h.1.to_string())).collect(),
+                    r.body().to_string(),
+                    r.time(),
+                )
+            )
+        } else {
+            None
+        };
+
+        let details = None;
+
+        RequestInfo { request, response, details }
+    }
+}
+
 impl RequestInfo {
+
     pub fn show_request(&mut self, ui: &mut egui::Ui) {
-        let r = self.request.as_ref().unwrap();
-        ui.heading("Path");
-        ui.label(&r.path);
+        if let Some(r) = &self.request {
+            ui.strong("Method");
+            ui.label(&r.method);
 
-        ui.heading("Method");
-        ui.label(&r.method);
+            ui.strong("Method");
+            ui.label(&r.method);
 
-        ui.heading("Status");
-        ui.label(&r.status);
+            ui.strong("Version");
+            ui.label(&r.version);
 
-        ui.heading("Size");
-        ui.label(&r.size);
+            ui.strong("Headers");
+            for (k, v) in r.headers.iter(){
+                ui.label(format!("{}: {}", &k, &v));
+            }
 
-        ui.heading("Time");
-        ui.label(&r.time);
+            ui.strong("body");
+            ui.label(&r.body);
+
+            ui.strong("Time");
+            ui.label(&r.time.to_string());
+        } else {
+            ui.label("No requests");
+        }
     }
 
     pub fn show_response(&mut self, ui: &mut egui::Ui) {
         if let Some(r) = &self.response {
-            ui.heading("Path");
-            ui.label(&r.path);
-
-            ui.heading("Method");
-            ui.label(&r.method);
-
-            ui.heading("Status");
+            ui.strong("Status");
             ui.label(&r.status);
 
-            ui.heading("Size");
-            ui.label(&r.size);
+            ui.strong("Version");
+            ui.label(&r.version);
 
-            ui.heading("Time");
-            ui.label(&r.time);
+            ui.strong("Status");
+            ui.label(&r.status);
+
+            ui.strong("Headers");
+            for (k, v) in r.headers.iter(){
+                ui.label(format!("{}: {}", &k, &v));
+            }
+
+            ui.strong("body");
+            ui.label(&r.body);
+
+            ui.strong("Time");
+            ui.label(&r.time.to_string());
         } else {
             ui.label("No Response");
         }
@@ -94,70 +193,37 @@ impl RequestInfo {
 
     pub fn show_details(&mut self, ui: &mut egui::Ui) {
         if let Some(d) = &self.details {
-            ui.heading("Path");
-            ui.label(&d.path);
-
-            ui.heading("Method");
-            ui.label(&d.method);
-
-            ui.heading("Status");
-            ui.label(&d.status);
-
-            ui.heading("Size");
-            ui.label(&d.size);
-
-            ui.heading("Time");
-            ui.label(&d.time);
+            ui.label("some details");
         } else {
             ui.label("No Details");
         }
     }
 
     pub fn render_row(&mut self, row: &mut TableRow) {
-        let r = self.request.as_ref().unwrap();
+        let req = self.request.as_ref().unwrap();
+        let res = self.response.as_ref().unwrap();
+        let time = (res.time as f64 - req.time as f64) * 10_f64.powf(-9.0) as f64;
         row.col(|ui| {
-            ui.label(r.path.to_string());
+            ui.label(&req.uri);
         });
 
         row.col(|ui| {
-            ui.label(r.method.to_string());
+            ui.label(&req.method);
         });
 
         row.col(|ui| {
-            ui.label(r.status.to_string());
+            ui.label(&res.status);
         });
 
         row.col(|ui| {
-            ui.label(r.size.to_string());
+            ui.label(&res.body);
         });
 
         row.col(|ui| {
-            ui.label(r.time.to_string());
+            ui.label(time.to_string());
         });
 
     }
 }
 
-struct Request {
-    path: String,
-    method: String,
-    status: String,
-    size: String,
-    time: String,
-}
 
-pub struct Response {
-    path: String,
-    method: String,
-    status: String,
-    size: String,
-    time: String,
-}
-
-pub struct Details {
-    path: String,
-    method: String,
-    status: String,
-    size: String,
-    time: String,
-}

@@ -2,7 +2,7 @@ mod mitm_proxy;
 mod requests;
 
 use std::{
-    sync::mpsc::{channel, sync_channel},
+    sync::mpsc::{ sync_channel},
     thread,
 };
 

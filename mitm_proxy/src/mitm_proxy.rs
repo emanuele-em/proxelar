@@ -86,46 +86,6 @@ impl MitmProxy {
         //listen here and push inside MitmProxy.requests
     }
 
-    pub fn check_listener(&mut self) -> bool {
-        match self.rx.try_recv() {
-            Ok(l) => {
-                println!("received");
-                true
-            }
-            _ => {
-                false
-            },
-        }
-    }
-
-    // pub fn fetch_requests(&mut self) {
-    //     let (tx, rx) = sync_channel(1);
-    //     let mut rt = Runtime::new().unwrap();
-
-    //     let listener = self.listener.clone();
-
-    //     thread::spawn(move || {
-    //         rt.block_on(async move {
-    //             loop{
-    //                 if let Ok(request_info) = listener.as_ref().unwrap().lock().unwrap().listen().await {
-    //                     println!("proxy api response .req {:?}", request_info.req);
-    //                     println!("proxy api response .res {:?}", request_info.res);
-    //                     tx.send(RequestInfo::default());
-    //                 }
-    //             }
-    //         });
-    //     });
-    // }
-
-    // pub fn check_requests(&mut self) -> bool {
-    //     match self.rx.try_recv() {
-    //         Ok(r) => {
-    //             self.requests.push(r);
-    //             true
-    //         }
-    //         _ => false,
-    //     }
-    // }
 
     pub fn manage_theme(&mut self, ctx: &egui::Context) {
         match self.config.dark_mode {
@@ -252,7 +212,7 @@ impl MitmProxy {
 
         match self.rx.try_recv() {
             Ok(l) => {
-                Some(RequestInfo::default())
+                Some(RequestInfo::from(l))
             }
             _ => {
                 None

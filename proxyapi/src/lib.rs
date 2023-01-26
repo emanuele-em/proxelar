@@ -1,3 +1,7 @@
+use std::borrow::BorrowMut;
+use std::clone;
+use std::collections::HashMap;
+use std::hash::Hash;
 use std::net::SocketAddr;
 use std::sync::mpsc::{SyncSender};
 
@@ -5,15 +9,17 @@ use bytes::Bytes;
 
 use http_body_util::combinators::BoxBody;
 use http_body_util::{BodyExt, Empty, Full};
-use hyper::body::Incoming;
+use hyper::body::{Incoming, self};
 use hyper::client::conn::http1::Builder;
+use hyper::http::{response, request, method};
 use hyper::server::conn::http1;
 use hyper::service::service_fn;
 use hyper::upgrade::Upgraded;
-use hyper::{Method, Request, Response};
+use hyper::{Method, Request, Response, StatusCode, Version, HeaderMap, header};
 
 use tokio::net::{TcpListener, TcpStream};
 use tokio::runtime::Runtime;
+use http_body_util;
 
 #[derive(Debug)]
 pub struct ProxyAPI{
@@ -21,18 +27,131 @@ pub struct ProxyAPI{
     pub test: String
 }
 
+type Req = Request<Incoming>;
+type Res = Response<BoxBody<Bytes, hyper::Error>>;
+
+#[derive(Clone)]
 pub struct ProxyAPIResponse{
-    req: String,
-    res: Option<String>,
+    req: ReqResponse,
+    res: Option<ResResponse>,
 }
 
-impl ProxyAPIResponse {
-    
-    fn new(req: String, res: Option<String>) -> Self{
+impl ProxyAPIResponse{
+    fn new(req: ReqResponse, res: Option<ResResponse>) -> Self{
         Self { req, res }
     }
 
+    pub fn req(&self) -> &ReqResponse{
+        &self.req
+    }
+    
+    pub fn res(&self) -> &Option<ResResponse>{
+        &self.res
+    }
 }
+#[derive(Clone)]
+pub struct ReqResponse{
+    method: String,
+    uri: String,
+    version: String,
+    headers: HashMap<String, String>,
+    body: String,
+    time: i64,
+}
+
+
+impl ReqResponse {
+    fn new(
+        method: String,
+        uri: String,
+        version: String,
+        headers: HashMap<String, String>,
+        body: String,
+        time: i64
+    ) -> Self{
+        Self { 
+            method,
+            uri,
+            version,
+            headers,
+            body,
+            time
+        }
+    }
+
+    pub fn method(&self) -> &String{
+        &self.method
+    }
+
+    pub fn uri(&self) -> &String{
+        &self.uri
+    }
+
+    pub fn version(&self) -> &String{
+        &self.version
+    }
+
+    pub fn headers(&self) -> &HashMap<String, String>{
+        &self.headers
+    }
+
+    pub fn body(&self) -> &String{
+        &self.body
+    }
+
+    pub fn time(&self) -> i64{
+        self.time
+    }
+}
+
+#[derive(Clone)]
+pub struct ResResponse{
+    status: String,
+    version: String,
+    headers: HashMap<String, String>,
+    body: String,
+    time: i64,
+}
+
+impl ResResponse {
+    fn new(
+        status: String,
+        version: String,
+        headers: HashMap<String, String>,
+        body: String,
+        time: i64
+    ) -> Self{
+        Self { 
+            status,
+            version,
+            headers,
+            body,
+            time
+         }
+    }
+
+    pub fn status(&self) -> &String{
+        &self.status
+    }
+
+    pub fn version(&self) -> &String{
+        &self.version
+    }
+
+    pub fn headers(&self) -> &HashMap<String, String>{
+        &self.headers
+    }
+
+    pub fn body(&self) -> &String{
+        &self.body
+    }
+
+    pub fn time(&self) -> i64{
+        self.time
+    }
+}
+
+
 
 impl ProxyAPI{
     
@@ -41,7 +160,7 @@ impl ProxyAPI{
         let listener = TcpListener::bind(SocketAddr::from(([127, 0, 0, 1], 8100))).await.unwrap();
         println!("Listening on http://{}", addr);
 
-        let mut rt = Runtime::new().unwrap();
+        let rt = Runtime::new().unwrap();
         
                 loop {                    
                     if let Ok((stream, _)) = listener.accept().await{
@@ -63,14 +182,46 @@ impl ProxyAPI{
         
     }
 
+    fn get_versions(v: Version) -> String{
+        match v {
+            Version::HTTP_09 => "HTTP_09".to_string(),
+            Version::HTTP_10 => "HTTP_10".to_string(),
+            Version::HTTP_11 => "HTTP_11".to_string(),
+            Version::HTTP_2 => "HTTP_2".to_string(),
+            Version::HTTP_3 => "HTTP_3".to_string(),
+            _ => "__NonExhaustive".to_string(),
+        }
+    }
+
+    fn get_headers(header_map: &HeaderMap) -> HashMap<String, String>{
+        let mut headers: HashMap<String, String> = HashMap::new();
+
+        for (k, v) in header_map.iter(){
+            headers.insert(k.as_str().to_string(), v.to_str().unwrap().to_string()).unwrap_or("NO header".to_string());
+        }
+        headers
+    }
+
+    async fn get_body(body: &mut Incoming) -> String{
+        String::from_utf8(body.collect().await.unwrap().to_bytes().to_vec()).unwrap()
+    }
+
 
 
     async fn proxy(
-        req: Request<hyper::body::Incoming>,
+        mut req: Req,
         tx : SyncSender<ProxyAPIResponse>,
-    ) -> Result<Response<BoxBody<Bytes, hyper::Error>>, hyper::Error> {
+    ) -> Result<Res, hyper::Error> {
 
-        println!("req: {:?}", req);
+        let req_response = ReqResponse::new(
+            req.method().to_string(),
+            req.uri().to_string(),
+            Self::get_versions(req.version()),
+            Self::get_headers(req.headers()),
+            Self::get_body(req.body_mut()).await,
+            chrono::Local::now().timestamp_nanos()
+        );
+        //println!("req: {:?}", req);
 
         if req.method() == Method::CONNECT {
 
@@ -91,17 +242,37 @@ impl ProxyAPI{
                     }
                 });
 
-                let res = Ok(Response::new(Self::empty()));
-                tx.send(ProxyAPIResponse::new("test".to_string(), Some("test".to_string())));
-                res
+                let res = Response::new(Self::empty());
+                
+                let res_response =  Some(ResResponse::new(
+                    res.status().to_string(),
+                    Self::get_versions(res.version()),
+                    Self::get_headers(res.headers()),
+                    String::from(""),
+                    chrono::Local::now().timestamp_nanos()
+                ));
+
+                tx.send(ProxyAPIResponse { req: req_response, res: res_response });
+                Ok(res)
                 //tx.send(ProxyAPIResponse::new());
                 //Ok(Response::new(Self::empty()))
             } else {
+
                 eprintln!("CONNECT host is not a socked addr: {:?}", req.uri());
-                let mut resp = Response::new(Self::full("CONNECT must be to a socket addr"));
-                *resp.status_mut() = hyper::StatusCode::BAD_REQUEST;
-                //tx.send(ProxyAPIResponse::new(req, resp));
-                Ok(resp)
+                let body = Self::full("CONNECT must be to a socket addr");
+                let mut res = Response::new(body);
+                *res.status_mut() = hyper::StatusCode::BAD_REQUEST;
+                
+                let res_response =  Some(ResResponse::new(
+                    res.status().to_string(),
+                    Self::get_versions(res.version()),
+                    Self::get_headers(res.headers()),
+                    String::from("CONNECT must be to a socket addr"),
+                    chrono::Local::now().timestamp_nanos()
+                ));
+
+                tx.send(ProxyAPIResponse { req: req_response, res: res_response });
+                Ok(res)
             }
 
 
@@ -125,9 +296,25 @@ impl ProxyAPI{
                 }
             });
 
-            let resp = sender.send_request(req).await?;          
-            tx.send(ProxyAPIResponse::new("test".to_string(), Some("test".to_string())));
-            Ok(resp.map(|b| b.boxed()))
+            let mut res = sender.send_request(req).await?; 
+            let body = Self::get_body(res.body_mut()).await;
+            let res =  res.map(|b| b.boxed());  
+            
+            
+
+            let res_response =  Some(
+                ResResponse::new(
+                    res.status().to_string(), 
+                    Self::get_versions(res.version()), 
+                    Self::get_headers(res.headers()),
+                    body,
+                    chrono::Local::now().timestamp_nanos()
+                )
+            );
+
+            
+            tx.send(ProxyAPIResponse::new(req_response, res_response));
+            Ok(res)
         }
     }
 
