@@ -1,7 +1,4 @@
-use std::borrow::BorrowMut;
-use std::clone;
 use std::collections::HashMap;
-use std::hash::Hash;
 use std::net::SocketAddr;
 use std::sync::mpsc::{SyncSender};
 
@@ -9,17 +6,49 @@ use bytes::Bytes;
 
 use http_body_util::combinators::BoxBody;
 use http_body_util::{BodyExt, Empty, Full};
-use hyper::body::{Incoming, self};
+use hyper::body::{Incoming};
 use hyper::client::conn::http1::Builder;
-use hyper::http::{response, request, method};
 use hyper::server::conn::http1;
 use hyper::service::service_fn;
 use hyper::upgrade::Upgraded;
-use hyper::{Method, Request, Response, StatusCode, Version, HeaderMap, header};
+use hyper::{Method, Request, Response, Version, HeaderMap};
 
 use tokio::net::{TcpListener, TcpStream};
 use tokio::runtime::Runtime;
 use http_body_util;
+
+trait ToString {
+    fn to_string(&self) -> String;
+}
+
+trait ToHashString{
+    fn to_hash_string(&self) -> HashMap<String, String>;
+}
+
+impl ToHashString for HeaderMap{
+    fn to_hash_string(&self) -> HashMap<String, String>{
+        let mut headers: HashMap<String, String> = HashMap::new();
+
+        for (k, v) in self.iter(){
+            headers.insert(k.as_str().to_string(), v.to_str().unwrap().to_string()).unwrap_or("NO header".to_string());
+        }
+        headers
+    }
+}
+
+impl ToString for Version{
+    fn to_string(&self) -> String{
+
+        match *self {
+            Version::HTTP_09 => "HTTP_09".to_string(),
+            Version::HTTP_10 => "HTTP_10".to_string(),
+            Version::HTTP_11 => "HTTP_11".to_string(),
+            Version::HTTP_2 => "HTTP_2".to_string(),
+            Version::HTTP_3 => "HTTP_3".to_string(),
+            _ => "__NonExhaustive".to_string(),
+        }
+    }
+}
 
 #[derive(Debug)]
 pub struct ProxyAPI{
@@ -159,8 +188,6 @@ impl ProxyAPI{
         let addr = SocketAddr::from(([127, 0, 0, 1], 8100));
         let listener = TcpListener::bind(SocketAddr::from(([127, 0, 0, 1], 8100))).await.unwrap();
         println!("Listening on http://{}", addr);
-
-        let rt = Runtime::new().unwrap();
         
                 loop {                    
                     if let Ok((stream, _)) = listener.accept().await{
@@ -182,28 +209,10 @@ impl ProxyAPI{
         
     }
 
-    fn get_versions(v: Version) -> String{
-        match v {
-            Version::HTTP_09 => "HTTP_09".to_string(),
-            Version::HTTP_10 => "HTTP_10".to_string(),
-            Version::HTTP_11 => "HTTP_11".to_string(),
-            Version::HTTP_2 => "HTTP_2".to_string(),
-            Version::HTTP_3 => "HTTP_3".to_string(),
-            _ => "__NonExhaustive".to_string(),
-        }
-    }
-
-    fn get_headers(header_map: &HeaderMap) -> HashMap<String, String>{
-        let mut headers: HashMap<String, String> = HashMap::new();
-
-        for (k, v) in header_map.iter(){
-            headers.insert(k.as_str().to_string(), v.to_str().unwrap().to_string()).unwrap_or("NO header".to_string());
-        }
-        headers
-    }
+    
 
     async fn get_body(body: &mut Incoming) -> String{
-        String::from_utf8(body.collect().await.unwrap().to_bytes().to_vec()).unwrap()
+        body.collect().await.unwrap().to_bytes().to_vec().iter().map(|c| c.to_string()).collect::<String>()
     }
 
 
@@ -213,24 +222,19 @@ impl ProxyAPI{
         tx : SyncSender<ProxyAPIResponse>,
     ) -> Result<Res, hyper::Error> {
 
-        let req_response = ReqResponse::new(
-            req.method().to_string(),
-            req.uri().to_string(),
-            Self::get_versions(req.version()),
-            Self::get_headers(req.headers()),
-            Self::get_body(req.body_mut()).await,
-            chrono::Local::now().timestamp_nanos()
-        );
-        //println!("req: {:?}", req);
+        // let req_response = ReqResponse::new(
+        //     req.method().to_string(),
+        //     req.uri().to_string(),
+        //     req.version().to_string(),
+        //     req.headers().to_hash_string(),
+        //     Self::get_body(req.body_mut()).await,
+        //     chrono::Local::now().timestamp_nanos()
+        // );
+        println!("req: {:?}", req);
 
         if req.method() == Method::CONNECT {
 
-            
-
             if let Some(addr) = Self::host_addr(req.uri()) {
-
-                
-
                 tokio::task::spawn(async move {
                     match hyper::upgrade::on(req).await {
                         Ok(upgraded) => {
@@ -241,21 +245,19 @@ impl ProxyAPI{
                         Err(err) => eprintln!("upgrade error: {}", err),
                     }
                 });
-
-                let res = Response::new(Self::empty());
-                
+                let res = Response::new(Self::empty()); 
                 let res_response =  Some(ResResponse::new(
                     res.status().to_string(),
-                    Self::get_versions(res.version()),
-                    Self::get_headers(res.headers()),
+                    res.version().to_string(),
+                    res.headers().to_hash_string(),
                     String::from(""),
                     chrono::Local::now().timestamp_nanos()
                 ));
+                // if let Err(e) = tx.send(ProxyAPIResponse { req: req_response, res: res_response }) {
+                //     eprintln!("Error on sending Response to main thread: {}", e);
+                // }
 
-                tx.send(ProxyAPIResponse { req: req_response, res: res_response });
                 Ok(res)
-                //tx.send(ProxyAPIResponse::new());
-                //Ok(Response::new(Self::empty()))
             } else {
 
                 eprintln!("CONNECT host is not a socked addr: {:?}", req.uri());
@@ -265,24 +267,27 @@ impl ProxyAPI{
                 
                 let res_response =  Some(ResResponse::new(
                     res.status().to_string(),
-                    Self::get_versions(res.version()),
-                    Self::get_headers(res.headers()),
+                    res.version().to_string(),
+                    res.headers().to_hash_string(),
                     String::from("CONNECT must be to a socket addr"),
                     chrono::Local::now().timestamp_nanos()
                 ));
 
-                tx.send(ProxyAPIResponse { req: req_response, res: res_response });
+                // if let Err(e) = tx.send(ProxyAPIResponse { req: req_response, res: res_response }){
+                //     eprintln!("Error on sending Response to main thread: {}", e);
+                // }
                 Ok(res)
             }
 
 
         } else {
 
-            let host = req.uri().host().expect("no host");
+            let host = req.uri().host().unwrap_or("/");
             let port = req.uri().port_u16().unwrap_or(80);
             let addr = format!("{}:{}", host, port);
 
             let stream = TcpStream::connect(addr).await.unwrap();
+
 
             let (mut sender, conn) = Builder::new()
                 .preserve_header_case(true)
@@ -296,7 +301,7 @@ impl ProxyAPI{
                 }
             });
 
-            let mut res = sender.send_request(req).await?; 
+            let mut res = sender.send_request(req).await?; //send the request and wait the response
             let body = Self::get_body(res.body_mut()).await;
             let res =  res.map(|b| b.boxed());  
             
@@ -305,15 +310,18 @@ impl ProxyAPI{
             let res_response =  Some(
                 ResResponse::new(
                     res.status().to_string(), 
-                    Self::get_versions(res.version()), 
-                    Self::get_headers(res.headers()),
+                    res.version().to_string(), 
+                    res.headers().to_hash_string(),
                     body,
                     chrono::Local::now().timestamp_nanos()
                 )
             );
 
             
-            tx.send(ProxyAPIResponse::new(req_response, res_response));
+            
+            // if let Err(e) = tx.send(ProxyAPIResponse::new(req_response, res_response)){
+            //     eprintln!("Error on sending Response to main thread: {}", e);
+            // }
             Ok(res)
         }
     }
@@ -335,7 +343,11 @@ impl ProxyAPI{
     }
 
     async fn tunnel(mut upgraded: Upgraded, addr: String) -> std::io::Result<()> {
-        let mut server = TcpStream::connect(addr).await?;
+        let mut server = TcpStream::connect(addr).await?; //it should be the stream
+
+        //addr is the https domain
+
+        //let mut res = sender.send_request(req).await?; //send the request and wait the response
 
         let (from_client, from_server) =
             tokio::io::copy_bidirectional(&mut upgraded, &mut server).await?;

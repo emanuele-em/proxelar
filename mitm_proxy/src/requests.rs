@@ -3,9 +3,7 @@ use std::collections::HashMap;
 use eframe::egui::{self};
 use egui_extras::TableRow;
 use proxyapi::ProxyAPIResponse;
-use rand::{Rng, distributions::uniform::SampleBorrow};
 
-use crate::PADDING;
 
 struct Request {
     method: String,
@@ -64,12 +62,6 @@ impl Response{
 
 pub struct Details;
 
-impl Details{
-    fn new() -> Self{
-        Self
-    }
-}
-
 #[derive(PartialEq)]
 pub enum InfoOptions {
     Request,
@@ -90,8 +82,6 @@ pub struct RequestInfo {
 
 impl Default for RequestInfo {
     fn default() -> Self {
-        let mut rng = rand::thread_rng();
-        let a = rng.gen::<u32>();
         RequestInfo {
             request: None,
             response: None,
@@ -101,20 +91,17 @@ impl Default for RequestInfo {
 }
 
 impl From<ProxyAPIResponse> for RequestInfo{
+    
     fn from(value: ProxyAPIResponse) -> Self {
-
-        let request = if let r = value.req(){
-            Some(Request::new(
+        let r = value.req();
+        let request = Some(Request::new(
                 r.method().to_string(),
                r.uri().to_string(),
                r.version().to_string(),
                r.headers().into_iter().map(|h| (h.0.to_string(), h.1.to_string())).collect(),
                r.body().to_string(),
                r.time()
-           ))
-        } else {
-            None
-        };
+           ));
         
 
         let response = if let Some(r) = value.res(){
@@ -192,11 +179,12 @@ impl RequestInfo {
     }
 
     pub fn show_details(&mut self, ui: &mut egui::Ui) {
-        if let Some(d) = &self.details {
-            ui.label("some details");
-        } else {
-            ui.label("No Details");
-        }
+        ui.label(
+            match &self.details {
+                Some(_) => "Some details",
+                None => "No details"
+            }
+        );
     }
 
     pub fn render_row(&mut self, row: &mut TableRow) {
