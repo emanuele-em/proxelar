@@ -3,7 +3,8 @@
 members = [
     "mitm_proxy",
     "proxyapi",
-    "proxytls"
+    "proxytls",
+    "certs"
 ]
 
 
