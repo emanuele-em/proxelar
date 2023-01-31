@@ -6,9 +6,8 @@ edition = "2021"
 # See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
 
 [dependencies]
-hyper = { version = "1.0.0-rc.2", features = ["full"] }
-tokio = { version = "1", features = ["full"] }
-http-body-util = "0.1.0-rc.2"
-bytes = "1"
-http-body = "0.4.5"
-chrono = "0.4.23"
+async-trait = "0.1.64"
+hyper = "0.14.23"
+openssl = "0.10.45"
+tokio-rustls = "0.23.4"
+tokio-tungstenite = "0.18.0"
