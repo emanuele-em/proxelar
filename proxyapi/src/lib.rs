@@ -1,8 +1,7 @@
-mod decoder;
 mod error;
 mod rewind;
-mod proxy;
-mod noop;
+pub mod proxy;
+mod output;
 
 pub mod ca;
 
@@ -20,13 +19,16 @@ pub use tokio_tungstenite;
 // pub use decoder;
 // pub use error;
 // pub use noop;
-// pub use proxy::*;
+pub use proxy::*;
+pub use output::*;
 
 #[derive(Debug)]
 pub enum RequestResponse{
     Request(Request<Body>),
     Response(Response<Body>),
 }
+
+
 
 impl From<Request<Body>> for RequestResponse{
     fn from(req: Request<Body>) -> Self{

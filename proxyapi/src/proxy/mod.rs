@@ -1,7 +1,78 @@
 mod internal;
+//pub mod builder;
 
-pub mod builder;
+use std::{future::Future, net::{SocketAddr}, sync::{Arc, mpsc::SyncSender}, convert::Infallible};
 
-use crate::{ca::Ca, Error, HttpHandler, WebSocketHandler};
+use internal::InternalProxy;
 
-use builder::{AddrListenerServer, WantsAddr}
+use crate::{ca::{Ssl}, error::Error, output};
+
+//use builder::{AddrListenerServer, WantsAddr};
+
+
+use hyper::{ server::conn::{AddrStream}, service::{make_service_fn, service_fn}, Client, Server};
+
+use hyper_rustls::{ HttpsConnectorBuilder};
+
+
+pub struct Proxy{
+    addr: SocketAddr,
+    tx: Option<SyncSender<output::Output>>
+}
+
+impl Proxy {
+
+    pub fn new(addr: SocketAddr, tx: Option<SyncSender<output::Output>>) -> Self{
+        Self {
+            addr,
+            tx
+        }
+    }
+
+    pub async fn start<F: Future<Output = ()>>(self, signal: F) -> Result<(), Error>{
+
+        let addr = self.addr.clone();
+
+        let https =  HttpsConnectorBuilder::new()
+            .with_webpki_roots()
+            .https_or_http()
+            .enable_http1()
+            .build();
+        
+        let client = Client::builder()
+            .http1_preserve_header_case(true)
+            .http1_title_case_headers(true)
+            .build(https);
+
+        let server_builder = Server::try_bind(&addr)?
+            .http1_preserve_header_case(true)
+            .http1_title_case_headers(true);
+        
+        let ssl = Arc::new(Ssl::new());
+        
+        let make_service = make_service_fn(move |conn: &AddrStream| {
+            let client = client.clone();
+            let ca = Arc::clone(&ssl);
+            let http_handler = output::Output::new(self.tx.clone().unwrap());
+            let websocket_connector = None;
+            let remote_addr = conn.remote_addr();
+            async move {
+                Ok::<_, Infallible>(service_fn(move |req|{
+                    InternalProxy{
+                        ca: Arc::clone(&ca),
+                        client: client.clone(),
+                        http_handler: http_handler.clone(),
+                        remote_addr,
+                        websocket_connector: websocket_connector.clone(),
+                    }
+                    .proxy(req)
+                }))
+            } 
+        });
+        
+        server_builder.serve(make_service)
+            .with_graceful_shutdown(signal)
+            .await
+            .map_err(Into::into)
+    }
+}

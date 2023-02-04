@@ -3,7 +3,7 @@ mod requests;
 
 use std::{
     sync::mpsc::{ sync_channel},
-    thread,
+    thread, net::SocketAddr,
 };
 
 use crate::mitm_proxy::MitmProxy;
@@ -12,7 +12,7 @@ use eframe::{
     egui::{self, CentralPanel, Vec2},
     run_native, App,
 };
-use proxyapi::ProxyAPI;
+use proxyapi::proxy::Proxy;
 use tokio::runtime::Runtime;
 
 static X: f32 = 980.;
@@ -39,6 +39,12 @@ impl App for MitmProxy {
     }
 }
 
+async fn shutdown_signal() {
+    tokio::signal::ctrl_c()
+        .await
+        .expect("Failed to install CTRL+C signal handler");
+}
+
 fn main() {
     let mut native_options = eframe::NativeOptions::default();
     native_options.initial_window_size = Some(Vec2::new(X, Y));
@@ -48,10 +54,11 @@ fn main() {
 
     let (tx, rx) = sync_channel(1);
     let rt = Runtime::new().unwrap();
+    let addr = SocketAddr::new([192,168,1,10].into(), 8080);
 
     thread::spawn(move || {
         rt.block_on( async move {
-                ProxyAPI::new(tx.clone()).await;
+                Proxy::new(addr, Some(tx.clone())).start(shutdown_signal()).await;
         })
     });
 

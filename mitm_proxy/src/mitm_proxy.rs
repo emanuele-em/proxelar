@@ -1,9 +1,7 @@
 use std::{
     sync::{
-        mpsc::{channel, sync_channel, Receiver, Sender, SyncSender},
-        Arc, Mutex,
+        mpsc::{Receiver},
     },
-    thread,
 };
 
 use crate::{
@@ -20,9 +18,8 @@ use eframe::{
     Frame,
 };
 use egui_extras::{Column, TableBuilder};
-use proxyapi::{ProxyAPI, ProxyAPIResponse};
+use proxyapi::*;
 use serde::{Deserialize, Serialize};
-use tokio::runtime::Runtime;
 
 #[derive(Serialize, Deserialize)]
 struct MitmProxyConfig {
@@ -65,17 +62,15 @@ pub struct MitmProxy {
     requests: Vec<RequestInfo>,
     config: MitmProxyConfig,
     state: MitmProxyState,
-    rx: Receiver<ProxyAPIResponse>,
+    rx: Receiver<Output>,
 }
 
 impl MitmProxy {
-    pub fn new(cc: &eframe::CreationContext<'_>, rx: Receiver<ProxyAPIResponse>) -> Self {
+    pub fn new(cc: &eframe::CreationContext<'_>, rx: Receiver<Output>) -> Self {
         Self::configure_fonts(cc);
         let iter = (0..20).map(|a| requests::RequestInfo::default());
         let config: MitmProxyConfig = confy::load("MitmProxy", None).unwrap_or_default();
         let state = MitmProxyState::new();
-
-        //thread::spawn(move || fetch_listener(&mut listener_tx));
 
         MitmProxy {
             requests: vec![],
@@ -83,7 +78,6 @@ impl MitmProxy {
             state,
             rx
         }
-        //listen here and push inside MitmProxy.requests
     }
 
 
@@ -110,7 +104,6 @@ impl MitmProxy {
 
         cc.egui_ctx.set_fonts(fonts);
 
-        //let mut style = (*cc.egui_ctx.style()).clone();
         let mut style = Style::default();
 
         style.text_styles = [
@@ -132,8 +125,8 @@ impl MitmProxy {
         let mut table = TableBuilder::new(ui)
             .striped(self.config.striped)
             .cell_layout(egui::Layout::left_to_right(egui::Align::Center))
-            .columns(Column::remainder().resizable(self.config.resizable), 5)
-            .column(Column::auto())
+            .column(Column::remainder().at_most(200.0).resizable(self.config.resizable))
+            .columns(Column::auto(), 5)
             .min_scrolled_height(0.0);
 
         if let Some(row_nr) = self.config.scroll_to_row.take() {
