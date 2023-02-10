@@ -2,6 +2,7 @@ use std::{collections::HashMap, sync::mpsc::SyncSender, ops::Deref};
 
 
 use async_trait::async_trait;
+use futures::StreamExt;
 use http::{HeaderMap, Version, Response, Request};
 use hyper::{Body, body::HttpBody};
 
@@ -20,17 +21,26 @@ impl Output {
     }
 
     async fn get_body(body: &mut Body) -> String{
-        if let Some(body) = body.data().await {
-            return body.unwrap()
-            .to_vec()
-            .iter()
-            .map(|c| c.to_string())
-            .collect::<String>()
-        }
-
-        "".to_string()
+        String::from_utf8(hyper::body::to_bytes(body)
+            .await
+            .unwrap()
+            .into_iter()
+            .collect()
+        ).expect("Problem converting body to string")
         
     }
+
+    // async fn sanitize_body(body: &mut Body){
+    //     let stream = String::from_utf8(hyper::body::to_bytes(body)
+    //         .await
+    //         .unwrap()
+    //         .into_iter()
+    //         .collect()
+    //     ).expect("Problem converting body to string");
+
+    //     let stream = futures::stream::iter(Ok(stream.lines()));
+    //     *body = hyper::body::Body::wrap_stream(stream);
+    // }
 
     pub fn set_req(&mut self, req: OutputRequest) -> Self{
         Self { 
@@ -72,7 +82,7 @@ impl HttpHandler for Output {
             req.uri().to_string(),
             req.version().to_string(),
             req.headers().to_hash_string(),
-            Self::get_body(req.body_mut()).await,
+            "Body".to_string(),
             chrono::Local::now().timestamp_nanos(),
         );
 
@@ -81,21 +91,22 @@ impl HttpHandler for Output {
         req.into()
     }
 
-    async fn handle_response(&mut self, _ctx: &HttpContext, mut res: Response<Body>) -> Response<Body> {
+    async fn handle_response(&mut self, _ctx: &HttpContext, res: Response<Body>) -> Response<Body> {
         println!("res: {:?}\n\n", res);
-
         let output_response =  OutputResponse::new(
             res.status().to_string(),
             res.version().to_string(),
             res.headers().to_hash_string(),
-            Self::get_body(res.body_mut()).await,
+            // Self::get_body(res.body_mut()).await,
+            "Response body".to_string(),
             chrono::Local::now().timestamp_nanos()
         );
 
         self
         .set_res(output_response)
         .send_output();
-        
+
+        //Self::sanitize_body(res.body_mut());
         res
     }
     

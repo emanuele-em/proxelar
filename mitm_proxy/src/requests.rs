@@ -207,7 +207,7 @@ impl RequestInfo {
         });
 
         row.col(|ui| {
-            ui.label(&res.body);
+            ui.label(format!("{} bytes", &res.body.len()));
         });
 
         row.col(|ui| {

@@ -25,16 +25,15 @@ static PADDING: f32 = 20.;
 
 impl App for MitmProxy {
     fn update(&mut self, ctx: &egui::Context, frame: &mut eframe::Frame) {
+
+        ctx.request_repaint();
+
         self.manage_theme(ctx);
 
         self.render_top_panel(ctx, frame);
-
         
         CentralPanel::default().show(ctx, |ui|{
-
-                // self.fetch_requests();
                 self.render_columns(ui);
-
         });
     }
 }
@@ -58,7 +57,9 @@ fn main() {
 
     thread::spawn(move || {
         rt.block_on( async move {
-                Proxy::new(addr, Some(tx.clone())).start(shutdown_signal()).await;
+                if let Err(e) = Proxy::new(addr, Some(tx.clone())).start(shutdown_signal()).await{
+                    eprintln!("Error running proxy on {:?}: {e}", addr);
+                }
         })
     });
 

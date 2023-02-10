@@ -123,15 +123,19 @@ impl MitmProxy {
         };
 
         let mut table = TableBuilder::new(ui)
+            .auto_shrink([false; 2])
+            .stick_to_bottom(true)
             .striped(self.config.striped)
             .cell_layout(egui::Layout::left_to_right(egui::Align::Center))
-            .column(Column::remainder().at_most(200.0).resizable(self.config.resizable))
-            .columns(Column::auto(), 5)
+            .column(Column::remainder().resizable(true).clip(true))
+            .column(Column::auto())
+            .column(Column::auto())
+            .column(Column::auto())
+            .column(Column::auto())
+            .column(Column::auto())
             .min_scrolled_height(0.0);
 
-        if let Some(row_nr) = self.config.scroll_to_row.take() {
-            table = table.scroll_to_row(row_nr, None)
-        }
+        //table = table.scroll_to_row(self.requests.len(), None);
 
         table
             .header(PADDING, |mut header| {
@@ -159,7 +163,7 @@ impl MitmProxy {
             })
             .body(|body| {
                 body.rows(text_height, self.requests.len(), |row_index, mut row| {
-                    self.requests[row_index].render_row(&mut row);
+                    self.requests.get_mut(row_index).expect("Problem with index").render_row(&mut row);
                     row.col(|ui| {
                         if ui.button("🔎").clicked() {
                             self.state.selected_request = Some(row_index);
