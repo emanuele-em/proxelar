@@ -5,7 +5,7 @@ use std::{
 };
 
 use crate::{
-    requests::{self, InfoOptions, RequestInfo},
+    requests::{InfoOptions, RequestInfo},
     PADDING,
 };
 
@@ -68,7 +68,6 @@ pub struct MitmProxy {
 impl MitmProxy {
     pub fn new(cc: &eframe::CreationContext<'_>, rx: Receiver<Output>) -> Self {
         Self::configure_fonts(cc);
-        let iter = (0..20).map(|a| requests::RequestInfo::default());
         let config: MitmProxyConfig = confy::load("MitmProxy", None).unwrap_or_default();
         let state = MitmProxyState::new();
 
@@ -122,7 +121,7 @@ impl MitmProxy {
             _ => egui::TextStyle::Button.resolve(ui.style()).size + PADDING,
         };
 
-        let mut table = TableBuilder::new(ui)
+        let table = TableBuilder::new(ui)
             .auto_shrink([false; 2])
             .stick_to_bottom(true)
             .striped(self.config.striped)
@@ -225,7 +224,7 @@ impl MitmProxy {
 
         if let Some(i) = self.state.selected_request {
             ui.columns(2, |columns| {
-                ScrollArea::vertical()
+                ScrollArea::both()
                     .id_source("requests_table")
                     .show(&mut columns[0], |ui| self.table_ui(ui));
 
@@ -250,7 +249,7 @@ impl MitmProxy {
             egui::menu::bar(ui, |ui| -> egui::InnerResponse<_> {
                 ui.with_layout(Layout::right_to_left(eframe::emath::Align::Min), |ui| {
                     let close_btn = ui.button("❌");
-                    let refresh_btn = ui.button("🔄");
+                    let clean_btn = ui.button("🚫");
                     let theme_btn = ui.button(match self.config.dark_mode {
                         true => "🔆",
                         false => "🌙",
@@ -259,7 +258,9 @@ impl MitmProxy {
                     if close_btn.clicked() {
                         frame.close();
                     }
-                    if refresh_btn.clicked() {}
+                    if clean_btn.clicked() {
+                        self.requests = vec![];
+                    }
 
                     if theme_btn.clicked() {
                         self.config.dark_mode = !self.config.dark_mode

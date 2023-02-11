@@ -1,10 +1,9 @@
-use std::{collections::HashMap, sync::mpsc::SyncSender, ops::Deref};
+use std::{collections::HashMap, sync::mpsc::SyncSender};
 
 
 use async_trait::async_trait;
-use futures::StreamExt;
 use http::{HeaderMap, Version, Response, Request};
-use hyper::{Body, body::HttpBody};
+use hyper::{Body};
 
 use crate::{HttpHandler, HttpContext, RequestResponse};
 
@@ -20,15 +19,15 @@ impl Output {
         Self { tx, req: None, res: None }
     }
 
-    async fn get_body(body: &mut Body) -> String{
-        String::from_utf8(hyper::body::to_bytes(body)
-            .await
-            .unwrap()
-            .into_iter()
-            .collect()
-        ).expect("Problem converting body to string")
+    // async fn get_body(body: &mut Body) -> String{
+    //     String::from_utf8(hyper::body::to_bytes(body)
+    //         .await
+    //         .unwrap()
+    //         .into_iter()
+    //         .collect()
+    //     ).expect("Problem converting body to string")
         
-    }
+    // }
 
     // async fn sanitize_body(body: &mut Body){
     //     let stream = String::from_utf8(hyper::body::to_bytes(body)
@@ -75,7 +74,7 @@ impl Output {
 
 #[async_trait]
 impl HttpHandler for Output {
-    async fn handle_request(&mut self, _ctx: &HttpContext, mut req: Request<Body>, ) -> RequestResponse {
+    async fn handle_request(&mut self, _ctx: &HttpContext, req: Request<Body>, ) -> RequestResponse {
         println!("request{:?}\n", req);
         let output_request = OutputRequest::new(
             req.method().to_string(),
