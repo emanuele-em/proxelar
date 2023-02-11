@@ -19,28 +19,6 @@ impl Output {
         Self { tx, req: None, res: None }
     }
 
-    // async fn get_body(body: &mut Body) -> String{
-    //     String::from_utf8(hyper::body::to_bytes(body)
-    //         .await
-    //         .unwrap()
-    //         .into_iter()
-    //         .collect()
-    //     ).expect("Problem converting body to string")
-        
-    // }
-
-    // async fn sanitize_body(body: &mut Body){
-    //     let stream = String::from_utf8(hyper::body::to_bytes(body)
-    //         .await
-    //         .unwrap()
-    //         .into_iter()
-    //         .collect()
-    //     ).expect("Problem converting body to string");
-
-    //     let stream = futures::stream::iter(Ok(stream.lines()));
-    //     *body = hyper::body::Body::wrap_stream(stream);
-    // }
-
     pub fn set_req(&mut self, req: OutputRequest) -> Self{
         Self { 
             tx: self.clone().tx, 
