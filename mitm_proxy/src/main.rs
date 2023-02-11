@@ -10,7 +10,7 @@ use crate::mitm_proxy::MitmProxy;
 
 use eframe::{
     egui::{self, CentralPanel, Vec2},
-    run_native, App,
+    run_native, App
 };
 use proxyapi::proxy::Proxy;
 use tokio::runtime::Runtime;
@@ -44,9 +44,27 @@ async fn shutdown_signal() {
         .expect("Failed to install CTRL+C signal handler");
 }
 
+fn load_icon(path: &str) -> eframe::IconData {
+    let (icon_rgba, icon_width, icon_height) = {
+        let image = image::open(path)
+            .expect("Failed to open icon path")
+            .into_rgba8();
+        let (width, height) = image.dimensions();
+        let rgba = image.into_raw();
+        (rgba, width, height)
+    };
+
+    eframe::IconData {
+        rgba: icon_rgba,
+        width: icon_width,
+        height: icon_height,
+    }
+}
+
 fn main() {
     let mut native_options = eframe::NativeOptions::default();
     native_options.initial_window_size = Some(Vec2::new(X, Y));
+    native_options.icon_data = Some(load_icon("./assets/logo.png"));
 
     // create the app with listener false
     // update listener when it is true

@@ -14,3 +14,4 @@ serde = { version = "1", features = ["derive"] }
 proxyapi = {path = "../proxyapi"}
 tokio = { version = "1", features = ["full"] }
 rand = "0.8.5"
+image = "0.24.5"
