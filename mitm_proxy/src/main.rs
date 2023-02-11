@@ -71,7 +71,7 @@ fn main() {
 
     let (tx, rx) = sync_channel(1);
     let rt = Runtime::new().unwrap();
-    let addr = SocketAddr::new([192,168,1,10].into(), 8080);
+    let addr = SocketAddr::new([127,0,0,1].into(), 8100);
 
     thread::spawn(move || {
         rt.block_on( async move {
