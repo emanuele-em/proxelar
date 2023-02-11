@@ -2,8 +2,7 @@ use std::collections::HashMap;
 
 use eframe::egui::{self};
 use egui_extras::TableRow;
-use proxyapi::ProxyAPIResponse;
-
+use proxyapi::*;
 
 struct Request {
     method: String,
@@ -11,18 +10,18 @@ struct Request {
     version: String,
     headers: HashMap<String, String>,
     body: String,
-    time: i64
+    time: i64,
 }
 
-impl Request{
+impl Request {
     fn new(
         method: String,
         uri: String,
         version: String,
         headers: HashMap<String, String>,
         body: String,
-        time: i64
-    ) -> Self{
+        time: i64,
+    ) -> Self {
         Self {
             method,
             uri,
@@ -42,20 +41,20 @@ pub struct Response {
     time: i64,
 }
 
-impl Response{
+impl Response {
     fn new(
         status: String,
         version: String,
         headers: HashMap<String, String>,
         body: String,
-        time: i64
-    ) -> Self{
+        time: i64,
+    ) -> Self {
         Self {
             status,
             version,
             headers,
             body,
-            time
+            time,
         }
     }
 }
@@ -90,42 +89,48 @@ impl Default for RequestInfo {
     }
 }
 
-impl From<ProxyAPIResponse> for RequestInfo{
-    
-    fn from(value: ProxyAPIResponse) -> Self {
-        let r = value.req();
-        let request = Some(Request::new(
+impl From<Output> for RequestInfo {
+    fn from(value: Output) -> Self {
+        let request = match value.req() {
+            Some(r) => Some(Request::new(
                 r.method().to_string(),
-               r.uri().to_string(),
-               r.version().to_string(),
-               r.headers().into_iter().map(|h| (h.0.to_string(), h.1.to_string())).collect(),
-               r.body().to_string(),
-               r.time()
-           ));
-        
+                r.uri().to_string(),
+                r.version().to_string(),
+                r.headers()
+                    .into_iter()
+                    .map(|h| (h.0.to_string(), h.1.to_string()))
+                    .collect(),
+                r.body().to_string(),
+                r.time(),
+            )),
+            None => None,
+        };
 
-        let response = if let Some(r) = value.res(){
-            Some(
-                Response::new(
-                    r.status().to_string(),
-                    r.version().to_string(),
-                    r.headers().into_iter().map(|h| (h.0.to_string(), h.1.to_string())).collect(),
-                    r.body().to_string(),
-                    r.time(),
-                )
-            )
-        } else {
-            None
+        let response = match value.res() {
+            Some(r) => Some(Response::new(
+                r.status().to_string(),
+                r.version().to_string(),
+                r.headers()
+                    .into_iter()
+                    .map(|h| (h.0.to_string(), h.1.to_string()))
+                    .collect(),
+                r.body().to_string(),
+                r.time(),
+            )),
+            None => None,
         };
 
         let details = None;
 
-        RequestInfo { request, response, details }
+        RequestInfo {
+            request,
+            response,
+            details,
+        }
     }
 }
 
 impl RequestInfo {
-
     pub fn show_request(&mut self, ui: &mut egui::Ui) {
         if let Some(r) = &self.request {
             ui.strong("Method");
@@ -138,7 +143,7 @@ impl RequestInfo {
             ui.label(&r.version);
 
             ui.strong("Headers");
-            for (k, v) in r.headers.iter(){
+            for (k, v) in r.headers.iter() {
                 ui.label(format!("{}: {}", &k, &v));
             }
 
@@ -164,7 +169,7 @@ impl RequestInfo {
             ui.label(&r.status);
 
             ui.strong("Headers");
-            for (k, v) in r.headers.iter(){
+            for (k, v) in r.headers.iter() {
                 ui.label(format!("{}: {}", &k, &v));
             }
 
@@ -179,12 +184,10 @@ impl RequestInfo {
     }
 
     pub fn show_details(&mut self, ui: &mut egui::Ui) {
-        ui.label(
-            match &self.details {
-                Some(_) => "Some details",
-                None => "No details"
-            }
-        );
+        ui.label(match &self.details {
+            Some(_) => "Some details",
+            None => "No details",
+        });
     }
 
     pub fn render_row(&mut self, row: &mut TableRow) {
@@ -204,14 +207,11 @@ impl RequestInfo {
         });
 
         row.col(|ui| {
-            ui.label(&res.body);
+            ui.label(format!("{} bytes", &res.body.len()));
         });
 
         row.col(|ui| {
             ui.label(time.to_string());
         });
-
     }
 }
-
-

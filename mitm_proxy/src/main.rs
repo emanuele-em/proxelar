@@ -3,7 +3,7 @@ mod requests;
 
 use std::{
     sync::mpsc::{ sync_channel},
-    thread,
+    thread, net::SocketAddr,
 };
 
 use crate::mitm_proxy::MitmProxy;
@@ -12,7 +12,7 @@ use eframe::{
     egui::{self, CentralPanel, Vec2},
     run_native, App,
 };
-use proxyapi::ProxyAPI;
+use proxyapi::proxy::Proxy;
 use tokio::runtime::Runtime;
 
 static X: f32 = 980.;
@@ -25,18 +25,23 @@ static PADDING: f32 = 20.;
 
 impl App for MitmProxy {
     fn update(&mut self, ctx: &egui::Context, frame: &mut eframe::Frame) {
+
+        ctx.request_repaint();
+
         self.manage_theme(ctx);
 
         self.render_top_panel(ctx, frame);
-
         
         CentralPanel::default().show(ctx, |ui|{
-
-                // self.fetch_requests();
                 self.render_columns(ui);
-
         });
     }
+}
+
+async fn shutdown_signal() {
+    tokio::signal::ctrl_c()
+        .await
+        .expect("Failed to install CTRL+C signal handler");
 }
 
 fn main() {
@@ -48,10 +53,13 @@ fn main() {
 
     let (tx, rx) = sync_channel(1);
     let rt = Runtime::new().unwrap();
+    let addr = SocketAddr::new([192,168,1,10].into(), 8080);
 
     thread::spawn(move || {
         rt.block_on( async move {
-                ProxyAPI::new(tx.clone()).await;
+                if let Err(e) = Proxy::new(addr, Some(tx.clone())).start(shutdown_signal()).await{
+                    eprintln!("Error running proxy on {:?}: {e}", addr);
+                }
         })
     });
 

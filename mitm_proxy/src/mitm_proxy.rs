@@ -1,13 +1,11 @@
 use std::{
     sync::{
-        mpsc::{channel, sync_channel, Receiver, Sender, SyncSender},
-        Arc, Mutex,
+        mpsc::{Receiver},
     },
-    thread,
 };
 
 use crate::{
-    requests::{self, InfoOptions, RequestInfo},
+    requests::{InfoOptions, RequestInfo},
     PADDING,
 };
 
@@ -20,9 +18,8 @@ use eframe::{
     Frame,
 };
 use egui_extras::{Column, TableBuilder};
-use proxyapi::{ProxyAPI, ProxyAPIResponse};
+use proxyapi::*;
 use serde::{Deserialize, Serialize};
-use tokio::runtime::Runtime;
 
 #[derive(Serialize, Deserialize)]
 struct MitmProxyConfig {
@@ -65,17 +62,14 @@ pub struct MitmProxy {
     requests: Vec<RequestInfo>,
     config: MitmProxyConfig,
     state: MitmProxyState,
-    rx: Receiver<ProxyAPIResponse>,
+    rx: Receiver<Output>,
 }
 
 impl MitmProxy {
-    pub fn new(cc: &eframe::CreationContext<'_>, rx: Receiver<ProxyAPIResponse>) -> Self {
+    pub fn new(cc: &eframe::CreationContext<'_>, rx: Receiver<Output>) -> Self {
         Self::configure_fonts(cc);
-        let iter = (0..20).map(|a| requests::RequestInfo::default());
         let config: MitmProxyConfig = confy::load("MitmProxy", None).unwrap_or_default();
         let state = MitmProxyState::new();
-
-        //thread::spawn(move || fetch_listener(&mut listener_tx));
 
         MitmProxy {
             requests: vec![],
@@ -83,7 +77,6 @@ impl MitmProxy {
             state,
             rx
         }
-        //listen here and push inside MitmProxy.requests
     }
 
 
@@ -110,7 +103,6 @@ impl MitmProxy {
 
         cc.egui_ctx.set_fonts(fonts);
 
-        //let mut style = (*cc.egui_ctx.style()).clone();
         let mut style = Style::default();
 
         style.text_styles = [
@@ -129,16 +121,20 @@ impl MitmProxy {
             _ => egui::TextStyle::Button.resolve(ui.style()).size + PADDING,
         };
 
-        let mut table = TableBuilder::new(ui)
+        let table = TableBuilder::new(ui)
+            .auto_shrink([false; 2])
+            .stick_to_bottom(true)
             .striped(self.config.striped)
             .cell_layout(egui::Layout::left_to_right(egui::Align::Center))
-            .columns(Column::remainder().resizable(self.config.resizable), 5)
+            .column(Column::remainder().resizable(true).clip(true))
+            .column(Column::auto())
+            .column(Column::auto())
+            .column(Column::auto())
+            .column(Column::auto())
             .column(Column::auto())
             .min_scrolled_height(0.0);
 
-        if let Some(row_nr) = self.config.scroll_to_row.take() {
-            table = table.scroll_to_row(row_nr, None)
-        }
+        //table = table.scroll_to_row(self.requests.len(), None);
 
         table
             .header(PADDING, |mut header| {
@@ -166,7 +162,7 @@ impl MitmProxy {
             })
             .body(|body| {
                 body.rows(text_height, self.requests.len(), |row_index, mut row| {
-                    self.requests[row_index].render_row(&mut row);
+                    self.requests.get_mut(row_index).expect("Problem with index").render_row(&mut row);
                     row.col(|ui| {
                         if ui.button("🔎").clicked() {
                             self.state.selected_request = Some(row_index);
@@ -228,7 +224,7 @@ impl MitmProxy {
 
         if let Some(i) = self.state.selected_request {
             ui.columns(2, |columns| {
-                ScrollArea::vertical()
+                ScrollArea::both()
                     .id_source("requests_table")
                     .show(&mut columns[0], |ui| self.table_ui(ui));
 
@@ -253,7 +249,7 @@ impl MitmProxy {
             egui::menu::bar(ui, |ui| -> egui::InnerResponse<_> {
                 ui.with_layout(Layout::right_to_left(eframe::emath::Align::Min), |ui| {
                     let close_btn = ui.button("❌");
-                    let refresh_btn = ui.button("🔄");
+                    let clean_btn = ui.button("🚫");
                     let theme_btn = ui.button(match self.config.dark_mode {
                         true => "🔆",
                         false => "🌙",
@@ -262,7 +258,9 @@ impl MitmProxy {
                     if close_btn.clicked() {
                         frame.close();
                     }
-                    if refresh_btn.clicked() {}
+                    if clean_btn.clicked() {
+                        self.requests = vec![];
+                    }
 
                     if theme_btn.clicked() {
                         self.config.dark_mode = !self.config.dark_mode
