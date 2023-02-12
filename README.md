@@ -1,5 +1,5 @@
 <div align="center">
-<img style="width:100px; margin:auto" src="https://github.com/emanuele-em/man-in-the-middle-proxy/blob/522da0e650fad720c4de5dcd8496e52ce9d83b2f/assets/logo.png">
+<img style="width:100px; margin:auto" src="assets/logo.png">
 <h1> MITM Proxy </h1>
 </div>
 
