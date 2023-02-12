@@ -1,5 +1,5 @@
 <div align="center">
-<img style="width:100px; margin:auto" src="assets/logo.png">
+<img style="width:100px; margin:auto" src="assets/logo.png?v=1">
 <h1> MITM Proxy </h1>
 </div>
 
