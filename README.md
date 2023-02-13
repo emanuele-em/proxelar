@@ -21,7 +21,7 @@ Rust-based **Man in the Middle proxy**, an early-stage project aimed at providin
   - [Ubuntu guide](https://ubuntu.com/server/docs/security-trust-store)
   - [Windows guide](https://learn.microsoft.com/en-us/skype-sdk/sdn/articles/installing-the-trusted-root-certificate)
 
-3. Configure your local system proxy on 127.0.0.1:8100.
+3. Configure your local system proxy on `127.0.0.1:8100`.
   - [MacOS guide](https://support.apple.com/it-it/guide/mac-help/mchlp2591/mac)
   - [Ubuntu guide](https://help.ubuntu.com/stable/ubuntu-help/net-proxy.html.en)
   - [Windows guide](https://support.microsoft.com/en-us/windows/use-a-proxy-server-in-windows-03096c53-0554-4ffe-b6ab-8b1deee8dae1#:~:text=a%20VPN%20connection-,Select%20the%20Start%20button%2C%20then%20select%20Settings%20%3E%20Network%20%26%20Internet,information%20for%20that%20VPN%20connection.)
@@ -29,10 +29,10 @@ Rust-based **Man in the Middle proxy**, an early-stage project aimed at providin
 
 - [x]  Intercept HTTP requests and responses
 - [x]  Inspect HTTP requests and responses
-- [ ]  Modify HTTP requests and repsonses ![](https://img.shields.io/badge/-Help%20Wanted-red)
+- [ ]  Modify HTTP requests ![](https://img.shields.io/badge/-Help%20Wanted-red)
 - [x]  Intercept HTTPs requests and responses
 - [x]  Inspect HTTPs requests and responses
-- [ ]  Modify HTTPs requests and repsonses ![](https://img.shields.io/badge/-Help%20Wanted-red)
+- [ ]  Modify HTTPs requests ![](https://img.shields.io/badge/-Help%20Wanted-red)
 
 
 
