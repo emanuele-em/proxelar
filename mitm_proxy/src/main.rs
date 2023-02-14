@@ -64,7 +64,7 @@ fn load_icon(path: &str) -> eframe::IconData {
 fn main() {
     let mut native_options = eframe::NativeOptions::default();
     native_options.initial_window_size = Some(Vec2::new(X, Y));
-    native_options.icon_data = Some(load_icon("./assets/logo_colored.png"));
+    native_options.icon_data = Some(load_icon("./assets/logo.png"));
 
     // create the app with listener false
     // update listener when it is true
