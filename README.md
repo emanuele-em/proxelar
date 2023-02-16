@@ -15,8 +15,14 @@ Rust-based **Man in the Middle proxy**, an early-stage project aimed at providin
 
 ## Getting Started
 
-1. Download the certificate from this [URL](https://github.com/emanuele-em/man-in-the-middle-proxy/blob/799bbc22dd85f25df882c285324c9d3c6ffe35e8/proxyapi/src/ca/mitmproxy.cer).
-2. Install the downloaded certificate locally and trust them.
+1. Generate a Certificate:
+  - go to `~proxyapi/src/ca/`
+  - start generation with following terminal command: `openssl req -x509 -newkey rsa:4096 -keyout mitmproxy.key -out mitmproxy.cer -sha256 -days 700000 -nodes`
+  - You can just hit `Enter` to accept default options but keep in mind to add at least a `common name`
+
+  ![](assets/screenshots/5.png)
+
+2. Install `.cer` file locally and trust them.
   - [MacOS guide](https://support.apple.com/guide/keychain-access/change-the-trust-settings-of-a-certificate-kyca11871/mac#:~:text=In%20the%20Keychain%20Access%20app,from%20the%20pop%2Dup%20menus.)
   - [Ubuntu guide](https://ubuntu.com/server/docs/security-trust-store)
   - [Windows guide](https://learn.microsoft.com/en-us/skype-sdk/sdn/articles/installing-the-trusted-root-certificate)
@@ -25,6 +31,8 @@ Rust-based **Man in the Middle proxy**, an early-stage project aimed at providin
   - [MacOS guide](https://support.apple.com/it-it/guide/mac-help/mchlp2591/mac)
   - [Ubuntu guide](https://help.ubuntu.com/stable/ubuntu-help/net-proxy.html.en)
   - [Windows guide](https://support.microsoft.com/en-us/windows/use-a-proxy-server-in-windows-03096c53-0554-4ffe-b6ab-8b1deee8dae1#:~:text=a%20VPN%20connection-,Select%20the%20Start%20button%2C%20then%20select%20Settings%20%3E%20Network%20%26%20Internet,information%20for%20that%20VPN%20connection.)
+
+
 ## Features and Roadmap
 
 - [x]  Intercept HTTP requests and responses
