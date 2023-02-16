@@ -22,7 +22,7 @@ Rust-based **Man in the Middle proxy**, an early-stage project aimed at providin
 
   ![](assets/screenshots/5.png)
 
-2. Install `.cer` file locally and trust them.
+2. Install `.cer` file locally and trust it.
   - [MacOS guide](https://support.apple.com/guide/keychain-access/change-the-trust-settings-of-a-certificate-kyca11871/mac#:~:text=In%20the%20Keychain%20Access%20app,from%20the%20pop%2Dup%20menus.)
   - [Ubuntu guide](https://ubuntu.com/server/docs/security-trust-store)
   - [Windows guide](https://learn.microsoft.com/en-us/skype-sdk/sdn/articles/installing-the-trusted-root-certificate)
