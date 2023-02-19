@@ -136,9 +136,6 @@ impl RequestInfo {
             ui.strong("Method");
             ui.label(&r.method);
 
-            ui.strong("Method");
-            ui.label(&r.method);
-
             ui.strong("Version");
             ui.label(&r.version);
 
