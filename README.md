@@ -4,7 +4,7 @@
 </div>
 
 
-
+[![Rust](https://github.com/emanuele-em/man-in-the-middle-proxy/actions/workflows/rust.yml/badge.svg)](https://github.com/emanuele-em/man-in-the-middle-proxy/actions/workflows/rust.yml)
 ![GitHub](https://img.shields.io/github/license/emanuele-em/man-in-the-middle-proxy)
 ![GitHub last commit](https://img.shields.io/github/last-commit/emanuele-em/man-in-the-middle-proxy)
 ![GitHub top language](https://img.shields.io/github/languages/top/emanuele-em/man-in-the-middle-proxy)
