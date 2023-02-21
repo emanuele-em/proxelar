@@ -294,8 +294,6 @@ impl MitmProxy {
                         })
                         .on_hover_text("Toggle theme");
 
-
-
                         const COMBOBOX_TEXT_SIZE:f32=15.;
                         ComboBox::from_label("")
                         .selected_text(RichText::new(format!("{} Requests",&self.state.selected_request_method)).size(COMBOBOX_TEXT_SIZE))
