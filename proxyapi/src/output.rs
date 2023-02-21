@@ -2,7 +2,7 @@ use std::{collections::HashMap, sync::mpsc::SyncSender};
 
 
 use async_trait::async_trait;
-use http::{HeaderMap, Version, Response, Request};
+use http::{HeaderMap, Version, Response, Request, Method};
 use hyper::{Body};
 
 use crate::{HttpHandler, HttpContext, RequestResponse};
@@ -55,6 +55,7 @@ impl HttpHandler for Output {
     async fn handle_request(&mut self, _ctx: &HttpContext, req: Request<Body>, ) -> RequestResponse {
         println!("request{:?}\n", req);
         let output_request = OutputRequest::new(
+            req.method().clone(),
             req.method().to_string(),
             req.uri().to_string(),
             req.version().to_string(),
@@ -91,6 +92,7 @@ impl HttpHandler for Output {
 
 #[derive(Clone, Debug)]
 pub struct OutputRequest {
+    http_method: Method,
     method: String,
     uri: String,
     version: String,
@@ -101,6 +103,7 @@ pub struct OutputRequest {
 
 impl OutputRequest {
     fn new(
+        http_method: Method,
         method: String,
         uri: String,
         version: String,
@@ -109,6 +112,7 @@ impl OutputRequest {
         time: i64,
     ) -> Self {
         Self {
+            http_method,
             method,
             uri,
             version,
@@ -116,6 +120,10 @@ impl OutputRequest {
             body,
             time,
         }
+    }
+
+    pub fn http_method(&self) -> &Method {
+        &self.http_method
     }
 
     pub fn method(&self) -> &String {

@@ -2,9 +2,10 @@ use std::collections::HashMap;
 
 use eframe::egui::{self};
 use egui_extras::TableRow;
-use proxyapi::*;
+use proxyapi::{*, hyper::Method};
 
 struct Request {
+    http_method: Method,    
     method: String,
     uri: String,
     version: String,
@@ -15,6 +16,7 @@ struct Request {
 
 impl Request {
     fn new(
+        http_method: Method,
         method: String,
         uri: String,
         version: String,
@@ -23,6 +25,7 @@ impl Request {
         time: i64,
     ) -> Self {
         Self {
+            http_method,
             method,
             uri,
             version,
@@ -93,6 +96,7 @@ impl From<Output> for RequestInfo {
     fn from(value: Output) -> Self {
         let request = match value.req() {
             Some(r) => Some(Request::new(
+                r.http_method().clone(),
                 r.method().to_string(),
                 r.uri().to_string(),
                 r.version().to_string(),
@@ -180,6 +184,14 @@ impl RequestInfo {
         }
     }
 
+    pub fn should_show(&self, method:&Method)->bool {
+        if let Some(req) = &self.request {
+            req.http_method == method
+        }else{
+            false
+        }
+    }
+
     pub fn show_details(&mut self, ui: &mut egui::Ui) {
         ui.label(match &self.details {
             Some(_) => "Some details",
@@ -187,7 +199,7 @@ impl RequestInfo {
         });
     }
 
-    pub fn render_row(&mut self, row: &mut TableRow) {
+    pub fn render_row(&self, row: &mut TableRow) {
         let req = self.request.as_ref().unwrap();
         let res = self.response.as_ref().unwrap();
         let time = (res.time as f64 - req.time as f64) * 10_f64.powf(-9.0) as f64;
