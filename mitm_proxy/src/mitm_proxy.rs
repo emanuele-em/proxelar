@@ -1,4 +1,8 @@
-use std::{sync::mpsc::Receiver, fmt::{Display, format}, default};
+use std::{
+    default,
+    fmt::{format, Display},
+    sync::mpsc::Receiver,
+};
 
 use crate::{
     requests::{InfoOptions, RequestInfo},
@@ -7,14 +11,14 @@ use crate::{
 
 use eframe::{
     egui::{
-        self, FontData, FontDefinitions, FontFamily, Grid, Layout, ScrollArea, Style, TextStyle::*,
-        TopBottomPanel, Visuals, RichText, ComboBox,
+        self, ComboBox, FontData, FontDefinitions, FontFamily, Grid, Layout, RichText, ScrollArea,
+        Style, TextStyle::*, TopBottomPanel, Visuals,
     },
     epaint::FontId,
     Frame,
 };
 use egui_extras::{Column, TableBuilder};
-use proxyapi::{*, hyper::Method};
+use proxyapi::{hyper::Method, *};
 use serde::{Deserialize, Serialize};
 
 #[derive(Serialize, Deserialize)]
@@ -40,37 +44,35 @@ impl Default for MitmProxyConfig {
     }
 }
 
-
-#[derive(Debug,Default,PartialEq, Eq)]
+#[derive(Debug, Default, PartialEq, Eq)]
 pub enum MethodFilter {
     #[default]
     All,
     Only(Method),
 }
-impl MethodFilter{
-    const METHODS: [(&'static str,Self);10]=[
-        ("All",MethodFilter::All),
-        ("GET",MethodFilter::Only(Method::GET)), 
-        ("POST",MethodFilter::Only(Method::POST)), 
-        ("PUT",MethodFilter::Only(Method::PUT)), 
-        ("DELETE",MethodFilter::Only(Method::DELETE)), 
-        ("PATCH",MethodFilter::Only(Method::PATCH)), 
-        ("HEAD",MethodFilter::Only(Method::HEAD)), 
-        ("OPTIONS",MethodFilter::Only(Method::OPTIONS)),
-        ("CONNECT",MethodFilter::Only(Method::CONNECT)),
-        ("TRACE",MethodFilter::Only(Method::TRACE)), 
+impl MethodFilter {
+    const METHODS: [(&'static str, Self); 10] = [
+        ("All", MethodFilter::All),
+        ("GET", MethodFilter::Only(Method::GET)),
+        ("POST", MethodFilter::Only(Method::POST)),
+        ("PUT", MethodFilter::Only(Method::PUT)),
+        ("DELETE", MethodFilter::Only(Method::DELETE)),
+        ("PATCH", MethodFilter::Only(Method::PATCH)),
+        ("HEAD", MethodFilter::Only(Method::HEAD)),
+        ("OPTIONS", MethodFilter::Only(Method::OPTIONS)),
+        ("CONNECT", MethodFilter::Only(Method::CONNECT)),
+        ("TRACE", MethodFilter::Only(Method::TRACE)),
     ];
 }
 impl Display for MethodFilter {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         if let Self::Only(method) = self {
             Display::fmt(method, f)
-        }else {
+        } else {
             f.write_str("All")
         }
     }
 }
-
 
 struct MitmProxyState {
     selected_request: Option<usize>,
@@ -191,8 +193,13 @@ impl MitmProxy {
             })
             .body(|mut body| {
                 if let MethodFilter::Only(filter_method) = &self.state.selected_request_method {
-                    for (row_index, request) in self.requests.iter().enumerate().filter(|r|r.1.should_show(&filter_method)) {
-                        body.row(text_height, |mut row|{
+                    for (row_index, request) in self
+                        .requests
+                        .iter()
+                        .enumerate()
+                        .filter(|r| r.1.should_show(&filter_method))
+                    {
+                        body.row(text_height, |mut row| {
                             request.render_row(&mut row);
                             row.col(|ui| {
                                 if ui.button("🔎").clicked() {
@@ -201,7 +208,7 @@ impl MitmProxy {
                             });
                         });
                     }
-                }else{
+                } else {
                     body.rows(text_height, self.requests.len(), |row_index, mut row| {
                         self.requests
                             .get_mut(row_index)
@@ -294,17 +301,23 @@ impl MitmProxy {
                         })
                         .on_hover_text("Toggle theme");
 
-                        const COMBOBOX_TEXT_SIZE:f32=15.;
-                        ComboBox::from_label("")
-                        .selected_text(RichText::new(format!("{} Requests",&self.state.selected_request_method)).size(COMBOBOX_TEXT_SIZE))
+                    const COMBOBOX_TEXT_SIZE: f32 = 15.;
+                    ComboBox::from_label("")
+                        .selected_text(
+                            RichText::new(format!(
+                                "{} Requests",
+                                &self.state.selected_request_method
+                            ))
+                            .size(COMBOBOX_TEXT_SIZE),
+                        )
                         .wrap(false)
                         .show_ui(ui, |ui| {
                             ui.style_mut().wrap = Some(false);
                             for (method_str, method) in MethodFilter::METHODS {
                                 ui.selectable_value(
-                                    &mut self.state.selected_request_method, 
-                                    method, 
-                                    RichText::new(method_str).size(COMBOBOX_TEXT_SIZE)
+                                    &mut self.state.selected_request_method,
+                                    method,
+                                    RichText::new(method_str).size(COMBOBOX_TEXT_SIZE),
                                 );
                             }
                         });
