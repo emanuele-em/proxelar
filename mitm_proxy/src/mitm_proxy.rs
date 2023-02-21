@@ -291,15 +291,14 @@ impl MitmProxy {
         TopBottomPanel::top("top_panel").show(ctx, |ui| {
             ui.add_space(PADDING);
             egui::menu::bar(ui, |ui| -> egui::InnerResponse<_> {
-                ui.with_layout(Layout::right_to_left(eframe::emath::Align::Min), |ui| {
-                    let close_btn = ui.button("❌").on_hover_text("Close");
+                ui.with_layout(Layout::left_to_right(eframe::emath::Align::Min), |ui| {
                     let clean_btn = ui.button("🚫").on_hover_text("Clear");
-                    let theme_btn = ui
-                        .button(match self.config.dark_mode {
-                            true => "🔆",
-                            false => "🌙",
-                        })
-                        .on_hover_text("Toggle theme");
+
+                    if clean_btn.clicked() {
+                        self.requests = vec![];
+                    }
+
+                    ui.separator();
 
                     const COMBOBOX_TEXT_SIZE: f32 = 15.;
                     ComboBox::from_label("")
@@ -321,13 +320,17 @@ impl MitmProxy {
                                 );
                             }
                         });
+                });
 
-                    if close_btn.clicked() {
-                        frame.close();
-                    }
-                    if clean_btn.clicked() {
-                        self.requests = vec![];
-                    }
+                ui.with_layout(Layout::right_to_left(eframe::emath::Align::Min), |ui| {
+                    
+                    let theme_btn = ui
+                        .button(match self.config.dark_mode {
+                            true => "🔆",
+                            false => "🌙",
+                        })
+                        .on_hover_text("Toggle theme");
+                    
 
                     if theme_btn.clicked() {
                         self.config.dark_mode = !self.config.dark_mode
