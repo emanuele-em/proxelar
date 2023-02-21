@@ -1,4 +1,4 @@
-use std::sync::mpsc::Receiver;
+use std::{sync::mpsc::Receiver, fmt::{Display, format}, default};
 
 use crate::{
     requests::{InfoOptions, RequestInfo},
@@ -8,13 +8,13 @@ use crate::{
 use eframe::{
     egui::{
         self, FontData, FontDefinitions, FontFamily, Grid, Layout, ScrollArea, Style, TextStyle::*,
-        TopBottomPanel, Visuals,
+        TopBottomPanel, Visuals, RichText, ComboBox,
     },
     epaint::FontId,
     Frame,
 };
 use egui_extras::{Column, TableBuilder};
-use proxyapi::*;
+use proxyapi::{*, hyper::Method};
 use serde::{Deserialize, Serialize};
 
 #[derive(Serialize, Deserialize)]
@@ -40,8 +40,41 @@ impl Default for MitmProxyConfig {
     }
 }
 
+
+#[derive(Debug,Default,PartialEq, Eq)]
+pub enum MethodFilter {
+    #[default]
+    All,
+    Only(Method),
+}
+impl MethodFilter{
+    const METHODS: [(&'static str,Self);10]=[
+        ("All",MethodFilter::All),
+        ("GET",MethodFilter::Only(Method::GET)), 
+        ("POST",MethodFilter::Only(Method::POST)), 
+        ("PUT",MethodFilter::Only(Method::PUT)), 
+        ("DELETE",MethodFilter::Only(Method::DELETE)), 
+        ("PATCH",MethodFilter::Only(Method::PATCH)), 
+        ("HEAD",MethodFilter::Only(Method::HEAD)), 
+        ("OPTIONS",MethodFilter::Only(Method::OPTIONS)),
+        ("CONNECT",MethodFilter::Only(Method::CONNECT)),
+        ("TRACE",MethodFilter::Only(Method::TRACE)), 
+    ];
+}
+impl Display for MethodFilter {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        if let Self::Only(method) = self {
+            Display::fmt(method, f)
+        }else {
+            f.write_str("All")
+        }
+    }
+}
+
+
 struct MitmProxyState {
     selected_request: Option<usize>,
+    selected_request_method: MethodFilter,
     detail_option: InfoOptions,
 }
 
@@ -49,6 +82,7 @@ impl MitmProxyState {
     fn new() -> Self {
         Self {
             selected_request: None,
+            selected_request_method: MethodFilter::All,
             detail_option: InfoOptions::Request,
         }
     }
@@ -155,18 +189,31 @@ impl MitmProxy {
 
                 header.col(|_ui| ());
             })
-            .body(|body| {
-                body.rows(text_height, self.requests.len(), |row_index, mut row| {
-                    self.requests
-                        .get_mut(row_index)
-                        .expect("Problem with index")
-                        .render_row(&mut row);
-                    row.col(|ui| {
-                        if ui.button("🔎").clicked() {
-                            self.state.selected_request = Some(row_index);
-                        }
-                    });
-                })
+            .body(|mut body| {
+                if let MethodFilter::Only(filter_method) = &self.state.selected_request_method {
+                    for (row_index, request) in self.requests.iter().enumerate().filter(|r|r.1.should_show(&filter_method)) {
+                        body.row(text_height, |mut row|{
+                            request.render_row(&mut row);
+                            row.col(|ui| {
+                                if ui.button("🔎").clicked() {
+                                    self.state.selected_request = Some(row_index);
+                                }
+                            });
+                        });
+                    }
+                }else{
+                    body.rows(text_height, self.requests.len(), |row_index, mut row| {
+                        self.requests
+                            .get_mut(row_index)
+                            .expect("Problem with index")
+                            .render_row(&mut row);
+                        row.col(|ui| {
+                            if ui.button("🔎").clicked() {
+                                self.state.selected_request = Some(row_index);
+                            }
+                        });
+                    })
+                }
             });
     }
 
@@ -246,6 +293,23 @@ impl MitmProxy {
                             false => "🌙",
                         })
                         .on_hover_text("Toggle theme");
+
+
+
+                        const COMBOBOX_TEXT_SIZE:f32=15.;
+                        ComboBox::from_label("")
+                        .selected_text(RichText::new(format!("{} Requests",&self.state.selected_request_method)).size(COMBOBOX_TEXT_SIZE))
+                        .wrap(false)
+                        .show_ui(ui, |ui| {
+                            ui.style_mut().wrap = Some(false);
+                            for (method_str, method) in MethodFilter::METHODS {
+                                ui.selectable_value(
+                                    &mut self.state.selected_request_method, 
+                                    method, 
+                                    RichText::new(method_str).size(COMBOBOX_TEXT_SIZE)
+                                );
+                            }
+                        });
 
                     if close_btn.clicked() {
                         frame.close();
