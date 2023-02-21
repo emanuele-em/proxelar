@@ -13,6 +13,8 @@
 ## Description
 Rust-based **Man in the Middle proxy**, an early-stage project aimed at providing visibility into network traffic. Currently, it displays both HTTP and HTTPS requests and responses, but our future goal is to allow for manipulation of the traffic for more advanced use cases.
 
+![Cast](assets/screenshots/0.gif)
+
 ## Getting Started
 
 1. Generate a Certificate:
