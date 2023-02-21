@@ -1,6 +1,5 @@
 use std::{
-    default,
-    fmt::{format, Display},
+    fmt::{Display},
     sync::mpsc::Receiver,
 };
 
@@ -287,7 +286,7 @@ impl MitmProxy {
         }
     }
 
-    pub fn render_top_panel(&mut self, ctx: &egui::Context, frame: &mut Frame) {
+    pub fn render_top_panel(&mut self, ctx: &egui::Context, _frame: &mut Frame) {
         TopBottomPanel::top("top_panel").show(ctx, |ui| {
             ui.add_space(PADDING);
             egui::menu::bar(ui, |ui| -> egui::InnerResponse<_> {
