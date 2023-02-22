@@ -2,24 +2,29 @@ use std::{collections::HashMap, sync::mpsc::SyncSender};
 
 
 use async_trait::async_trait;
-use http::{HeaderMap, Version, Response, Request, Method};
-use hyper::{Body};
+use bytes::Bytes;
+use http::{HeaderMap, Version, Response, Request, Method, Uri, StatusCode};
+use hyper::{Body, body::to_bytes};
 
 use crate::{HttpHandler, HttpContext, RequestResponse};
 
 #[derive(Clone, Debug)]
-pub struct Output{
-    tx: SyncSender<Output>,
-    req: Option<OutputRequest>,
-    res: Option<OutputResponse>
+pub struct ProxyHandler{
+    tx: SyncSender<ProxyHandler>,
+    req: Option<ProxiedRequest>,
+    res: Option<ProxiedResponse>
 }
 
-impl Output {
-    pub fn new(tx: SyncSender<Output>) -> Self {
+impl ProxyHandler {
+    pub fn new(tx: SyncSender<ProxyHandler>) -> Self {
         Self { tx, req: None, res: None }
     }
 
-    pub fn set_req(&mut self, req: OutputRequest) -> Self{
+    pub fn to_parts(self) -> (Option<ProxiedRequest>, Option<ProxiedResponse>) {
+        (self.req,self.res)
+    }
+
+    pub fn set_req(&mut self, req: ProxiedRequest) -> Self {
         Self { 
             tx: self.clone().tx, 
             req: Some(req),
@@ -27,7 +32,7 @@ impl Output {
         }
     }
 
-    pub fn set_res(&mut self, res: OutputResponse) -> Self{
+    pub fn set_res(&mut self, res: ProxiedResponse) -> Self{
         Self { 
             tx: self.clone().tx, 
             req: self.clone().req,
@@ -41,42 +46,48 @@ impl Output {
         }
     }
 
-    pub fn req(&self) -> &Option<OutputRequest>{
+    pub fn req(&self) -> &Option<ProxiedRequest>{
         &self.req
     }
 
-    pub fn res(&self) -> &Option<OutputResponse>{
+    pub fn res(&self) -> &Option<ProxiedResponse>{
         &self.res
     }
 }
 
+
 #[async_trait]
-impl HttpHandler for Output {
-    async fn handle_request(&mut self, _ctx: &HttpContext, req: Request<Body>, ) -> RequestResponse {
+impl HttpHandler for ProxyHandler {
+    async fn handle_request(&mut self, _ctx: &HttpContext, mut req: Request<Body>, ) -> RequestResponse {
         println!("request{:?}\n", req);
-        let output_request = OutputRequest::new(
+        let mut body_mut = req.body_mut();
+        let body_bytes = to_bytes(&mut body_mut).await.unwrap_or_default();
+        *body_mut = Body::from(body_bytes.clone()); // Replacing the potentially mutated body with a reference to the entire contents
+        
+        let output_request = ProxiedRequest::new(
             req.method().clone(),
-            req.method().to_string(),
-            req.uri().to_string(),
-            req.version().to_string(),
-            req.headers().to_hash_string(),
-            "Body".to_string(),
+            req.uri().clone(),
+            req.version(),
+            req.headers().clone(),
+            body_bytes,
             chrono::Local::now().timestamp_nanos(),
         );
-
         *self = self.set_req(output_request);
         
         req.into()
     }
 
-    async fn handle_response(&mut self, _ctx: &HttpContext, res: Response<Body>) -> Response<Body> {
+    async fn handle_response(&mut self, _ctx: &HttpContext, mut res: Response<Body>) -> Response<Body> {
         println!("res: {:?}\n\n", res);
-        let output_response =  OutputResponse::new(
-            res.status().to_string(),
-            res.version().to_string(),
-            res.headers().to_hash_string(),
-            // Self::get_body(res.body_mut()).await,
-            "Response body".to_string(),
+        let mut body_mut = res.body_mut();
+        let body_bytes = to_bytes(&mut body_mut).await.unwrap_or_default();
+        *body_mut = Body::from(body_bytes.clone()); // Replacing the potentially mutated body with a reference to the entire contents
+        
+        let output_response =  ProxiedResponse::new(
+            res.status(),
+            res.version(),
+            res.headers().clone(),
+            body_bytes,
             chrono::Local::now().timestamp_nanos()
         );
 
@@ -90,29 +101,26 @@ impl HttpHandler for Output {
     
 }
 
-#[derive(Clone, Debug)]
-pub struct OutputRequest {
-    http_method: Method,
-    method: String,
-    uri: String,
-    version: String,
-    headers: HashMap<String, String>,
-    body: String,
+#[derive(Debug,Clone)]
+pub struct ProxiedRequest {
+    method: Method,
+    uri: Uri,
+    version: Version,
+    headers: HeaderMap,
+    body: Bytes,
     time: i64,
 }
 
-impl OutputRequest {
+impl ProxiedRequest {
     fn new(
-        http_method: Method,
-        method: String,
-        uri: String,
-        version: String,
-        headers: HashMap<String, String>,
-        body: String,
+        method: Method,
+        uri: Uri,
+        version: Version,
+        headers: HeaderMap,
+        body: Bytes,
         time: i64,
     ) -> Self {
         Self {
-            http_method,
             method,
             uri,
             version,
@@ -122,27 +130,24 @@ impl OutputRequest {
         }
     }
 
-    pub fn http_method(&self) -> &Method {
-        &self.http_method
-    }
 
-    pub fn method(&self) -> &String {
+    pub fn method(&self) -> &Method {
         &self.method
     }
 
-    pub fn uri(&self) -> &String {
+    pub fn uri(&self) -> &Uri {
         &self.uri
     }
 
-    pub fn version(&self) -> &String {
+    pub fn version(&self) -> &Version {
         &self.version
     }
 
-    pub fn headers(&self) -> &HashMap<String, String> {
+    pub fn headers(&self) -> &HeaderMap {
         &self.headers
     }
 
-    pub fn body(&self) -> &String {
+    pub fn body(&self) -> &Bytes {
         &self.body
     }
 
@@ -151,21 +156,23 @@ impl OutputRequest {
     }
 }
 
-#[derive(Clone, Debug)]
-pub struct OutputResponse {
-    status: String,
-    version: String,
-    headers: HashMap<String, String>,
-    body: String,
+
+#[derive(Debug,Clone)]
+pub struct ProxiedResponse {
+    status: StatusCode,
+    version: Version,
+    headers: HeaderMap,
+    body: Bytes,
     time: i64,
 }
 
-impl OutputResponse {
+
+impl ProxiedResponse {
     fn new(
-        status: String,
-        version: String,
-        headers: HashMap<String, String>,
-        body: String,
+        status: StatusCode,
+        version: Version,
+        headers: HeaderMap,
+        body: Bytes,
         time: i64,
     ) -> Self {
         Self {
@@ -177,19 +184,19 @@ impl OutputResponse {
         }
     }
 
-    pub fn status(&self) -> &String {
+    pub fn status(&self) -> &StatusCode {
         &self.status
     }
 
-    pub fn version(&self) -> &String {
+    pub fn version(&self) -> &Version {
         &self.version
     }
 
-    pub fn headers(&self) -> &HashMap<String, String> {
+    pub fn headers(&self) -> &HeaderMap {
         &self.headers
     }
 
-    pub fn body(&self) -> &String {
+    pub fn body(&self) -> &Bytes {
         &self.body
     }
 

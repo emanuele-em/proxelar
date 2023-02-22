@@ -1,7 +1,7 @@
 mod error;
 mod rewind;
 pub mod proxy;
-mod output;
+mod proxy_handler;
 
 pub mod ca;
 
@@ -20,7 +20,7 @@ pub use tokio_tungstenite;
 // pub use error;
 // pub use noop;
 pub use proxy::*;
-pub use output::*;
+pub use proxy_handler::*;
 
 #[derive(Debug)]
 pub enum RequestResponse{

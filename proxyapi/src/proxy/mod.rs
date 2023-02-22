@@ -5,7 +5,7 @@ use std::{future::Future, net::{SocketAddr}, sync::{Arc, mpsc::SyncSender}, conv
 
 use internal::InternalProxy;
 
-use crate::{ca::{Ssl}, error::Error, output};
+use crate::{ca::{Ssl}, error::Error, proxy_handler};
 
 //use builder::{AddrListenerServer, WantsAddr};
 
@@ -17,12 +17,11 @@ use hyper_rustls::{ HttpsConnectorBuilder};
 
 pub struct Proxy{
     addr: SocketAddr,
-    tx: Option<SyncSender<output::Output>>
+    tx: Option<SyncSender<proxy_handler::ProxyHandler>>
 }
 
 impl Proxy {
-
-    pub fn new(addr: SocketAddr, tx: Option<SyncSender<output::Output>>) -> Self{
+    pub fn new(addr: SocketAddr, tx: Option<SyncSender<proxy_handler::ProxyHandler>>) -> Self{
         Self {
             addr,
             tx
@@ -31,7 +30,7 @@ impl Proxy {
 
     pub async fn start<F: Future<Output = ()>>(self, signal: F) -> Result<(), Error>{
 
-        let addr = self.addr.clone();
+        let addr = self.addr;
 
         let https =  HttpsConnectorBuilder::new()
             .with_webpki_roots()
@@ -53,7 +52,7 @@ impl Proxy {
         let make_service = make_service_fn(move |conn: &AddrStream| {
             let client = client.clone();
             let ca = Arc::clone(&ssl);
-            let http_handler = output::Output::new(self.tx.clone().unwrap());
+            let http_handler = proxy_handler::ProxyHandler::new(self.tx.clone().unwrap());
             let websocket_connector = None;
             let remote_addr = conn.remote_addr();
             async move {
