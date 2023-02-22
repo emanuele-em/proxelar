@@ -93,11 +93,11 @@ pub struct MitmProxy {
     requests: Vec<RequestInfo>,
     config: MitmProxyConfig,
     state: MitmProxyState,
-    rx: Receiver<Output>,
+    rx: Receiver<ProxyHandler>,
 }
 
 impl MitmProxy {
-    pub fn new(cc: &eframe::CreationContext<'_>, rx: Receiver<Output>) -> Self {
+    pub fn new(cc: &eframe::CreationContext<'_>, rx: Receiver<ProxyHandler>) -> Self {
         Self::configure_fonts(cc);
         let config: MitmProxyConfig = confy::load("MitmProxy", None).unwrap_or_default();
         let state = MitmProxyState::new();
@@ -257,7 +257,10 @@ impl MitmProxy {
 
     pub fn update_requests(&mut self) -> Option<RequestInfo> {
         match self.rx.try_recv() {
-            Ok(l) => Some(RequestInfo::from(l)),
+            Ok(l) => {
+                let (request,response) = l.to_parts();
+                Some(RequestInfo::new(request,response))
+            },
             _ => None,
         }
     }
