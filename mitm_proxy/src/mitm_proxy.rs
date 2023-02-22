@@ -295,6 +295,7 @@ impl MitmProxy {
 
                     if clean_btn.clicked() {
                         self.requests = vec![];
+                        self.state.selected_request = None;
                     }
 
                     ui.separator();
