@@ -1,9 +1,7 @@
-use std::{
-    fmt::{Display},
-    sync::mpsc::Receiver,
-};
+use std::{fmt::Display, net::SocketAddr};
 
 use crate::{
+    managed_proxy::ManagedProxy,
     requests::{InfoOptions, RequestInfo},
     PADDING,
 };
@@ -11,13 +9,13 @@ use crate::{
 use eframe::{
     egui::{
         self, ComboBox, FontData, FontDefinitions, FontFamily, Grid, Layout, RichText, ScrollArea,
-        Style, TextStyle::*, TopBottomPanel, Visuals,
+        Style, TextEdit, TextStyle::*, TopBottomPanel, Visuals,
     },
-    epaint::FontId,
+    epaint::{Color32, FontId},
     Frame,
 };
 use egui_extras::{Column, TableBuilder};
-use proxyapi::{hyper::Method, *};
+use proxyapi::hyper::Method;
 use serde::{Deserialize, Serialize};
 
 #[derive(Serialize, Deserialize)]
@@ -77,6 +75,7 @@ struct MitmProxyState {
     selected_request: Option<usize>,
     selected_request_method: MethodFilter,
     detail_option: InfoOptions,
+    listen_on: String,
 }
 
 impl MitmProxyState {
@@ -85,6 +84,7 @@ impl MitmProxyState {
             selected_request: None,
             selected_request_method: MethodFilter::All,
             detail_option: InfoOptions::Request,
+            listen_on: "127.0.0.1:8100".to_string(),
         }
     }
 }
@@ -93,11 +93,11 @@ pub struct MitmProxy {
     requests: Vec<RequestInfo>,
     config: MitmProxyConfig,
     state: MitmProxyState,
-    rx: Receiver<ProxyHandler>,
+    proxy: Option<ManagedProxy>,
 }
 
 impl MitmProxy {
-    pub fn new(cc: &eframe::CreationContext<'_>, rx: Receiver<ProxyHandler>) -> Self {
+    pub fn new(cc: &eframe::CreationContext<'_>) -> Self {
         Self::configure_fonts(cc);
         let config: MitmProxyConfig = confy::load("MitmProxy", None).unwrap_or_default();
         let state = MitmProxyState::new();
@@ -106,7 +106,7 @@ impl MitmProxy {
             requests: vec![],
             config,
             state,
-            rx,
+            proxy: None,
         }
     }
 
@@ -115,6 +115,23 @@ impl MitmProxy {
             true => ctx.set_visuals(Visuals::dark()),
             false => ctx.set_visuals(Visuals::light()),
         }
+    }
+
+    fn start_proxy(&mut self, addr: SocketAddr) {
+        assert!(self.proxy.is_none());
+
+        self.proxy = Some(ManagedProxy::new(addr));
+        self.requests = vec![];
+    }
+
+    fn stop_proxy(&mut self) {
+        assert!(self.proxy.is_some());
+
+        self.proxy.take();
+    }
+
+    fn is_running(&self) -> bool {
+        return self.proxy.is_some();
     }
 
     fn configure_fonts(cc: &eframe::CreationContext<'_>) {
@@ -255,19 +272,14 @@ impl MitmProxy {
             });
     }
 
-    pub fn update_requests(&mut self) -> Option<RequestInfo> {
-        match self.rx.try_recv() {
-            Ok(l) => {
-                let (request,response) = l.to_parts();
-                Some(RequestInfo::new(request,response))
-            },
-            _ => None,
-        }
-    }
-
     pub fn render_columns(&mut self, ui: &mut egui::Ui) {
-        if let Some(request) = self.update_requests() {
-            self.requests.push(request);
+        if !self.is_running() {
+            return;
+        }
+        if let Some(ref mut proxy) = self.proxy {
+            if let Some(request) = proxy.try_recv_request() {
+                self.requests.push(request);
+            }
         }
 
         if let Some(i) = self.state.selected_request {
@@ -292,6 +304,37 @@ impl MitmProxy {
     pub fn render_top_panel(&mut self, ctx: &egui::Context, _frame: &mut Frame) {
         TopBottomPanel::top("top_panel").show(ctx, |ui| {
             ui.add_space(PADDING);
+            egui::menu::bar(ui, |ui| -> egui::InnerResponse<_> {
+                ui.with_layout(Layout::left_to_right(eframe::emath::Align::Min), |ui| {
+                    if !self.is_running() {
+                        TextEdit::singleline(&mut self.state.listen_on).show(ui);
+
+                        match self.state.listen_on.parse::<SocketAddr>() {
+                            Ok(addr) => {
+                                let start_button = ui.button("▶").on_hover_text("Start");
+                                if start_button.clicked() {
+                                    self.start_proxy(addr);
+                                }
+                            }
+                            Err(_err) => {
+                                ui.label(
+                                    RichText::new("Provided invalid IP address")
+                                        .color(Color32::RED),
+                                );
+                            }
+                        };
+                    } else {
+                        TextEdit::singleline(&mut self.state.listen_on)
+                            .interactive(false)
+                            .show(ui);
+                        let stop_button = ui.button("■").on_hover_text("Stop");
+                        if stop_button.clicked() {
+                            self.stop_proxy();
+                        }
+                    }
+                })
+            });
+
             egui::menu::bar(ui, |ui| -> egui::InnerResponse<_> {
                 ui.with_layout(Layout::left_to_right(eframe::emath::Align::Min), |ui| {
                     let clean_btn = ui.button("🚫").on_hover_text("Clear");
@@ -326,14 +369,12 @@ impl MitmProxy {
                 });
 
                 ui.with_layout(Layout::right_to_left(eframe::emath::Align::Min), |ui| {
-                    
                     let theme_btn = ui
                         .button(match self.config.dark_mode {
                             true => "🔆",
                             false => "🌙",
                         })
                         .on_hover_text("Toggle theme");
-                    
 
                     if theme_btn.clicked() {
                         self.config.dark_mode = !self.config.dark_mode
