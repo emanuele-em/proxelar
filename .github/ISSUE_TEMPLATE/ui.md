@@ -1,6 +1,6 @@
 ---
-name: UI
-about: Create a report to help us improve
+name: UI / UX
+about: bug or enhancement GUI side
 title: ''
 labels: ''
 assignees: ''
