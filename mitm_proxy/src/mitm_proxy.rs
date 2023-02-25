@@ -250,6 +250,7 @@ impl MitmProxy {
     }
 
     pub fn render_right_panel(&mut self, ui: &mut egui::Ui, i: usize) {
+        if i > self.requests.len() - 1 { return } 
         Grid::new("controls").show(ui, |ui| {
             ui.horizontal(|ui| {
                 ui.selectable_value(
@@ -292,16 +293,16 @@ impl MitmProxy {
         }
         if let Some(i) = self.state.selected_request {
             ui.columns(2, |columns| {
-                // needs to run before call to table_ui() because table_ui() might change self.state.selected_request
-                // if request is removed
+                ScrollArea::both()
+                    .id_source("requests_table")
+                    .show(&mut columns[0], |ui| self.table_ui(ui));
+
                 ScrollArea::vertical()
                     .id_source("request_details")
                     .show(&mut columns[1], |ui| {
                         self.render_right_panel(ui, i);
                     });
-                ScrollArea::both()
-                    .id_source("requests_table")
-                    .show(&mut columns[0], |ui| self.table_ui(ui));
+                
             })
         } else {
             ScrollArea::vertical()

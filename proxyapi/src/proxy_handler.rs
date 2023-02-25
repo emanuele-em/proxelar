@@ -59,7 +59,7 @@ impl ProxyHandler {
 #[async_trait]
 impl HttpHandler for ProxyHandler {
     async fn handle_request(&mut self, _ctx: &HttpContext, mut req: Request<Body>, ) -> RequestResponse {
-        println!("request{:?}\n", req);
+        //println!("request{:?}\n", req);
         let mut body_mut = req.body_mut();
         let body_bytes = to_bytes(&mut body_mut).await.unwrap_or_default();
         *body_mut = Body::from(body_bytes.clone()); // Replacing the potentially mutated body with a reference to the entire contents
@@ -78,7 +78,7 @@ impl HttpHandler for ProxyHandler {
     }
 
     async fn handle_response(&mut self, _ctx: &HttpContext, mut res: Response<Body>) -> Response<Body> {
-        println!("res: {:?}\n\n", res);
+        //println!("res: {:?}\n\n", res);
         let mut body_mut = res.body_mut();
         let body_bytes = to_bytes(&mut body_mut).await.unwrap_or_default();
         *body_mut = Body::from(body_bytes.clone()); // Replacing the potentially mutated body with a reference to the entire contents
