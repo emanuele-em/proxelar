@@ -208,9 +208,10 @@ impl MitmProxy {
                 header.col(|_ui| ());
             })
             .body(|mut body| {
+                let mut requests = self.requests.clone();
+
                 if let MethodFilter::Only(filter_method) = &self.state.selected_request_method {
-                    for (row_index, request) in self
-                        .requests
+                    for (row_index, request) in requests
                         .iter()
                         .enumerate()
                         .filter(|r| r.1.should_show(&filter_method))
@@ -221,12 +222,16 @@ impl MitmProxy {
                                 if ui.button("🔎").clicked() {
                                     self.state.selected_request = Some(row_index);
                                 }
+                                if ui.button("✖").clicked() {
+                                    self.state.selected_request = None;
+                                    self.requests.remove(row_index);
+                                }
                             });
                         });
                     }
                 } else {
                     body.rows(text_height, self.requests.len(), |row_index, mut row| {
-                        self.requests
+                        requests
                             .get_mut(row_index)
                             .expect("Problem with index")
                             .render_row(&mut row);
@@ -234,13 +239,18 @@ impl MitmProxy {
                             if ui.button("🔎").clicked() {
                                 self.state.selected_request = Some(row_index);
                             }
+                            if ui.button("✖").clicked() {
+                                self.state.selected_request = None;
+                                self.requests.remove(row_index);
+                            }
                         });
-                    })
+                    });
                 }
             });
     }
 
     pub fn render_right_panel(&mut self, ui: &mut egui::Ui, i: usize) {
+        if i > self.requests.len() - 1 { return } 
         Grid::new("controls").show(ui, |ui| {
             ui.horizontal(|ui| {
                 ui.selectable_value(
@@ -281,7 +291,6 @@ impl MitmProxy {
                 self.requests.push(request);
             }
         }
-
         if let Some(i) = self.state.selected_request {
             ui.columns(2, |columns| {
                 ScrollArea::both()
@@ -293,6 +302,7 @@ impl MitmProxy {
                     .show(&mut columns[1], |ui| {
                         self.render_right_panel(ui, i);
                     });
+                
             })
         } else {
             ScrollArea::vertical()

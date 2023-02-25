@@ -2,6 +2,7 @@ use eframe::egui::{self};
 use egui_extras::TableRow;
 use proxyapi::{*, hyper::Method};
 
+#[derive(Clone)]
 pub struct Details;
 
 #[derive(PartialEq)]
@@ -16,6 +17,8 @@ impl Default for InfoOptions {
         InfoOptions::Request
     }
 }
+
+#[derive(Clone)]
 pub struct RequestInfo {
     request: Option<ProxiedRequest>,
     response: Option<ProxiedResponse>,
