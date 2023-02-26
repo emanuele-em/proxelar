@@ -103,6 +103,7 @@ impl RequestInfo {
         let req = self.request.as_ref().unwrap();
         let res = self.response.as_ref().unwrap();
         let time = (res.time() as f64 - req.time() as f64) * 10_f64.powf(-9.0) as f64;
+        let time = f64::trunc(time * 1000.);
         row.col(|ui| {
             ui.label(req.uri().to_string());
         });
@@ -116,7 +117,7 @@ impl RequestInfo {
         });
 
         row.col(|ui| {
-            ui.label(format!("{} bytes", res.body().len()));
+            ui.label(format!("{} b", res.body().len()));
         });
 
         row.col(|ui| {

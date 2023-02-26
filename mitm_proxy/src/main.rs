@@ -9,9 +9,10 @@ use eframe::{
     run_native, App,
 };
 
-static X: f32 = 980.;
-static Y: f32 = 960.0;
-static PADDING: f32 = 20.;
+const X: f32 = 980.;
+const Y: f32 = 960.0;
+const PADDING: f32 = 20.;
+const FONT_SIZE: f32 = 17.;
 
 // fn fetch_requests(){
 //     ProxyAPI::new().fetch();
@@ -26,8 +27,10 @@ impl App for MitmProxy {
         self.render_top_panel(ctx, frame);
 
         CentralPanel::default().show(ctx, |ui| {
-            self.render_columns(ui);
+            self.render_columns(frame, ctx, ui);
         });
+
+        self.render_bottom_panel(ctx, frame);
     }
 }
 
@@ -57,5 +60,5 @@ fn main() {
         "Man In The Middle Proxy",
         native_options,
         Box::new(|cc| Box::new(MitmProxy::new(cc))),
-    )
+    );
 }

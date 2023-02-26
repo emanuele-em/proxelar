@@ -3,14 +3,15 @@ use std::{fmt::Display, net::SocketAddr};
 use crate::{
     managed_proxy::ManagedProxy,
     requests::{InfoOptions, RequestInfo},
-    PADDING,
+    FONT_SIZE, PADDING,
 };
 
 use eframe::{
     egui::{
-        self, ComboBox, FontData, FontDefinitions, FontFamily, Grid, Layout, RichText, ScrollArea,
-        Style, TextEdit, TextStyle::*, TopBottomPanel, Visuals,
+        self, popup, ComboBox, FontData, FontDefinitions, FontFamily, Grid, Layout, RichText,
+        ScrollArea, Style, TextEdit, TextStyle::*, TopBottomPanel, Visuals,
     },
+    emath::Align2,
     epaint::{Color32, FontId},
     Frame,
 };
@@ -125,12 +126,13 @@ impl MitmProxy {
     }
 
     fn stop_proxy(&mut self) {
-        assert!(self.proxy.is_some());
-
-        self.proxy.take();
+        if self.proxy.is_some() {
+            self.proxy.take();
+            self.state.selected_request.take();
+        }
     }
 
-    fn is_running(&self) -> bool {
+    fn is_listening(&self) -> bool {
         return self.proxy.is_some();
     }
 
@@ -162,23 +164,26 @@ impl MitmProxy {
         cc.egui_ctx.set_style(style);
     }
 
-    pub fn table_ui(&mut self, ui: &mut egui::Ui) {
+    pub fn table_ui(&mut self,frame: &mut eframe::Frame, ui: &mut egui::Ui) {
         let text_height = match self.config.row_height {
             Some(h) => h,
             _ => egui::TextStyle::Button.resolve(ui.style()).size + PADDING,
         };
 
         let table = TableBuilder::new(ui)
-            .auto_shrink([false; 2])
+            .auto_shrink([false;2])
             .stick_to_bottom(true)
             .striped(self.config.striped)
             .cell_layout(egui::Layout::left_to_right(egui::Align::Center))
-            .column(Column::remainder().resizable(true).clip(true))
-            .column(Column::auto())
-            .column(Column::auto())
-            .column(Column::auto())
-            .column(Column::auto())
-            .column(Column::auto())
+            .column(Column::exact( match self.state.selected_request.is_some() {
+                true => (frame.info().window_info.size.x - 320.) / 2. - 220.,
+                false => frame.info().window_info.size.x - 320. - 55.
+            }))
+            .column(Column::exact(50.))
+            .column(Column::exact(100.))
+            .column(Column::exact(50.))
+            .column(Column::exact(50.))
+            .column(Column::exact(70.))
             .min_scrolled_height(0.0);
 
         //table = table.scroll_to_row(self.requests.len(), None);
@@ -219,10 +224,10 @@ impl MitmProxy {
                         body.row(text_height, |mut row| {
                             request.render_row(&mut row);
                             row.col(|ui| {
-                                if ui.button("🔎").clicked() {
+                                if ui.button(RichText::new("🔎").size(FONT_SIZE)).clicked() {
                                     self.state.selected_request = Some(row_index);
                                 }
-                                if ui.button("✖").clicked() {
+                                if ui.button(RichText::new("✖").size(FONT_SIZE)).clicked() {
                                     self.state.selected_request = None;
                                     self.requests.remove(row_index);
                                 }
@@ -236,10 +241,10 @@ impl MitmProxy {
                             .expect("Problem with index")
                             .render_row(&mut row);
                         row.col(|ui| {
-                            if ui.button("🔎").clicked() {
+                            if ui.button(RichText::new("🔎").size(FONT_SIZE)).clicked() {
                                 self.state.selected_request = Some(row_index);
                             }
-                            if ui.button("✖").clicked() {
+                            if ui.button(RichText::new("✖").size(FONT_SIZE)).clicked() {
                                 self.state.selected_request = None;
                                 self.requests.remove(row_index);
                             }
@@ -250,7 +255,9 @@ impl MitmProxy {
     }
 
     pub fn render_right_panel(&mut self, ui: &mut egui::Ui, i: usize) {
-        if i > self.requests.len() - 1 { return } 
+        if self.requests.len() <= 0 && i > self.requests.len() - 1{
+            return;
+        }
         Grid::new("controls").show(ui, |ui| {
             ui.horizontal(|ui| {
                 ui.selectable_value(
@@ -282,101 +289,102 @@ impl MitmProxy {
             });
     }
 
-    pub fn render_columns(&mut self, ui: &mut egui::Ui) {
-        if !self.is_running() {
+    pub fn render_columns(&mut self,frame: &mut eframe::Frame,  ctx: &egui::Context, ui: &mut egui::Ui) {
+        if !self.is_listening() {
+            egui::Window::new("Modal Window")
+                .title_bar(false)
+                .resizable(false)
+                .anchor(Align2::CENTER_CENTER, [0.0, 0.0])
+                .default_height(30.0)
+                .show(ctx, |ui| {
+                    ui.horizontal_centered(|ui| {
+                        ScrollArea::neither().show(ui, |ui| {
+                            ui.label("Listen on:");
+                            TextEdit::singleline(&mut self.state.listen_on).show(ui);
+                            match self.state.listen_on.parse::<SocketAddr>() {
+                                Ok(addr) => {
+                                    let start_button = ui.button("▶").on_hover_text("Start");
+                                    if start_button.clicked() {
+                                        self.start_proxy(addr);
+                                    }
+                                }
+                                Err(_err) => {
+                                    ui.label(
+                                        RichText::new("Provided invalid IP address")
+                                            .color(Color32::RED),
+                                    );
+                                }
+                            };
+                        });
+                    });
+                });
+
             return;
         }
+
         if let Some(ref mut proxy) = self.proxy {
             if let Some(request) = proxy.try_recv_request() {
                 self.requests.push(request);
             }
         }
+
         if let Some(i) = self.state.selected_request {
             ui.columns(2, |columns| {
-                ScrollArea::both()
+                ScrollArea::vertical()
                     .id_source("requests_table")
-                    .show(&mut columns[0], |ui| self.table_ui(ui));
+                    .auto_shrink([false;2])
+                    .show(&mut columns[0], |ui| self.table_ui(frame, ui));
 
                 ScrollArea::vertical()
                     .id_source("request_details")
                     .show(&mut columns[1], |ui| {
                         self.render_right_panel(ui, i);
                     });
-                
             })
         } else {
             ScrollArea::vertical()
                 .id_source("requests_table")
-                .show(ui, |ui| self.table_ui(ui));
+                .show(ui, |ui| self.table_ui(frame, ui));
         }
     }
 
     pub fn render_top_panel(&mut self, ctx: &egui::Context, _frame: &mut Frame) {
         TopBottomPanel::top("top_panel").show(ctx, |ui| {
             ui.add_space(PADDING);
-            egui::menu::bar(ui, |ui| -> egui::InnerResponse<_> {
-                ui.with_layout(Layout::left_to_right(eframe::emath::Align::Min), |ui| {
-                    if !self.is_running() {
-                        TextEdit::singleline(&mut self.state.listen_on).show(ui);
 
-                        match self.state.listen_on.parse::<SocketAddr>() {
-                            Ok(addr) => {
-                                let start_button = ui.button("▶").on_hover_text("Start");
-                                if start_button.clicked() {
-                                    self.start_proxy(addr);
-                                }
-                            }
-                            Err(_err) => {
-                                ui.label(
-                                    RichText::new("Provided invalid IP address")
-                                        .color(Color32::RED),
-                                );
-                            }
-                        };
-                    } else {
-                        TextEdit::singleline(&mut self.state.listen_on)
-                            .interactive(false)
-                            .show(ui);
-                        let stop_button = ui.button("■").on_hover_text("Stop");
-                        if stop_button.clicked() {
-                            self.stop_proxy();
+            egui::menu::bar(ui, |ui| -> egui::InnerResponse<_> {
+                if self.is_listening() {
+                    ui.with_layout(Layout::left_to_right(eframe::emath::Align::Min), |ui| {
+                        let clean_btn = ui.button("🚫").on_hover_text("Clear");
+
+                        if clean_btn.clicked() {
+                            self.requests = vec![];
+                            self.state.selected_request = None;
                         }
-                    }
-                })
-            });
 
-            egui::menu::bar(ui, |ui| -> egui::InnerResponse<_> {
-                ui.with_layout(Layout::left_to_right(eframe::emath::Align::Min), |ui| {
-                    let clean_btn = ui.button("🚫").on_hover_text("Clear");
+                        ui.separator();
 
-                    if clean_btn.clicked() {
-                        self.requests = vec![];
-                        self.state.selected_request = None;
-                    }
-
-                    ui.separator();
-
-                    const COMBOBOX_TEXT_SIZE: f32 = 15.;
-                    ComboBox::from_label("")
-                        .selected_text(
-                            RichText::new(format!(
-                                "{} Requests",
-                                &self.state.selected_request_method
-                            ))
-                            .size(COMBOBOX_TEXT_SIZE),
-                        )
-                        .wrap(false)
-                        .show_ui(ui, |ui| {
-                            ui.style_mut().wrap = Some(false);
-                            for (method_str, method) in MethodFilter::METHODS {
-                                ui.selectable_value(
-                                    &mut self.state.selected_request_method,
-                                    method,
-                                    RichText::new(method_str).size(COMBOBOX_TEXT_SIZE),
-                                );
-                            }
-                        });
-                });
+                        ComboBox::from_label("")
+                            .selected_text(
+                                RichText::new(format!(
+                                    "{} Requests",
+                                    &self.state.selected_request_method
+                                ))
+                                .size(FONT_SIZE),
+                            )
+                            .wrap(false)
+                            .show_ui(ui, |ui| {
+                                ui.style_mut().wrap = Some(false);
+                                for (method_str, method) in MethodFilter::METHODS {
+                                    ui.selectable_value(
+                                        &mut self.state.selected_request_method,
+                                        method,
+                                        RichText::new(method_str).size(FONT_SIZE),
+                                    );
+                                }
+                            });
+                    });
+                }
 
                 ui.with_layout(Layout::right_to_left(eframe::emath::Align::Min), |ui| {
                     let theme_btn = ui
@@ -393,5 +401,27 @@ impl MitmProxy {
             });
             ui.add_space(PADDING);
         });
+    }
+
+    pub fn render_bottom_panel(&mut self, ctx: &egui::Context, _frame: &mut Frame) {
+        if self.is_listening() {
+                egui::Window::new("bottom_stop")
+                .title_bar(false)
+                .resizable(false)
+                .anchor(Align2::CENTER_BOTTOM, [0.0, -10.0])
+                .default_height(30.0)
+                .show(ctx, |ui|{
+                    ui.horizontal_centered(|ui|{
+                        ScrollArea::neither().show(ui, |ui| {
+                            ui.label("Proxy listening on: ");
+                            ui.label(RichText::new(&self.state.listen_on).color(Color32::DARK_GREEN));
+                            let stop_button = ui.button(RichText::new("⏹").size(FONT_SIZE-3.0)).on_hover_text("Stop");
+                            if stop_button.clicked() {
+                                self.stop_proxy();
+                            }
+                        });
+                    });
+                });
+        }
     }
 }

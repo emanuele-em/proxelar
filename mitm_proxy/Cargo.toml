@@ -9,7 +9,7 @@ edition = "2021"
 confy = "0.5.1"
 
 eframe = "0.20.0"
-egui_extras = "0.20.0"
+egui_extras = "0.20"
 serde = { version = "1", features = ["derive"] }
 proxyapi = {path = "../proxyapi"}
 tokio = { version = "1", features = ["full"] }
