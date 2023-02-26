@@ -15,6 +15,17 @@ Rust-based **Man in the Middle proxy**, an early-stage project aimed at providin
 
 ![Cast](assets/screenshots/0.gif)
 
+## Features
+
+- 🔐 HTTP / HTTP(s)
+- 🖱️ Gui
+- ⌨️ Possibility of choosing a customised address and listening port
+- 🔍 Details for each request and response
+- 🎯 Filtering the list of requests by method
+- ❌ Deleting a single request from the list
+- 🚫 Clear all requests and clean the table
+- 🌌 Dark / light theme
+
 ## Getting Started
 
 1. Generate a Certificate:
@@ -34,17 +45,10 @@ Rust-based **Man in the Middle proxy**, an early-stage project aimed at providin
   - [Ubuntu guide](https://help.ubuntu.com/stable/ubuntu-help/net-proxy.html.en)
   - [Windows guide](https://support.microsoft.com/en-us/windows/use-a-proxy-server-in-windows-03096c53-0554-4ffe-b6ab-8b1deee8dae1#:~:text=a%20VPN%20connection-,Select%20the%20Start%20button%2C%20then%20select%20Settings%20%3E%20Network%20%26%20Internet,information%20for%20that%20VPN%20connection.)
 
+## Documentation and Help
 
-## Features and Roadmap
-
-- [x]  Intercept HTTP requests and responses
-- [x]  Inspect HTTP requests and responses
-- [ ]  Modify HTTP requests ![](https://img.shields.io/badge/-Help%20Wanted-red)
-- [x]  Intercept HTTPs requests and responses
-- [x]  Inspect HTTPs requests and responses
-- [ ]  Modify HTTPs requests ![](https://img.shields.io/badge/-Help%20Wanted-red)
-
-
+If you have questions on how to use [Man In The Middle Proxy](https://github.com/emanuele-em/man-in-the-middle-proxy), please use GitHub Discussions!
+![GitHub Discussions](https://img.shields.io/github/discussions/emanuele-em/man-in-the-middle-proxy)
 
 ## Contributing
 
@@ -58,10 +62,21 @@ Please adhere to this project's `code of conduct`.
 ## Licenses
 
 See [LICENSE-APACHE](LICENSE-APACHE), [LICENSE-MIT](LICENSE-MIT) for details
+
 ## Screenshots
 
-![Mitm proxy Screenshot 1](assets/screenshots/1.png)
-![Mitm proxy Screenshot 2](assets/screenshots/2.png)
-![Mitm proxy Screenshot 3](assets/screenshots/3.png)
-![Mitm proxy Screenshot 4](assets/screenshots/4.png)
+### Input of Listening Address
+
+![Mitm proxy Screenshot 1](assets/screenshots/1w.png)
+![Mitm proxy Screenshot 1](assets/screenshots/1b.png)
+
+### Requests List
+
+![Mitm proxy Screenshot 2](assets/screenshots/2w.png)
+![Mitm proxy Screenshot 2](assets/screenshots/2b.png)
+
+### Request and Response Details
+
+![Mitm proxy Screenshot 3](assets/screenshots/3w.png)
+![Mitm proxy Screenshot 3](assets/screenshots/3b.png)
 
