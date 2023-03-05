@@ -36,7 +36,6 @@ impl Default for MitmProxyConfig {
             striped: true,
             resizable: false,
             row_height: None,
-            scroll_to_row_slider: 0,
             scroll_to_row: None,
         }
     }
@@ -125,7 +124,6 @@ impl MitmProxy {
         self.requests = vec![];
     }
 
-    fn stop_proxy(&mut self) {
         if self.proxy.is_some() {
             self.proxy.take();
             self.state.selected_request.take();
