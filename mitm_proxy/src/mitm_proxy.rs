@@ -25,7 +25,6 @@ struct MitmProxyConfig {
     striped: bool,
     resizable: bool,
     row_height: Option<f32>,
-    scroll_to_row_slider: usize,
     scroll_to_row: Option<usize>,
 }
 
@@ -124,6 +123,7 @@ impl MitmProxy {
         self.requests = vec![];
     }
 
+    fn stop_proxy(&mut self){
         if self.proxy.is_some() {
             self.proxy.take();
             self.state.selected_request.take();
