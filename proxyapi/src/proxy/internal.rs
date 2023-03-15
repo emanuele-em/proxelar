@@ -196,17 +196,6 @@ H: HttpHandler,
     }
 
     async fn handle_websocket(self, _server_socket: WebSocketStream<Upgraded>, _req: Request<()>,) -> Result<(), tungstenite::Error>{
-        //  let uri = req.uri().clone();
-
-        // let (client_socket, _) = tokio_tungstenite::connect_async_tls_with_config(req, None, self.websocket_connector).await?;
-
-        // let (server_sink, server_stream) = server_socket.split();
-        // let (client_sink, client_stream) = client_socket.split();
-
-        // let InternalProxy{
-        //     websocket_handler, ..
-        // } = self;
-
         Ok(())
     }
 
@@ -242,45 +231,6 @@ H: HttpHandler,
             .await
     }
 }
-
-// fn spawn_message_forwarder(
-//     mut stream: impl Stream<Item = Result<Message, tungstenite::Error>> + Unpin + Send + 'static,
-//     mut sink: impl Sink<Message, Error = tungstenite::Error> + Unpin + Send + 'static,
-//     mut handler: impl WebSocketHandler,
-//     ctx: WebSocketContext,
-// ) {
-//     //let span = info_span!("message_forwarder", context = ?ctx);
-//     let fut = async move {
-//         while let Some(message) = stream.next().await {
-//             match message {
-//                 Ok(message) => {
-//                     let Some(message) = handler.handle_message(&ctx, message).await else {
-//                         continue
-//                     };
-
-//                     match sink.send(message).await {
-//                         Err(tungstenite::Error::ConnectionClosed) => (),
-//                         Err(e) => eprintln!("Websocket send error: {}", e),
-//                         _ => (),
-//                     }
-//                 }
-//                 Err(e) => {
-//                     eprintln!("Websocket message error: {}", e);
-
-//                     match sink.send(Message::Close(None)).await {
-//                         Err(tungstenite::Error::ConnectionClosed) => (),
-//                         Err(e) => eprintln!("Websocket close error: {}", e),
-//                         _ => (),
-//                     };
-
-//                     break;
-//                 }
-//             }
-//         }
-//     };
-
-//     tokio::spawn(fut);
-// }
 
 fn normalize_request<T>(mut req: Request<T>) -> Request<T> {
     req.headers_mut().remove(hyper::header::HOST);
