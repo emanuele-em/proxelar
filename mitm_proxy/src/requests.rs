@@ -1,4 +1,7 @@
-use eframe::egui::{self};
+use eframe::{
+    egui::{self},
+    epaint::Color32,
+};
 use egui_extras::TableRow;
 use proxyapi::{*, hyper::Method};
 
@@ -109,7 +112,20 @@ impl RequestInfo {
         });
 
         row.col(|ui| {
-            ui.label(req.method().to_string());
+            let method = req.method();
+            let color = match *method {
+                Method::OPTIONS => Color32::GRAY,
+                Method::GET => Color32::GREEN,
+                Method::POST => Color32::BLUE,
+                Method::PUT => Color32::LIGHT_BLUE,
+                Method::DELETE => Color32::RED,
+                Method::HEAD => Color32::YELLOW,
+                Method::TRACE => Color32::BROWN,
+                Method::CONNECT => Color32::GOLD,
+                Method::PATCH => Color32::DARK_BLUE,
+                _ => Color32::DARK_GRAY,
+            };
+            ui.colored_label(color, req.method().to_string());
         });
 
         row.col(|ui| {
