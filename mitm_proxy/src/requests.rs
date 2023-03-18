@@ -1,4 +1,7 @@
-use eframe::egui::{self};
+use eframe::{
+    egui::{self, Visuals},
+    epaint::Color32,
+};
 use egui_extras::TableRow;
 use proxyapi::{*, hyper::Method};
 
@@ -109,7 +112,9 @@ impl RequestInfo {
         });
 
         row.col(|ui| {
-            ui.label(req.method().to_string());
+            let method = req.method();
+            let color = Self::get_method_color(&method, ui.visuals());
+            ui.colored_label(color, method.to_string());
         });
 
         row.col(|ui| {
@@ -123,5 +128,31 @@ impl RequestInfo {
         row.col(|ui| {
             ui.label(time.to_string());
         });
+    }
+
+    fn get_method_color(method: &Method, visuals: &Visuals) -> Color32 {
+        if visuals.dark_mode {
+            match *method {
+                Method::POST => Color32::from_rgb(73, 204, 144),
+                Method::GET => Color32::from_rgb(97, 175, 254),
+                Method::PUT => Color32::from_rgb(252, 161, 48),
+                Method::DELETE => Color32::from_rgb(249, 62, 62),
+                Method::OPTIONS => Color32::from_rgb(13, 90, 167),
+                Method::HEAD => Color32::from_rgb(144, 18, 254),
+                Method::PATCH => Color32::from_rgb(80, 227, 194),
+                _ => Color32::LIGHT_GRAY,
+            }
+        } else {
+            match *method {
+                Method::POST => Color32::from_rgb(72, 203, 144),
+                Method::GET => Color32::from_rgb(42, 105, 167),
+                Method::PUT => Color32::from_rgb(213, 157, 88),
+                Method::DELETE => Color32::from_rgb(200, 50, 50),
+                Method::OPTIONS => Color32::from_rgb(36, 89, 143),
+                Method::HEAD => Color32::from_rgb(140, 63, 207),
+                Method::PATCH => Color32::from_rgb(92, 214, 188),
+                _ => Color32::DARK_GRAY,
+            }
+        }
     }
 }
