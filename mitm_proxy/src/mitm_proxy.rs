@@ -366,11 +366,16 @@ impl MitmProxy {
                             .show_ui(ui, |ui| {
                                 ui.style_mut().wrap = Some(false);
                                 for (method_str, method) in MethodFilter::METHODS {
-                                    ui.selectable_value(
-                                        &mut self.state.selected_request_method,
-                                        method,
-                                        RichText::new(method_str).size(FONT_SIZE),
-                                    );
+                                    if ui
+                                        .selectable_value(
+                                            &mut self.state.selected_request_method,
+                                            method,
+                                            RichText::new(method_str).size(FONT_SIZE),
+                                        )
+                                        .clicked()
+                                    {
+                                        self.state.selected_request = None
+                                    };
                                 }
                             });
                     });
