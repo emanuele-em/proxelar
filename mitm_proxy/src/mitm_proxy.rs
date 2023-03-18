@@ -210,45 +210,37 @@ impl MitmProxy {
 
                 header.col(|_ui| ());
             })
-            .body(|mut body| {
+            .body(|body| {
                 let mut requests = self.requests.clone();
 
                 if let MethodFilter::Only(filter_method) = &self.state.selected_request_method {
-                    for (row_index, request) in requests
-                        .iter()
-                        .enumerate()
-                        .filter(|r| r.1.should_show(&filter_method))
-                    {
-                        body.row(text_height, |mut row| {
-                            request.render_row(&mut row);
-                            row.col(|ui| {
-                                if ui.button(RichText::new("🔎").size(FONT_SIZE)).clicked() {
-                                    self.state.selected_request = Some(row_index);
-                                }
-                                if ui.button(RichText::new("✖").size(FONT_SIZE)).clicked() {
-                                    self.state.selected_request = None;
-                                    self.requests.remove(row_index);
-                                }
-                            });
-                        });
-                    }
-                } else {
-                    body.rows(text_height, self.requests.len(), |row_index, mut row| {
-                        requests
-                            .get_mut(row_index)
-                            .expect("Problem with index")
-                            .render_row(&mut row);
-                        row.col(|ui| {
-                            if ui.button(RichText::new("🔎").size(FONT_SIZE)).clicked() {
-                                self.state.selected_request = Some(row_index);
-                            }
+                    requests = requests
+                        .drain(..)
+                        .filter(|r| r.should_show(filter_method))
+                        .collect();
+                }
+
+                body.rows(text_height, requests.len(), |row_index, mut row| {
+                    requests
+                        .get_mut(row_index)
+                        .expect("Problem with index")
+                        .render_row(&mut row);
+                    row.col(|ui| {
+                        if matches!(self.state.selected_request, Some(index) if index == row_index)
+                        {
                             if ui.button(RichText::new("✖").size(FONT_SIZE)).clicked() {
                                 self.state.selected_request = None;
                                 self.requests.remove(row_index);
                             }
-                        });
+                        } else if ui.button(RichText::new("🔎").size(FONT_SIZE)).clicked() {
+                            self.state.selected_request = Some(row_index);
+                        }
+                        if ui.button(RichText::new("🗑 ").size(FONT_SIZE)).clicked() {
+                            self.state.selected_request = None;
+                            self.requests.remove(row_index);
+                        }
                     });
-                }
+                });
             });
     }
 
