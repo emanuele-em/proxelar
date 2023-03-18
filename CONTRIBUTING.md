@@ -13,7 +13,7 @@ Here are some steps to get started with contributing to this project:
 
 We appreciate contributions of any size, from small bug fixes to major new features. If you're unsure about a change you'd like to make, feel free to open an issue first to discuss it with the maintainers.
 
-## Test request genration
+## Test request generation
 
 * Install http server and client.
   ```bash
