@@ -12,3 +12,26 @@ Here are some steps to get started with contributing to this project:
 * Push your changes to your fork and submit a pull request
 
 We appreciate contributions of any size, from small bug fixes to major new features. If you're unsure about a change you'd like to make, feel free to open an issue first to discuss it with the maintainers.
+
+## Test request genration
+
+* Install http server and client.
+  ```bash
+  cargo install echo-server xh
+  ```
+* Run http server.
+  ```bash
+  echo-server
+  ```
+* Run http client.
+  ```bash
+  xh --proxy http:http://127.0.0.1:8100 OPTIONS  http://127.0.0.1:8080
+  xh --proxy http:http://127.0.0.1:8100 GET  http://127.0.0.1:8080
+  xh --proxy http:http://127.0.0.1:8100 POST  http://127.0.0.1:8080
+  xh --proxy http:http://127.0.0.1:8100 PUT  http://127.0.0.1:8080
+  xh --proxy http:http://127.0.0.1:8100 DELETE  http://127.0.0.1:8080
+  xh --proxy http:http://127.0.0.1:8100 HEAD  http://127.0.0.1:8080
+  xh --proxy http:http://127.0.0.1:8100 TRACE  http://127.0.0.1:8080
+  xh --proxy http:http://127.0.0.1:8100 CONNECT  http://127.0.0.1:8080
+  xh --proxy http:http://127.0.0.1:8100 PATCH  http://127.0.0.1:8080
+  ```
