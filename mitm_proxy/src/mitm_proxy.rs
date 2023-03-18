@@ -226,8 +226,7 @@ impl MitmProxy {
                         .expect("Problem with index")
                         .render_row(&mut row);
                     row.col(|ui| {
-                        if matches!(self.state.selected_request, Some(index) if index == row_index)
-                        {
+                        if self.state.selected_request == Some(row_index) {
                             if ui.button(RichText::new("✖").size(FONT_SIZE)).clicked() {
                                 self.state.selected_request = None;
                                 self.requests.remove(row_index);
