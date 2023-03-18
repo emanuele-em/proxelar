@@ -245,7 +245,7 @@ impl MitmProxy {
     }
 
     pub fn render_right_panel(&mut self, ui: &mut egui::Ui, i: usize) {
-        if self.requests.len() <= 0 && i > self.requests.len() - 1{
+        if self.requests.is_empty() || i >= self.requests.len() {
             return;
         }
         Grid::new("controls").show(ui, |ui| {
