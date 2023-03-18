@@ -210,50 +210,41 @@ impl MitmProxy {
 
                 header.col(|_ui| ());
             })
-            .body(|mut body| {
+            .body(|body| {
                 let mut requests = self.requests.clone();
 
                 if let MethodFilter::Only(filter_method) = &self.state.selected_request_method {
-                    for (row_index, request) in requests
-                        .iter()
-                        .enumerate()
-                        .filter(|r| r.1.should_show(&filter_method))
-                    {
-                        body.row(text_height, |mut row| {
-                            request.render_row(&mut row);
-                            row.col(|ui| {
-                                if ui.button(RichText::new("🔎").size(FONT_SIZE)).clicked() {
-                                    self.state.selected_request = Some(row_index);
-                                }
-                                if ui.button(RichText::new("✖").size(FONT_SIZE)).clicked() {
-                                    self.state.selected_request = None;
-                                    self.requests.remove(row_index);
-                                }
-                            });
-                        });
-                    }
-                } else {
-                    body.rows(text_height, self.requests.len(), |row_index, mut row| {
-                        requests
-                            .get_mut(row_index)
-                            .expect("Problem with index")
-                            .render_row(&mut row);
-                        row.col(|ui| {
-                            if ui.button(RichText::new("🔎").size(FONT_SIZE)).clicked() {
-                                self.state.selected_request = Some(row_index);
-                            }
+                    requests = requests
+                        .drain(..)
+                        .filter(|r| r.should_show(filter_method))
+                        .collect();
+                }
+
+                body.rows(text_height, requests.len(), |row_index, mut row| {
+                    requests
+                        .get_mut(row_index)
+                        .expect("Problem with index")
+                        .render_row(&mut row);
+                    row.col(|ui| {
+                        if self.state.selected_request == Some(row_index) {
                             if ui.button(RichText::new("✖").size(FONT_SIZE)).clicked() {
                                 self.state.selected_request = None;
                                 self.requests.remove(row_index);
                             }
-                        });
+                        } else if ui.button(RichText::new("🔎").size(FONT_SIZE)).clicked() {
+                            self.state.selected_request = Some(row_index);
+                        }
+                        if ui.button(RichText::new("🗑 ").size(FONT_SIZE)).clicked() {
+                            self.state.selected_request = None;
+                            self.requests.remove(row_index);
+                        }
                     });
-                }
+                });
             });
     }
 
     pub fn render_right_panel(&mut self, ui: &mut egui::Ui, i: usize) {
-        if self.requests.len() <= 0 && i > self.requests.len() - 1{
+        if self.requests.is_empty() || i >= self.requests.len() {
             return;
         }
         Grid::new("controls").show(ui, |ui| {
@@ -374,11 +365,16 @@ impl MitmProxy {
                             .show_ui(ui, |ui| {
                                 ui.style_mut().wrap = Some(false);
                                 for (method_str, method) in MethodFilter::METHODS {
-                                    ui.selectable_value(
-                                        &mut self.state.selected_request_method,
-                                        method,
-                                        RichText::new(method_str).size(FONT_SIZE),
-                                    );
+                                    if ui
+                                        .selectable_value(
+                                            &mut self.state.selected_request_method,
+                                            method,
+                                            RichText::new(method_str).size(FONT_SIZE),
+                                        )
+                                        .clicked()
+                                    {
+                                        self.state.selected_request = None
+                                    };
                                 }
                             });
                     });
