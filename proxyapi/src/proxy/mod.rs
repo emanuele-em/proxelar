@@ -50,7 +50,7 @@ impl Proxy {
             .http1_preserve_header_case(true)
             .http1_title_case_headers(true);
 
-        let ssl = Arc::new(Ssl::new());
+        let ssl = Arc::new(Ssl::default());
 
         let make_service = make_service_fn(move |conn: &AddrStream| {
             let client = client.clone();

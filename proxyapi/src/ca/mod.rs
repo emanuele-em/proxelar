@@ -35,8 +35,8 @@ pub struct Ssl {
     cache: Cache<Authority, Arc<ServerConfig>>,
 }
 
-impl Ssl {
-    pub fn new() -> Self {
+impl Default for Ssl {
+    fn default() -> Self {
         let private_key_bytes: &[u8] = include_bytes!("mitmproxy.key");
         let ca_cert_bytes: &[u8] = include_bytes!("mitmproxy.cer");
 
@@ -61,7 +61,9 @@ impl Ssl {
                 .build(),
         }
     }
+}
 
+impl Ssl {
     fn gen_cert(&self, authority: &Authority) -> Result<rustls::Certificate, ErrorStack> {
         let mut name_builder = X509NameBuilder::new()?;
         name_builder.append_entry_by_text("CN", authority.host())?;

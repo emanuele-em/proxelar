@@ -150,14 +150,15 @@ impl MitmProxy {
 
         cc.egui_ctx.set_fonts(fonts);
 
-        let mut style = Style::default();
-
-        style.text_styles = [
-            (Heading, FontId::new(30.0, FontFamily::Proportional)),
-            (Body, FontId::new(12., FontFamily::Proportional)),
-            (Button, FontId::new(20.0, FontFamily::Proportional)),
-        ]
-        .into();
+        let style = Style {
+            text_styles: [
+                (Heading, FontId::new(30.0, FontFamily::Proportional)),
+                (Body, FontId::new(12., FontFamily::Proportional)),
+                (Button, FontId::new(20.0, FontFamily::Proportional)),
+            ]
+            .into(),
+            ..Style::default()
+        };
 
         cc.egui_ctx.set_style(style);
     }
