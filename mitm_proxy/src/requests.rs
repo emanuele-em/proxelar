@@ -3,7 +3,7 @@ use eframe::{
     epaint::Color32,
 };
 use egui_extras::TableRow;
-use proxyapi::{*, hyper::Method};
+use proxyapi::{hyper::Method, *};
 
 #[derive(Clone)]
 pub struct Details;
@@ -28,11 +28,11 @@ pub struct RequestInfo {
     details: Option<Details>,
 }
 impl RequestInfo {
-    pub fn new(request: Option<ProxiedRequest>, response: Option<ProxiedResponse>)->Self{
+    pub fn new(request: Option<ProxiedRequest>, response: Option<ProxiedResponse>) -> Self {
         Self {
             request,
             response,
-            details:None
+            details: None,
         }
     }
 }
@@ -43,17 +43,17 @@ impl RequestInfo {
             ui.label(r.method().to_string());
 
             ui.strong("Version");
-            ui.label(format!("{:?}",r.version()));
+            ui.label(format!("{:?}", r.version()));
 
             ui.strong("Headers");
             for (k, v) in r.headers().iter() {
-                if let Ok(value_str) = v.to_str(){
+                if let Ok(value_str) = v.to_str() {
                     ui.label(format!("{}: {}", &k, &value_str));
                 }
             }
 
             ui.strong("Body");
-            ui.label(format!("{:?}",r.body().as_ref()));
+            ui.label(format!("{:?}", r.body().as_ref()));
 
             ui.strong("Time");
             ui.label(&r.time().to_string());
@@ -68,17 +68,17 @@ impl RequestInfo {
             ui.label(&r.status().to_string());
 
             ui.strong("Version");
-            ui.label(format!("{:?}",r.version()));
+            ui.label(format!("{:?}", r.version()));
 
             ui.strong("Headers");
             for (k, v) in r.headers().iter() {
-                if let Ok(value_str) = v.to_str(){
+                if let Ok(value_str) = v.to_str() {
                     ui.label(format!("{}: {}", &k, &value_str));
                 }
             }
 
             ui.strong("Body");
-            ui.label(format!("{:?}",r.body().as_ref()));
+            ui.label(format!("{:?}", r.body().as_ref()));
 
             ui.strong("Time");
             ui.label(&r.time().to_string());
@@ -87,10 +87,10 @@ impl RequestInfo {
         }
     }
 
-    pub fn should_show(&self, method:&Method)->bool {
+    pub fn should_show(&self, method: &Method) -> bool {
         if let Some(req) = &self.request {
             req.method() == method
-        }else{
+        } else {
             false
         }
     }
