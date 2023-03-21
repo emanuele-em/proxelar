@@ -8,8 +8,8 @@ use crate::{
 
 use eframe::{
     egui::{
-        self, popup, ComboBox, FontData, FontDefinitions, FontFamily, Grid, Layout, RichText,
-        ScrollArea, Style, TextEdit, TextStyle::*, TopBottomPanel, Visuals,
+        self, ComboBox, FontData, FontDefinitions, FontFamily, Grid, Layout, RichText, ScrollArea,
+        Style, TextEdit, TextStyle::*, TopBottomPanel, Visuals,
     },
     emath::Align2,
     epaint::{Color32, FontId},
@@ -131,7 +131,7 @@ impl MitmProxy {
     }
 
     fn is_listening(&self) -> bool {
-        return self.proxy.is_some();
+        self.proxy.is_some()
     }
 
     fn configure_fonts(cc: &eframe::CreationContext<'_>) {

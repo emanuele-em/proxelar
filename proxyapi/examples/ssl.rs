@@ -2,8 +2,6 @@ use std::net::SocketAddr;
 
 use proxyapi::proxy::Proxy;
 
-use tokio;
-
 async fn shutdown_signal() {
     tokio::signal::ctrl_c()
         .await

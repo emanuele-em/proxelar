@@ -105,7 +105,7 @@ impl RequestInfo {
     pub fn render_row(&self, row: &mut TableRow) {
         let req = self.request.as_ref().unwrap();
         let res = self.response.as_ref().unwrap();
-        let time = (res.time() as f64 - req.time() as f64) * 10_f64.powf(-9.0) as f64;
+        let time = (res.time() as f64 - req.time() as f64) * 10_f64.powf(-9.0);
         let time = f64::trunc(time * 1000.);
         row.col(|ui| {
             ui.label(req.uri().to_string());
@@ -113,7 +113,7 @@ impl RequestInfo {
 
         row.col(|ui| {
             let method = req.method();
-            let color = Self::get_method_color(&method, ui.visuals());
+            let color = Self::get_method_color(method, ui.visuals());
             ui.colored_label(color, method.to_string());
         });
 
