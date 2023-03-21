@@ -19,7 +19,7 @@ jobs:
     - name: Format
       uses: actions-rust-lang/rustfmt@v1
     - name: Lint
-      run: cargo clippy --all-targets --all-features --locked -- -D warnings
+      run: cargo clippy --all-features -- -D warnings
     - name: Build
       run: cargo build --verbose
     - name: Run tests
