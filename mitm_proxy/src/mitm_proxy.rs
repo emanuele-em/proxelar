@@ -75,6 +75,7 @@ struct MitmProxyState {
     selected_request_method: MethodFilter,
     detail_option: InfoOptions,
     listen_on: String,
+    is_paused: bool,
 }
 
 impl MitmProxyState {
@@ -84,6 +85,7 @@ impl MitmProxyState {
             selected_request_method: MethodFilter::All,
             detail_option: InfoOptions::Request,
             listen_on: "127.0.0.1:8100".to_string(),
+            is_paused: false,
         }
     }
 }
@@ -313,7 +315,9 @@ impl MitmProxy {
 
         if let Some(ref mut proxy) = self.proxy {
             if let Some(request) = proxy.try_recv_request() {
-                self.requests.push(request);
+                if !self.state.is_paused {
+                    self.requests.push(request);
+                }
             }
         }
 
@@ -408,8 +412,27 @@ impl MitmProxy {
                     ui.horizontal_centered(|ui|{
                         ScrollArea::neither().show(ui, |ui| {
                             ui.label("Proxy listening on: ");
-                            ui.label(RichText::new(&self.state.listen_on).color(Color32::DARK_GREEN));
-                            let stop_button = ui.button(RichText::new("⏹").size(FONT_SIZE-3.0)).on_hover_text("Stop");
+                            ui.label(
+                                RichText::new(&self.state.listen_on).color(Color32::DARK_GREEN),
+                            );
+                            if self.state.is_paused {
+                                let play_button = ui
+                                    .button(RichText::new("▶").size(FONT_SIZE - 3.0))
+                                    .on_hover_text("Play");
+                                if play_button.clicked() {
+                                    self.state.is_paused = false;
+                                }
+                            } else {
+                                let paused_button = ui
+                                    .button(RichText::new("⏸").size(FONT_SIZE - 3.0))
+                                    .on_hover_text("Pause");
+                                if paused_button.clicked() {
+                                    self.state.is_paused = true;
+                                }
+                            };
+                            let stop_button = ui
+                                .button(RichText::new("⏹").size(FONT_SIZE - 3.0))
+                                .on_hover_text("Stop");
                             if stop_button.clicked() {
                                 self.stop_proxy();
                             }
