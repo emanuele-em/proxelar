@@ -15,10 +15,6 @@ const PADDING: f32 = 20.;
 const FONT_SIZE: f32 = 17.;
 const LOGO_ASSET_PATH: &str = "./assets/logo.png";
 
-// fn fetch_requests(){
-//     ProxyAPI::new().fetch();
-// }
-
 impl App for MitmProxy {
     fn update(&mut self, ctx: &egui::Context, frame: &mut eframe::Frame) {
         ctx.request_repaint();
