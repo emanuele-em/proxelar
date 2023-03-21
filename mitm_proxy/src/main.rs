@@ -13,6 +13,7 @@ const X: f32 = 980.;
 const Y: f32 = 960.0;
 const PADDING: f32 = 20.;
 const FONT_SIZE: f32 = 17.;
+const LOGO_ASSET_PATH: &str = "./assets/logo.png";
 
 // fn fetch_requests(){
 //     ProxyAPI::new().fetch();
@@ -54,7 +55,7 @@ fn load_icon(path: &str) -> eframe::IconData {
 fn main() {
     let mut native_options = eframe::NativeOptions::default();
     native_options.initial_window_size = Some(Vec2::new(X, Y));
-    native_options.icon_data = Some(load_icon("./assets/logo.png"));
+    native_options.icon_data = Some(load_icon(LOGO_ASSET_PATH));
 
     run_native(
         "Man In The Middle Proxy",
