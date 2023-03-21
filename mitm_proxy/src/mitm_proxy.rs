@@ -8,7 +8,7 @@ use crate::{
 
 use eframe::{
     egui::{
-        self, popup, ComboBox, FontData, FontDefinitions, FontFamily, Grid, Layout, RichText,
+        self, ComboBox, FontData, FontDefinitions, FontFamily, Grid, Layout, RichText,
         ScrollArea, Style, TextEdit, TextStyle::*, TopBottomPanel, Visuals,
     },
     emath::Align2,
@@ -18,6 +18,22 @@ use eframe::{
 use egui_extras::{Column, TableBuilder};
 use proxyapi::hyper::Method;
 use serde::{Deserialize, Serialize};
+
+const APP_NAME: &str = "MitmProxy";
+
+const ANCHOR_OFFSET: [f32; 2] = [0.0, -10.0];
+
+const DEFAULT_HEADING_FONT_SIZE: f32 = 30.0;
+const DEFAULT_BODY_FONT_SIZE: f32 = 12.;
+const DEFAULT_BUTTON_FONT_SIZE: f32 = 20.0;
+
+const LOCALHOST: &str = "127.0.0.1";
+const PORT: &str = "8100";
+
+const OPEN_SANS_FONT: &str = "OpenSans";
+const OPEN_SANS_FONT_PATH_AS_BYTES: &'static [u8] = include_bytes!("../../fonts/OpenSans.ttf");
+
+
 
 #[derive(Serialize, Deserialize)]
 struct MitmProxyConfig {
@@ -83,7 +99,7 @@ impl MitmProxyState {
             selected_request: None,
             selected_request_method: MethodFilter::All,
             detail_option: InfoOptions::Request,
-            listen_on: "127.0.0.1:8100".to_string(),
+            listen_on: format!("{}:{}", LOCALHOST, PORT),
         }
     }
 }
@@ -98,7 +114,7 @@ pub struct MitmProxy {
 impl MitmProxy {
     pub fn new(cc: &eframe::CreationContext<'_>) -> Self {
         Self::configure_fonts(cc);
-        let config: MitmProxyConfig = confy::load("MitmProxy", None).unwrap_or_default();
+        let config: MitmProxyConfig = confy::load(APP_NAME, None).unwrap_or_default();
         let state = MitmProxyState::new();
 
         MitmProxy {
@@ -138,24 +154,24 @@ impl MitmProxy {
         let mut fonts = FontDefinitions::default();
 
         fonts.font_data.insert(
-            "OpenSans".to_owned(),
-            FontData::from_static(include_bytes!("../../fonts/OpenSans.ttf")),
+            OPEN_SANS_FONT.to_owned(),
+            FontData::from_static(OPEN_SANS_FONT_PATH_AS_BYTES),
         );
 
         fonts
             .families
             .get_mut(&FontFamily::Proportional)
             .unwrap()
-            .insert(0, "OpenSans".to_owned());
+            .insert(0, OPEN_SANS_FONT.to_owned());
 
         cc.egui_ctx.set_fonts(fonts);
 
         let mut style = Style::default();
 
         style.text_styles = [
-            (Heading, FontId::new(30.0, FontFamily::Proportional)),
-            (Body, FontId::new(12., FontFamily::Proportional)),
-            (Button, FontId::new(20.0, FontFamily::Proportional)),
+            (Heading, FontId::new(DEFAULT_HEADING_FONT_SIZE, FontFamily::Proportional)),
+            (Body, FontId::new(DEFAULT_BODY_FONT_SIZE, FontFamily::Proportional)),
+            (Button, FontId::new(DEFAULT_BUTTON_FONT_SIZE, FontFamily::Proportional)),
         ]
         .into();
 
@@ -402,7 +418,7 @@ impl MitmProxy {
                 egui::Window::new("bottom_stop")
                 .title_bar(false)
                 .resizable(false)
-                .anchor(Align2::CENTER_BOTTOM, [0.0, -10.0])
+                .anchor(Align2::CENTER_BOTTOM, ANCHOR_OFFSET)
                 .default_height(30.0)
                 .show(ctx, |ui|{
                     ui.horizontal_centered(|ui|{
