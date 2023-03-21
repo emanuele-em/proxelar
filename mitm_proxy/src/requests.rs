@@ -8,17 +8,12 @@ use proxyapi::{hyper::Method, *};
 #[derive(Clone)]
 pub struct Details;
 
-#[derive(PartialEq)]
+#[derive(PartialEq, Default)]
 pub enum InfoOptions {
+    #[default]
     Request,
     Response,
     Details,
-}
-
-impl Default for InfoOptions {
-    fn default() -> Self {
-        InfoOptions::Request
-    }
 }
 
 #[derive(Clone)]
