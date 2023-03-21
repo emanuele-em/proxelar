@@ -229,14 +229,26 @@ impl MitmProxy {
                         .render_row(&mut row);
                     row.col(|ui| {
                         if self.state.selected_request == Some(row_index) {
-                            if ui.button(RichText::new("✖").size(FONT_SIZE)).clicked() {
+                            if ui
+                                .button(RichText::new("✖").size(FONT_SIZE))
+                                .on_hover_text("Close")
+                                .clicked()
+                            {
                                 self.state.selected_request = None;
                                 self.requests.remove(row_index);
                             }
-                        } else if ui.button(RichText::new("🔎").size(FONT_SIZE)).clicked() {
+                        } else if ui
+                            .button(RichText::new("🔎").size(FONT_SIZE))
+                            .on_hover_text("Select")
+                            .clicked()
+                        {
                             self.state.selected_request = Some(row_index);
                         }
-                        if ui.button(RichText::new("🗑 ").size(FONT_SIZE)).clicked() {
+                        if ui
+                            .button(RichText::new("🗑 ").size(FONT_SIZE))
+                            .on_hover_text("Delete")
+                            .clicked()
+                        {
                             self.state.selected_request = None;
                             self.requests.remove(row_index);
                         }
