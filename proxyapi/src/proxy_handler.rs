@@ -1,40 +1,43 @@
 use std::{collections::HashMap, sync::mpsc::SyncSender};
 
-
 use async_trait::async_trait;
 use bytes::Bytes;
-use http::{HeaderMap, Version, Response, Request, Method, Uri, StatusCode};
-use hyper::{Body, body::to_bytes};
+use http::{HeaderMap, Method, Request, Response, StatusCode, Uri, Version};
+use hyper::{body::to_bytes, Body};
 
-use crate::{HttpHandler, HttpContext, RequestResponse};
+use crate::{HttpContext, HttpHandler, RequestResponse};
 
 #[derive(Clone, Debug)]
-pub struct ProxyHandler{
+pub struct ProxyHandler {
     tx: SyncSender<ProxyHandler>,
     req: Option<ProxiedRequest>,
-    res: Option<ProxiedResponse>
+    res: Option<ProxiedResponse>,
 }
 
 impl ProxyHandler {
     pub fn new(tx: SyncSender<ProxyHandler>) -> Self {
-        Self { tx, req: None, res: None }
+        Self {
+            tx,
+            req: None,
+            res: None,
+        }
     }
 
     pub fn to_parts(self) -> (Option<ProxiedRequest>, Option<ProxiedResponse>) {
-        (self.req,self.res)
+        (self.req, self.res)
     }
 
     pub fn set_req(&mut self, req: ProxiedRequest) -> Self {
-        Self { 
-            tx: self.clone().tx, 
+        Self {
+            tx: self.clone().tx,
             req: Some(req),
             res: None,
         }
     }
 
-    pub fn set_res(&mut self, res: ProxiedResponse) -> Self{
-        Self { 
-            tx: self.clone().tx, 
+    pub fn set_res(&mut self, res: ProxiedResponse) -> Self {
+        Self {
+            tx: self.clone().tx,
             req: self.clone().req,
             res: Some(res),
         }
@@ -46,24 +49,27 @@ impl ProxyHandler {
         }
     }
 
-    pub fn req(&self) -> &Option<ProxiedRequest>{
+    pub fn req(&self) -> &Option<ProxiedRequest> {
         &self.req
     }
 
-    pub fn res(&self) -> &Option<ProxiedResponse>{
+    pub fn res(&self) -> &Option<ProxiedResponse> {
         &self.res
     }
 }
 
-
 #[async_trait]
 impl HttpHandler for ProxyHandler {
-    async fn handle_request(&mut self, _ctx: &HttpContext, mut req: Request<Body>, ) -> RequestResponse {
+    async fn handle_request(
+        &mut self,
+        _ctx: &HttpContext,
+        mut req: Request<Body>,
+    ) -> RequestResponse {
         //println!("request{:?}\n", req);
         let mut body_mut = req.body_mut();
         let body_bytes = to_bytes(&mut body_mut).await.unwrap_or_default();
         *body_mut = Body::from(body_bytes.clone()); // Replacing the potentially mutated body with a reference to the entire contents
-        
+
         let output_request = ProxiedRequest::new(
             req.method().clone(),
             req.uri().clone(),
@@ -73,35 +79,36 @@ impl HttpHandler for ProxyHandler {
             chrono::Local::now().timestamp_nanos(),
         );
         *self = self.set_req(output_request);
-        
+
         req.into()
     }
 
-    async fn handle_response(&mut self, _ctx: &HttpContext, mut res: Response<Body>) -> Response<Body> {
+    async fn handle_response(
+        &mut self,
+        _ctx: &HttpContext,
+        mut res: Response<Body>,
+    ) -> Response<Body> {
         //println!("res: {:?}\n\n", res);
         let mut body_mut = res.body_mut();
         let body_bytes = to_bytes(&mut body_mut).await.unwrap_or_default();
         *body_mut = Body::from(body_bytes.clone()); // Replacing the potentially mutated body with a reference to the entire contents
-        
-        let output_response =  ProxiedResponse::new(
+
+        let output_response = ProxiedResponse::new(
             res.status(),
             res.version(),
             res.headers().clone(),
             body_bytes,
-            chrono::Local::now().timestamp_nanos()
+            chrono::Local::now().timestamp_nanos(),
         );
 
-        self
-        .set_res(output_response)
-        .send_output();
+        self.set_res(output_response).send_output();
 
         //Self::sanitize_body(res.body_mut());
         res
     }
-    
 }
 
-#[derive(Debug,Clone)]
+#[derive(Debug, Clone)]
 pub struct ProxiedRequest {
     method: Method,
     uri: Uri,
@@ -130,7 +137,6 @@ impl ProxiedRequest {
         }
     }
 
-
     pub fn method(&self) -> &Method {
         &self.method
     }
@@ -156,8 +162,7 @@ impl ProxiedRequest {
     }
 }
 
-
-#[derive(Debug,Clone)]
+#[derive(Debug, Clone)]
 pub struct ProxiedResponse {
     status: StatusCode,
     version: Version,
@@ -165,7 +170,6 @@ pub struct ProxiedResponse {
     body: Bytes,
     time: i64,
 }
-
 
 impl ProxiedResponse {
     fn new(
@@ -209,24 +213,25 @@ trait ToString {
     fn to_string(&self) -> String;
 }
 
-trait ToHashString{
+trait ToHashString {
     fn to_hash_string(&self) -> HashMap<String, String>;
 }
 
-impl ToHashString for HeaderMap{
-    fn to_hash_string(&self) -> HashMap<String, String>{
+impl ToHashString for HeaderMap {
+    fn to_hash_string(&self) -> HashMap<String, String> {
         let mut headers: HashMap<String, String> = HashMap::new();
 
-        for (k, v) in self.iter(){
-            headers.insert(k.as_str().to_string(), v.to_str().unwrap().to_string()).unwrap_or("NO header".to_string());
+        for (k, v) in self.iter() {
+            headers
+                .insert(k.as_str().to_string(), v.to_str().unwrap().to_string())
+                .unwrap_or("NO header".to_string());
         }
         headers
     }
 }
 
-impl ToString for Version{
-    fn to_string(&self) -> String{
-
+impl ToString for Version {
+    fn to_string(&self) -> String {
         match *self {
             Version::HTTP_09 => "HTTP_09".to_string(),
             Version::HTTP_10 => "HTTP_10".to_string(),
@@ -237,4 +242,3 @@ impl ToString for Version{
         }
     }
 }
-

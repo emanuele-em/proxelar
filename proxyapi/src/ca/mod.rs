@@ -1,9 +1,20 @@
-use std::{sync::Arc, time::{Duration, SystemTime}};
+use std::{
+    sync::Arc,
+    time::{Duration, SystemTime},
+};
 
 use async_trait::async_trait;
 use http::uri::Authority;
 use moka::future::Cache;
-use openssl::{pkey::{Private, PKey}, x509::{X509, X509NameBuilder, X509Builder, extension::SubjectAlternativeName}, hash::MessageDigest, asn1::{Asn1Time, Asn1Integer}, rand, bn::BigNum, error::ErrorStack};
+use openssl::{
+    asn1::{Asn1Integer, Asn1Time},
+    bn::BigNum,
+    error::ErrorStack,
+    hash::MessageDigest,
+    pkey::{PKey, Private},
+    rand,
+    x509::{extension::SubjectAlternativeName, X509Builder, X509NameBuilder, X509},
+};
 use tokio_rustls::rustls::{self, ServerConfig};
 
 const TTL_SECS: i64 = 365 * 24 * 60 * 60;
@@ -11,12 +22,12 @@ const CACHE_TTL: u64 = TTL_SECS as u64 / 2;
 const NOT_BEFORE_OFFSET: i64 = 60;
 
 #[async_trait]
-pub trait CertificateAuthority: Send + Sync + 'static{
+pub trait CertificateAuthority: Send + Sync + 'static {
     async fn gen_server_config(&self, authority: &Authority) -> Arc<ServerConfig>;
 }
 
 #[derive(Clone)]
-pub struct Ssl{
+pub struct Ssl {
     pkey: PKey<Private>,
     private_key: rustls::PrivateKey,
     ca_cert: X509,
@@ -24,12 +35,13 @@ pub struct Ssl{
     cache: Cache<Authority, Arc<ServerConfig>>,
 }
 
-impl Ssl{
-    pub fn new() -> Self{
+impl Default for Ssl {
+    fn default() -> Self {
         let private_key_bytes: &[u8] = include_bytes!("mitmproxy.key");
         let ca_cert_bytes: &[u8] = include_bytes!("mitmproxy.cer");
 
-        let pkey = PKey::private_key_from_pem(private_key_bytes).expect("Failed to parse private key");
+        let pkey =
+            PKey::private_key_from_pem(private_key_bytes).expect("Failed to parse private key");
 
         let private_key = rustls::PrivateKey(
             pkey.private_key_to_der()
@@ -44,12 +56,14 @@ impl Ssl{
             ca_cert,
             hash: MessageDigest::sha256(),
             cache: Cache::builder()
-            .max_capacity(1_000)
-            .time_to_live(Duration::from_secs(CACHE_TTL))
-            .build(),
+                .max_capacity(1_000)
+                .time_to_live(Duration::from_secs(CACHE_TTL))
+                .build(),
         }
     }
+}
 
+impl Ssl {
     fn gen_cert(&self, authority: &Authority) -> Result<rustls::Certificate, ErrorStack> {
         let mut name_builder = X509NameBuilder::new()?;
         name_builder.append_entry_by_text("CN", authority.host())?;

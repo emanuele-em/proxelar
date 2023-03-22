@@ -3,22 +3,17 @@ use eframe::{
     epaint::Color32,
 };
 use egui_extras::TableRow;
-use proxyapi::{*, hyper::Method};
+use proxyapi::{hyper::Method, *};
 
 #[derive(Clone)]
 pub struct Details;
 
-#[derive(PartialEq)]
+#[derive(PartialEq, Default)]
 pub enum InfoOptions {
+    #[default]
     Request,
     Response,
     Details,
-}
-
-impl Default for InfoOptions {
-    fn default() -> Self {
-        InfoOptions::Request
-    }
 }
 
 #[derive(Clone)]
@@ -28,11 +23,11 @@ pub struct RequestInfo {
     details: Option<Details>,
 }
 impl RequestInfo {
-    pub fn new(request: Option<ProxiedRequest>, response: Option<ProxiedResponse>)->Self{
+    pub fn new(request: Option<ProxiedRequest>, response: Option<ProxiedResponse>) -> Self {
         Self {
             request,
             response,
-            details:None
+            details: None,
         }
     }
 }
@@ -43,17 +38,17 @@ impl RequestInfo {
             ui.label(r.method().to_string());
 
             ui.strong("Version");
-            ui.label(format!("{:?}",r.version()));
+            ui.label(format!("{:?}", r.version()));
 
             ui.strong("Headers");
             for (k, v) in r.headers().iter() {
-                if let Ok(value_str) = v.to_str(){
+                if let Ok(value_str) = v.to_str() {
                     ui.label(format!("{}: {}", &k, &value_str));
                 }
             }
 
             ui.strong("Body");
-            ui.label(format!("{:?}",r.body().as_ref()));
+            ui.label(format!("{:?}", r.body().as_ref()));
 
             ui.strong("Time");
             ui.label(&r.time().to_string());
@@ -68,17 +63,17 @@ impl RequestInfo {
             ui.label(&r.status().to_string());
 
             ui.strong("Version");
-            ui.label(format!("{:?}",r.version()));
+            ui.label(format!("{:?}", r.version()));
 
             ui.strong("Headers");
             for (k, v) in r.headers().iter() {
-                if let Ok(value_str) = v.to_str(){
+                if let Ok(value_str) = v.to_str() {
                     ui.label(format!("{}: {}", &k, &value_str));
                 }
             }
 
             ui.strong("Body");
-            ui.label(format!("{:?}",r.body().as_ref()));
+            ui.label(format!("{:?}", r.body().as_ref()));
 
             ui.strong("Time");
             ui.label(&r.time().to_string());
@@ -87,10 +82,10 @@ impl RequestInfo {
         }
     }
 
-    pub fn should_show(&self, method:&Method)->bool {
+    pub fn should_show(&self, method: &Method) -> bool {
         if let Some(req) = &self.request {
             req.method() == method
-        }else{
+        } else {
             false
         }
     }
@@ -105,9 +100,10 @@ impl RequestInfo {
     pub fn render_row(&self, row: &mut TableRow) {
         let req = self.request.as_ref().unwrap();
         let res = self.response.as_ref().unwrap();
+
         let time = {
-            let inner_time = (res.time() as f64 - req.time() as f64) * 10_f64.powf(-9.0) as f64;
-            f64::trunc(inner_time * 1000.)
+            let innertime = (res.time() as f64 - req.time() as f64) * 10_f64.powf(-9.0);
+            f64::trunc(innertime * 1000.)
         };
 
         row.col(|ui| {
@@ -116,7 +112,7 @@ impl RequestInfo {
 
         row.col(|ui| {
             let method = req.method();
-            let color = Self::get_method_color(&method, ui.visuals());
+            let color = Self::get_method_color(method, ui.visuals());
             ui.colored_label(color, method.to_string());
         });
 
