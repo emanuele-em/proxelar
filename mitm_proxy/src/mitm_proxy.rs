@@ -31,7 +31,7 @@ const LOCALHOST: &str = "127.0.0.1";
 const PORT: &str = "8100";
 
 const OPEN_SANS_FONT: &str = "OpenSans";
-const OPEN_SANS_FONT_PATH_AS_BYTES: &'static [u8] = include_bytes!("../../fonts/OpenSans.ttf");
+const OPEN_SANS_FONT_PATH_AS_BYTES: &[u8] = include_bytes!("../../fonts/OpenSans.ttf");
 
 
 
