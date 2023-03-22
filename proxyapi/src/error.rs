@@ -1,7 +1,7 @@
 use thiserror::Error;
 
 #[derive(Debug, Error)]
-pub enum Error{
+pub enum Error {
     #[error("network error")]
     Network(#[from] hyper::Error),
     #[error("unable to decode body")]
