@@ -51,7 +51,7 @@ fn load_icon(path: &str) -> eframe::IconData {
 fn main() {
     let native_options = eframe::NativeOptions {
         initial_window_size: Some(Vec2::new(X, Y)),
-        icon_data = Some(load_icon(LOGO_ASSET_PATH)),
+        icon_data: Some(load_icon(LOGO_ASSET_PATH)),
         ..eframe::NativeOptions::default()
     };
 
