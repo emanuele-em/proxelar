@@ -13,9 +13,7 @@ async-trait = "0.1.64"
 bstr = "1.2.0"
 bytes = "1.4.0"
 chrono = "0.4.23"
-futures = "0.3.26"
 http = "0.2.8"
-http-body-util = "0.1.0-rc.2"
 hyper = {version="0.14.23", features=["full"]}
 hyper-rustls = {version = "0.23.2",  features = ["http1", "logging", "tls12", "webpki-tokio"]}
 hyper-tungstenite = "0.9.0"
