@@ -1,6 +1,4 @@
-use crate::{
-    ca::CertificateAuthority, HttpContext, HttpHandler, RequestResponse,
-    rewind::Rewind};
+use crate::{ca::CertificateAuthority, rewind::Rewind, HttpContext, HttpHandler, RequestResponse};
 use http::uri::{Authority, Scheme};
 use hyper::{
     client::connect::Connect, header::Entry, server::conn::Http, service::service_fn,
@@ -14,10 +12,10 @@ use tokio::{
 use tokio_rustls::TlsAcceptor;
 use tokio_tungstenite::{
     tungstenite::{self},
-    Connector, WebSocketStream
+    Connector, WebSocketStream,
 };
 
-pub struct InternalProxy<C, CA, H>{
+pub struct InternalProxy<C, CA, H> {
     pub ca: Arc<CA>,
     pub client: Client<C>,
     pub http_handler: H,
@@ -43,45 +41,37 @@ where
 
 impl<C, CA, H> InternalProxy<C, CA, H>
 where
-C: Connect + Clone + Send + Sync + 'static,
-CA: CertificateAuthority,
-H: HttpHandler,
+    C: Connect + Clone + Send + Sync + 'static,
+    CA: CertificateAuthority,
+    H: HttpHandler,
 {
-
-    pub(crate) async fn proxy( mut self, req: Request<Body>, ) -> Result<Response<Body>, hyper::Error>{
+    pub(crate) async fn proxy(
+        mut self,
+        req: Request<Body>,
+    ) -> Result<Response<Body>, hyper::Error> {
         let ctx = HttpContext {
             remote_addr: self.remote_addr,
         };
 
-        let req = match self
-            .http_handler
-            .handle_request(&ctx, req)
-            .await
-        {
+        let req = match self.http_handler.handle_request(&ctx, req).await {
             RequestResponse::Request(req) => req,
             RequestResponse::Response(res) => return Ok(res),
         };
 
-        if req.method() == Method::CONNECT{
+        if req.method() == Method::CONNECT {
             self.process_connect(req)
-        } else if hyper_tungstenite::is_upgrade_request(&req){
+        } else if hyper_tungstenite::is_upgrade_request(&req) {
             Ok(self.upgrade_websocket(req))
         } else {
-            let res = self
-                .client
-                .request(normalize_request(req))
-                .await?;
+            let res = self.client.request(normalize_request(req)).await?;
 
-            Ok(self
-                .http_handler
-                .handle_response(&ctx, res)
-                .await)
+            Ok(self.http_handler.handle_response(&ctx, res).await)
         }
     }
 
-    fn process_connect(self, mut req: Request<Body>) -> Result<Response<Body>, hyper::Error>{
-        let fut = async move{
-            match hyper::upgrade::on(&mut req).await{
+    fn process_connect(self, mut req: Request<Body>) -> Result<Response<Body>, hyper::Error> {
+        let fut = async move {
+            match hyper::upgrade::on(&mut req).await {
                 Ok(mut upgraded) => {
                     let mut buffer = [0; 4];
                     let bytes_read = match upgraded.read(&mut buffer).await {
@@ -101,16 +91,14 @@ H: HttpHandler,
                         if let Err(e) = self.serve_stream(upgraded, Scheme::HTTP).await {
                             eprintln!("Websocket connect error: {e}");
                         }
-                    } else if buffer[..2] == *b"\x16\x03"{
-                        let authority = req.uri()
+                    } else if buffer[..2] == *b"\x16\x03" {
+                        let authority = req
+                            .uri()
                             .authority()
                             .expect("Uri doesn't contain authority");
-                        
-                        let server_config = self
-                            .ca
-                            .gen_server_config(authority)
-                            .await;
-                        
+
+                        let server_config = self.ca.gen_server_config(authority).await;
+
                         let stream = match TlsAcceptor::from(server_config).accept(upgraded).await {
                             Ok(stream) => stream,
                             Err(e) => {
@@ -120,7 +108,7 @@ H: HttpHandler,
                         };
 
                         if let Err(e) = self.serve_stream(stream, Scheme::HTTPS).await {
-                            if !e.to_string().starts_with("error shutting down connection"){
+                            if !e.to_string().starts_with("error shutting down connection") {
                                 eprintln!("HTTPS connect error: {e}");
                             }
                         }
@@ -135,16 +123,18 @@ H: HttpHandler,
                             .authority()
                             .expect("Uri doesn't contain authority")
                             .as_ref();
-                        
+
                         let mut server = match TcpStream::connect(authority).await {
                             Ok(server) => server,
                             Err(e) => {
-                                eprintln!{"failed to connect to {authority}: {e}"};
+                                eprintln! {"failed to connect to {authority}: {e}"};
                                 return;
                             }
                         };
 
-                        if let Err(e) = tokio::io::copy_bidirectional(&mut upgraded, &mut server).await {
+                        if let Err(e) =
+                            tokio::io::copy_bidirectional(&mut upgraded, &mut server).await
+                        {
                             eprintln!("Failed to tunnel unknown protocol to {}: {}", authority, e);
                         }
                     }
@@ -157,7 +147,7 @@ H: HttpHandler,
         Ok(Response::new(Body::empty()))
     }
 
-    fn upgrade_websocket(self, req: Request<Body>) -> Response<Body>{
+    fn upgrade_websocket(self, req: Request<Body>) -> Response<Body> {
         let mut req = {
             let (mut parts, _) = req.into_parts();
 
@@ -176,10 +166,11 @@ H: HttpHandler,
             Request::from_parts(parts, ())
         };
 
-        let (res, websocket) = hyper_tungstenite::upgrade(&mut req, None).expect("Request missing headers");
-        
-        let fut = async move{
-            match websocket.await{
+        let (res, websocket) =
+            hyper_tungstenite::upgrade(&mut req, None).expect("Request missing headers");
+
+        let fut = async move {
+            match websocket.await {
                 Ok(ws) => {
                     if let Err(e) = self.handle_websocket(ws, req).await {
                         eprintln!("Failed to handle websocket: {e}");
@@ -195,7 +186,11 @@ H: HttpHandler,
         res
     }
 
-    async fn handle_websocket(self, _server_socket: WebSocketStream<Upgraded>, _req: Request<()>,) -> Result<(), tungstenite::Error>{
+    async fn handle_websocket(
+        self,
+        _server_socket: WebSocketStream<Upgraded>,
+        _req: Request<()>,
+    ) -> Result<(), tungstenite::Error> {
         Ok(())
     }
 
@@ -203,8 +198,9 @@ H: HttpHandler,
     where
         I: AsyncRead + AsyncWrite + Unpin + Send + 'static,
     {
-        let service = service_fn(|mut req|{
-            if req.version() == hyper::Version::HTTP_10 || req.version() == hyper::Version::HTTP_11 {
+        let service = service_fn(|mut req| {
+            if req.version() == hyper::Version::HTTP_10 || req.version() == hyper::Version::HTTP_11
+            {
                 let (mut parts, body) = req.into_parts();
 
                 let authority = parts
@@ -215,7 +211,8 @@ H: HttpHandler,
                 parts.uri = {
                     let mut parts = parts.uri.into_parts();
                     parts.scheme = Some(scheme.clone());
-                    parts.authority = Some(Authority::try_from(authority).expect("Failed to parse authority"));
+                    parts.authority =
+                        Some(Authority::try_from(authority).expect("Failed to parse authority"));
                     Uri::from_parts(parts).expect("Failed to build URI")
                 };
 

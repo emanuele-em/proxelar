@@ -8,8 +8,8 @@ use crate::{
 
 use eframe::{
     egui::{
-        self, popup, ComboBox, FontData, FontDefinitions, FontFamily, Grid, Layout, RichText,
-        ScrollArea, Style, TextEdit, TextStyle::*, TopBottomPanel, Visuals,
+        self, ComboBox, FontData, FontDefinitions, FontFamily, Grid, Layout, RichText, ScrollArea,
+        Style, TextEdit, TextStyle::*, TopBottomPanel, Visuals,
     },
     emath::Align2,
     epaint::{Color32, FontId},
@@ -18,6 +18,22 @@ use eframe::{
 use egui_extras::{Column, TableBuilder};
 use proxyapi::hyper::Method;
 use serde::{Deserialize, Serialize};
+
+const APP_NAME: &str = "MitmProxy";
+
+const ANCHOR_OFFSET: [f32; 2] = [0.0, -10.0];
+
+const DEFAULT_HEADING_FONT_SIZE: f32 = 30.0;
+const DEFAULT_BODY_FONT_SIZE: f32 = 12.;
+const DEFAULT_BUTTON_FONT_SIZE: f32 = 20.0;
+
+const LOCALHOST: &str = "127.0.0.1";
+const PORT: &str = "8100";
+
+const OPEN_SANS_FONT: &str = "OpenSans";
+const OPEN_SANS_FONT_PATH_AS_BYTES: &'static [u8] = include_bytes!("../../fonts/OpenSans.ttf");
+
+
 
 #[derive(Serialize, Deserialize)]
 struct MitmProxyConfig {
@@ -84,7 +100,7 @@ impl MitmProxyState {
             selected_request: None,
             selected_request_method: MethodFilter::All,
             detail_option: InfoOptions::Request,
-            listen_on: "127.0.0.1:8100".to_string(),
+            listen_on: format!("{}:{}", LOCALHOST, PORT),
             is_paused: false,
         }
     }
@@ -100,7 +116,7 @@ pub struct MitmProxy {
 impl MitmProxy {
     pub fn new(cc: &eframe::CreationContext<'_>) -> Self {
         Self::configure_fonts(cc);
-        let config: MitmProxyConfig = confy::load("MitmProxy", None).unwrap_or_default();
+        let config: MitmProxyConfig = confy::load(APP_NAME, None).unwrap_or_default();
         let state = MitmProxyState::new();
 
         MitmProxy {
@@ -125,7 +141,7 @@ impl MitmProxy {
         self.requests = vec![];
     }
 
-    fn stop_proxy(&mut self){
+    fn stop_proxy(&mut self) {
         if self.proxy.is_some() {
             self.proxy.take();
             self.state.selected_request.take();
@@ -133,51 +149,52 @@ impl MitmProxy {
     }
 
     fn is_listening(&self) -> bool {
-        return self.proxy.is_some();
+        self.proxy.is_some()
     }
 
     fn configure_fonts(cc: &eframe::CreationContext<'_>) {
         let mut fonts = FontDefinitions::default();
 
         fonts.font_data.insert(
-            "OpenSans".to_owned(),
-            FontData::from_static(include_bytes!("../../fonts/OpenSans.ttf")),
+            OPEN_SANS_FONT.to_owned(),
+            FontData::from_static(OPEN_SANS_FONT_PATH_AS_BYTES),
         );
 
         fonts
             .families
             .get_mut(&FontFamily::Proportional)
             .unwrap()
-            .insert(0, "OpenSans".to_owned());
+            .insert(0, OPEN_SANS_FONT.to_owned());
 
         cc.egui_ctx.set_fonts(fonts);
 
-        let mut style = Style::default();
-
-        style.text_styles = [
-            (Heading, FontId::new(30.0, FontFamily::Proportional)),
-            (Body, FontId::new(12., FontFamily::Proportional)),
-            (Button, FontId::new(20.0, FontFamily::Proportional)),
-        ]
-        .into();
+        let style = Style {
+            text_styles: [
+                (Heading, FontId::new(DEFAULT_HEADING_FONT_SIZE, FontFamily::Proportional)),
+                (Body, FontId::new(DEFAULT_BODY_FONT_SIZE, FontFamily::Proportional)),
+                (Button, FontId::new(DEFAULT_BUTTON_FONT_SIZE, FontFamily::Proportional)),
+            ]
+            .into(),
+            ..Style::default()
+        };
 
         cc.egui_ctx.set_style(style);
     }
 
-    pub fn table_ui(&mut self,frame: &mut eframe::Frame, ui: &mut egui::Ui) {
+    pub fn table_ui(&mut self, frame: &mut eframe::Frame, ui: &mut egui::Ui) {
         let text_height = match self.config.row_height {
             Some(h) => h,
             _ => egui::TextStyle::Button.resolve(ui.style()).size + PADDING,
         };
 
         let table = TableBuilder::new(ui)
-            .auto_shrink([false;2])
+            .auto_shrink([false; 2])
             .stick_to_bottom(true)
             .striped(self.config.striped)
             .cell_layout(egui::Layout::left_to_right(egui::Align::Center))
-            .column(Column::exact( match self.state.selected_request.is_some() {
+            .column(Column::exact(match self.state.selected_request.is_some() {
                 true => (frame.info().window_info.size.x - 320.) / 2. - 220.,
-                false => frame.info().window_info.size.x - 320. - 55.
+                false => frame.info().window_info.size.x - 320. - 55.,
             }))
             .column(Column::exact(50.))
             .column(Column::exact(100.))
@@ -292,7 +309,12 @@ impl MitmProxy {
             });
     }
 
-    pub fn render_columns(&mut self,frame: &mut eframe::Frame,  ctx: &egui::Context, ui: &mut egui::Ui) {
+    pub fn render_columns(
+        &mut self,
+        frame: &mut eframe::Frame,
+        ctx: &egui::Context,
+        ui: &mut egui::Ui,
+    ) {
         if !self.is_listening() {
             egui::Window::new("Modal Window")
                 .title_bar(false)
@@ -337,7 +359,7 @@ impl MitmProxy {
             ui.columns(2, |columns| {
                 ScrollArea::vertical()
                     .id_source("requests_table")
-                    .auto_shrink([false;2])
+                    .auto_shrink([false; 2])
                     .show(&mut columns[0], |ui| self.table_ui(frame, ui));
 
                 ScrollArea::vertical()
@@ -415,13 +437,13 @@ impl MitmProxy {
 
     pub fn render_bottom_panel(&mut self, ctx: &egui::Context, _frame: &mut Frame) {
         if self.is_listening() {
-                egui::Window::new("bottom_stop")
+            egui::Window::new("bottom_stop")
                 .title_bar(false)
                 .resizable(false)
-                .anchor(Align2::CENTER_BOTTOM, [0.0, -10.0])
+                .anchor(Align2::CENTER_BOTTOM, ANCHOR_OFFSET)
                 .default_height(30.0)
-                .show(ctx, |ui|{
-                    ui.horizontal_centered(|ui|{
+                .show(ctx, |ui| {
+                    ui.horizontal_centered(|ui| {
                         ScrollArea::neither().show(ui, |ui| {
                             ui.label("Proxy listening on: ");
                             ui.label(

@@ -13,10 +13,7 @@ const X: f32 = 980.;
 const Y: f32 = 960.0;
 const PADDING: f32 = 20.;
 const FONT_SIZE: f32 = 17.;
-
-// fn fetch_requests(){
-//     ProxyAPI::new().fetch();
-// }
+const LOGO_ASSET_PATH: &str = "./assets/logo.png";
 
 impl App for MitmProxy {
     fn update(&mut self, ctx: &egui::Context, frame: &mut eframe::Frame) {
@@ -52,9 +49,11 @@ fn load_icon(path: &str) -> eframe::IconData {
 }
 
 fn main() {
-    let mut native_options = eframe::NativeOptions::default();
-    native_options.initial_window_size = Some(Vec2::new(X, Y));
-    native_options.icon_data = Some(load_icon("./assets/logo.png"));
+    let native_options = eframe::NativeOptions {
+        initial_window_size: Some(Vec2::new(X, Y)),
+        icon_data = Some(load_icon(LOGO_ASSET_PATH)),
+        ..eframe::NativeOptions::default()
+    };
 
     run_native(
         "Man In The Middle Proxy",
