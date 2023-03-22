@@ -33,8 +33,6 @@ const PORT: &str = "8100";
 const OPEN_SANS_FONT: &str = "OpenSans";
 const OPEN_SANS_FONT_PATH_AS_BYTES: &[u8] = include_bytes!("../../fonts/OpenSans.ttf");
 
-
-
 #[derive(Serialize, Deserialize)]
 struct MitmProxyConfig {
     dark_mode: bool,
@@ -170,9 +168,18 @@ impl MitmProxy {
 
         let style = Style {
             text_styles: [
-                (Heading, FontId::new(DEFAULT_HEADING_FONT_SIZE, FontFamily::Proportional)),
-                (Body, FontId::new(DEFAULT_BODY_FONT_SIZE, FontFamily::Proportional)),
-                (Button, FontId::new(DEFAULT_BUTTON_FONT_SIZE, FontFamily::Proportional)),
+                (
+                    Heading,
+                    FontId::new(DEFAULT_HEADING_FONT_SIZE, FontFamily::Proportional),
+                ),
+                (
+                    Body,
+                    FontId::new(DEFAULT_BODY_FONT_SIZE, FontFamily::Proportional),
+                ),
+                (
+                    Button,
+                    FontId::new(DEFAULT_BUTTON_FONT_SIZE, FontFamily::Proportional),
+                ),
             ]
             .into(),
             ..Style::default()
