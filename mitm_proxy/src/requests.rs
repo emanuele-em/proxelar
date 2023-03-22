@@ -100,8 +100,12 @@ impl RequestInfo {
     pub fn render_row(&self, row: &mut TableRow) {
         let req = self.request.as_ref().unwrap();
         let res = self.response.as_ref().unwrap();
-        let time = (res.time() as f64 - req.time() as f64) * 10_f64.powf(-9.0);
-        let time = f64::trunc(time * 1000.);
+
+        let time = {
+            let innertime = (res.time() as f64 - req.time() as f64) * 10_f64.powf(-9.0);
+            f64::trunc(innertime * 1000.)
+        };
+
         row.col(|ui| {
             ui.label(req.uri().to_string());
         });
