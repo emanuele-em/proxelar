@@ -4552,16 +4552,19 @@ dependencies = [
 name = "tauri-ui"
 version = "0.0.0"
 dependencies = [
+ "proxyapi",
  "serde",
  "serde_json",
  "tauri",
  "tauri-build",
+ "tokio",
 ]
 
 [[package]]
 name = "tauri-ui-ui"
 version = "0.0.0"
 dependencies = [
+ "gloo-timers",
  "js-sys",
  "serde",
  "serde-wasm-bindgen",
