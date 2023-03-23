@@ -1,0 +1,132 @@
+/* https://blog.jim-nielsen.com/2021/css-system-colors/ */
+:root {
+  --c-bg: #fff;
+  --c-text: #000;
+}
+@media (prefers-color-scheme: dark) {
+  :root {
+    --c-bg: #000;
+    --c-text: #fff;
+  }
+}
+
+@supports (color-scheme: light dark)
+  and (background-color: Canvas)
+  and (color: CanvasText)
+  {
+  :root {
+    --c-bg: CanvasText;
+    --c-text: Canvas;
+  }
+}
+
+@supports (color-scheme: light dark)
+  and (background-color: Canvas)
+  and (color: CanvasText)
+  and @media (prefers-color-scheme: dark)
+  {
+  :root {
+    --c-bg: Canvas;
+    --c-text: CanvasText;
+  }
+}
+
+@supports (background-color: -apple-system-control-background)
+  and (color: text)
+  and @media (prefers-color-scheme: dark)
+  {
+  :root {
+    --c-bg: text;
+    --c-text: -apple-system-control-background;
+  }
+}
+
+[data-theme="light"] {
+  --font-color: var(--c-text);
+  --bg-color: var(--c-bg);
+  --post: #48cb90;
+  --get: #2a69a7;
+  --put: #d59d58;
+  --delete: #c83232;
+  --options: #24598f;
+  --head: #8c3fcf;
+  --patch: #5cd6bc;
+  --method: darkgray;
+}
+[data-theme="dark"] {
+  --font-color: var(--c-bg);
+  --bg-color: var(--c-text);
+  --post: #49cc90;
+  --get: #61affe;
+  --put: #fca130;
+  --delete: #f93e3e;
+  --options: #0d5aa7;
+  --head: #9012fe;
+  --patch: #50e3c2;
+  --method: lightgray;
+}
+
+* {
+  box-sizing: border-box;
+}
+body {
+  background-color: var(--bg-color);
+  color: var(--font-color);
+  user-select: none;
+  cursor: default;
+  overflow: hidden;
+}
+button {
+  font-size: 2em;
+  cursor: pointer;
+}
+
+.request-table tr > td:first-child {
+  width: 100%
+}
+
+.request-table {
+  white-space: nowrap;
+  overflow-y: scroll;
+}
+
+.request-table td,
+.request-table tr,
+.request-table th,
+.request-table {
+  padding: 0.5em;
+  border: 1px solid black;
+  border-collapse: collapse;
+}
+
+.proxy-off * {
+  font-size: 2em;
+  display: block;
+  margin: 0 auto;
+}
+
+.proxy-on .play-pause-stop button {
+  margin: 0 auto;
+  width: 50%;
+}
+
+.request-not-found {
+  text-align:center;
+  width: 100%;
+}
+
+.title h1 {
+  display: inline-block;
+}
+.title button {
+  float: right;
+}
+
+.method{color: var(--method)}
+.POST{color: var(--post)}
+.GET{color: var(--get)}
+.PUT{color: var(--put)}
+.DELETE{color: var(--delete)}
+.OPTIONS{color: var(--options)}
+.HEAD{color: var(--head)}
+.PATCH{color: var(--patch)}

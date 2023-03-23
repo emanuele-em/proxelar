@@ -3,6 +3,9 @@
 members = [
     "mitm_proxy",
     "proxyapi",
+    "proxyapi_models",
+    "tauri-ui",
+    "tauri-ui/src-tauri",
 ]
 
 

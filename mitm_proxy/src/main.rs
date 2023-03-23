@@ -13,7 +13,7 @@ const X: f32 = 980.;
 const Y: f32 = 960.0;
 const PADDING: f32 = 20.;
 const FONT_SIZE: f32 = 17.;
-const LOGO_ASSET_PATH: &str = "./assets/logo.png";
+const LOGO_ASSET_PATH: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/../assets/logo.png");
 
 impl App for MitmProxy {
     fn update(&mut self, ctx: &egui::Context, frame: &mut eframe::Frame) {
