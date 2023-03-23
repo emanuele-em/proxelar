@@ -1,0 +1,12 @@
+[package]
+name = "proxyapi_models"
+version = "0.1.0"
+edition = "2021"
+
+# See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
+
+[dependencies]
+serde = { version = "1.0", features = ["derive"] }
+bytes = { version = "1.4.0", features = ["serde"]}
+http-serde = "1.1"
+http = "0.2"

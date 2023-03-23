@@ -403,6 +403,9 @@ name = "bytes"
 version = "1.4.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "89b2fd2a0dcf38d7971e2194b6b6eebab45ae01067456a7fd93d5547a61b70be"
+dependencies = [
+ "serde",
+]
 
 [[package]]
 name = "cairo-rs"
@@ -2208,6 +2211,16 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "21dec9db110f5f872ed9699c3ecf50cf16f423502706ba5c72462e28d3157573"
 
 [[package]]
+name = "http-serde"
+version = "1.1.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "0e272971f774ba29341db2f686255ff8a979365a26fb9e4277f6b6d9ec0cdd5e"
+dependencies = [
+ "http",
+ "serde",
+]
+
+[[package]]
 name = "httparse"
 version = "1.8.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -3467,10 +3480,21 @@ dependencies = [
  "hyper-tungstenite",
  "moka",
  "openssl",
+ "proxyapi_models",
  "thiserror",
  "tokio",
  "tokio-rustls",
  "tokio-tungstenite",
+]
+
+[[package]]
+name = "proxyapi_models"
+version = "0.1.0"
+dependencies = [
+ "bytes",
+ "http",
+ "http-serde",
+ "serde",
 ]
 
 [[package]]
@@ -4526,6 +4550,7 @@ name = "tauri-ui"
 version = "0.0.0"
 dependencies = [
  "proxyapi",
+ "proxyapi_models",
  "tauri",
  "tauri-build",
  "tokio",
@@ -4538,6 +4563,7 @@ dependencies = [
  "gloo-timers",
  "gloo-utils",
  "js-sys",
+ "proxyapi_models",
  "serde",
  "wasm-bindgen",
  "wasm-bindgen-futures",

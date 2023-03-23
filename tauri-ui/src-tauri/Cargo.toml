@@ -14,8 +14,9 @@ tauri-build = { version = "1.2", features = [] }
 
 [dependencies]
 tauri = { version = "1.2", features = ["shell-open"] }
-proxyapi = {path = "../../proxyapi"}
 tokio = { version = "1", features = ["full"] }
+proxyapi = {path = "../../proxyapi"}
+proxyapi_models = {path = "../../proxyapi_models"}
 
 [features]
 # this feature is used for production builds or when `devPath` points to the filesystem

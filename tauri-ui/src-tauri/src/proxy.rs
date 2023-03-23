@@ -7,6 +7,7 @@ use tauri::{
 };
 
 use crate::managed_proxy::ManagedProxy;
+use proxyapi_models::RequestInfo;
 
 type ProxyState = Mutex<Option<ManagedProxy>>;
 
@@ -19,12 +20,12 @@ async fn start_proxy(proxy: State<'_, ProxyState>, addr: SocketAddr) -> Result<(
 }
 
 #[tauri::command]
-async fn fetch_request(proxy: State<'_, ProxyState>) -> Result<bool, String> {
+async fn fetch_request(proxy: State<'_, ProxyState>) -> Result<Option<RequestInfo>, String> {
     let mut proxy = proxy.lock().await;
     if let Some(ref mut proxy) = *proxy {
-        return Ok(proxy.try_recv_request().is_some())
+        return Ok(proxy.try_recv_request());
     };
-    Ok(false)
+    Ok(None)
 }
 
 #[tauri::command]

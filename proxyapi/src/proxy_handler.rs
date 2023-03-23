@@ -1,9 +1,9 @@
-use std::{collections::HashMap, sync::mpsc::SyncSender};
+use std::sync::mpsc::SyncSender;
 
 use async_trait::async_trait;
-use bytes::Bytes;
-use http::{HeaderMap, Method, Request, Response, StatusCode, Uri, Version};
+use http::{Request, Response};
 use hyper::{body::to_bytes, Body};
+pub use proxyapi_models::{ProxiedRequest, ProxiedResponse};
 
 use crate::{HttpContext, HttpHandler, RequestResponse};
 
@@ -105,140 +105,5 @@ impl HttpHandler for ProxyHandler {
 
         //Self::sanitize_body(res.body_mut());
         res
-    }
-}
-
-#[derive(Debug, Clone)]
-pub struct ProxiedRequest {
-    method: Method,
-    uri: Uri,
-    version: Version,
-    headers: HeaderMap,
-    body: Bytes,
-    time: i64,
-}
-
-impl ProxiedRequest {
-    fn new(
-        method: Method,
-        uri: Uri,
-        version: Version,
-        headers: HeaderMap,
-        body: Bytes,
-        time: i64,
-    ) -> Self {
-        Self {
-            method,
-            uri,
-            version,
-            headers,
-            body,
-            time,
-        }
-    }
-
-    pub fn method(&self) -> &Method {
-        &self.method
-    }
-
-    pub fn uri(&self) -> &Uri {
-        &self.uri
-    }
-
-    pub fn version(&self) -> &Version {
-        &self.version
-    }
-
-    pub fn headers(&self) -> &HeaderMap {
-        &self.headers
-    }
-
-    pub fn body(&self) -> &Bytes {
-        &self.body
-    }
-
-    pub fn time(&self) -> i64 {
-        self.time
-    }
-}
-
-#[derive(Debug, Clone)]
-pub struct ProxiedResponse {
-    status: StatusCode,
-    version: Version,
-    headers: HeaderMap,
-    body: Bytes,
-    time: i64,
-}
-
-impl ProxiedResponse {
-    fn new(
-        status: StatusCode,
-        version: Version,
-        headers: HeaderMap,
-        body: Bytes,
-        time: i64,
-    ) -> Self {
-        Self {
-            status,
-            version,
-            headers,
-            body,
-            time,
-        }
-    }
-
-    pub fn status(&self) -> &StatusCode {
-        &self.status
-    }
-
-    pub fn version(&self) -> &Version {
-        &self.version
-    }
-
-    pub fn headers(&self) -> &HeaderMap {
-        &self.headers
-    }
-
-    pub fn body(&self) -> &Bytes {
-        &self.body
-    }
-
-    pub fn time(&self) -> i64 {
-        self.time
-    }
-}
-
-trait ToString {
-    fn to_string(&self) -> String;
-}
-
-trait ToHashString {
-    fn to_hash_string(&self) -> HashMap<String, String>;
-}
-
-impl ToHashString for HeaderMap {
-    fn to_hash_string(&self) -> HashMap<String, String> {
-        let mut headers: HashMap<String, String> = HashMap::new();
-
-        for (k, v) in self.iter() {
-            headers
-                .insert(k.as_str().to_string(), v.to_str().unwrap().to_string())
-                .unwrap_or("NO header".to_string());
-        }
-        headers
-    }
-}
-
-impl ToString for Version {
-    fn to_string(&self) -> String {
-        match *self {
-            Version::HTTP_09 => "HTTP_09".to_string(),
-            Version::HTTP_10 => "HTTP_10".to_string(),
-            Version::HTTP_11 => "HTTP_11".to_string(),
-            Version::HTTP_2 => "HTTP_2".to_string(),
-            Version::HTTP_3 => "HTTP_3".to_string(),
-            _ => "__NonExhaustive".to_string(),
-        }
     }
 }

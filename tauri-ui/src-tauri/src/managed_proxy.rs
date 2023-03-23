@@ -3,14 +3,9 @@ use std::{
     sync::mpsc::Receiver,
 };
 
-use proxyapi::{ProxiedRequest, ProxiedResponse};
 use proxyapi::{Proxy, ProxyHandler};
+use proxyapi_models::RequestInfo;
 use tokio::sync::oneshot::Sender;
-
-pub struct RequestInfo (
-    Option<ProxiedRequest>,
-    Option<ProxiedResponse>,
-);
 
 pub struct ManagedProxy {
     rx: Receiver<ProxyHandler>,
@@ -52,4 +47,3 @@ impl ManagedProxy {
         }
     }
 }
-
