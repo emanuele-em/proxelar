@@ -2,6 +2,7 @@ use yew::prelude::*;
 
 use crate::components::proxy_off::ProxyOff;
 use crate::components::proxy_on::ProxyOn;
+use crate::components::theme_button::ThemeButton;
 
 #[function_component(App)]
 pub fn app() -> Html {
@@ -20,7 +21,10 @@ pub fn app() -> Html {
     };
     html! {
         <main>
-            <h1>{"Man In The Middle Proxy"}</h1>
+            <div class="title">
+                <h1>{"Man In The Middle Proxy"}</h1>
+                <ThemeButton />
+            </div>
             if *proxy_state {
                 <ProxyOn {stop} />
             } else {

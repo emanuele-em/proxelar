@@ -10,16 +10,21 @@
   }
 }
 
-@supports not (color-scheme: light dark) {
-  html {
-    background: var(--c-bg);
-    color: var(--c-text);
+@supports (color-scheme: light dark)
+  and (background-color: Canvas)
+  and (color: CanvasText) 
+  {
+  :root {
+    --c-bg: CanvasText;
+    --c-text: Canvas;
   }
 }
 
 @supports (color-scheme: light dark)
   and (background-color: Canvas)
-  and (color: CanvasText) {
+  and (color: CanvasText) 
+  and @media (prefers-color-scheme: dark)
+  {
   :root {
     --c-bg: Canvas;
     --c-text: CanvasText;
@@ -27,11 +32,36 @@
 }
 
 @supports (background-color: -apple-system-control-background)
-  and (color: text) {
+  and (color: text) 
+  and @media (prefers-color-scheme: dark)
+  {
   :root {
-    --c-bg: -apple-system-control-background;
-    --c-text: text;
+    --c-bg: text;
+    --c-text: -apple-system-control-background;
   }
+}
+
+[data-theme="light"] {
+    --font-color: var(--c-text);
+    --bg-color: var(--c-bg);
+}
+[data-theme="dark"] {
+    --font-color: var(--c-bg);
+    --bg-color: var(--c-text);
+}
+
+* {
+  box-sizing: border-box;
+}
+body {
+  background-color: var(--bg-color);
+  color: var(--font-color);
+  user-select: none;
+  cursor: default;
+  overflow: hidden;
+}
+button {
+  cursor: pointer;
 }
 
 .request-table tr > td:first-child {
@@ -40,6 +70,7 @@
 
 .request-table {
   white-space: nowrap;
+  overflow-y: scroll;
 }
 
 .request-table td,
@@ -54,4 +85,11 @@
   font-size: 2em;
   display: block;
   margin: 0 auto;
+}
+
+.title h1 {
+  display: inline-block;
+}
+.title button {
+  float: right;
 }
