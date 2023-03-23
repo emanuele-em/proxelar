@@ -1,27 +1,22 @@
 use std::{
     net::SocketAddr,
     sync::mpsc::Receiver,
-    thread::{self},
 };
 
 use proxyapi::{ProxiedRequest, ProxiedResponse};
 use proxyapi::{Proxy, ProxyHandler};
-use tokio::{runtime::Runtime, sync::oneshot::Sender};
-#[derive(Clone)]
-pub struct RequestInfo {
-    request: Option<ProxiedRequest>,
-    response: Option<ProxiedResponse>,
-}
-impl RequestInfo {
-    pub fn new(request: Option<ProxiedRequest>, response: Option<ProxiedResponse>) -> Self {
-        Self { request, response }
-    }
-}
+use tokio::sync::oneshot::Sender;
+
+pub struct RequestInfo (
+    Option<ProxiedRequest>,
+    Option<ProxiedResponse>,
+);
 
 pub struct ManagedProxy {
     rx: Receiver<ProxyHandler>,
-    close: Option<Sender<()>>,
-    thread: Option<tauri::async_runtime::JoinHandle<()>>,
+    // TODO: handle the cleanup
+    _close: Sender<()>,
+    _thread: tauri::async_runtime::JoinHandle<()>,
 }
 
 impl ManagedProxy {
@@ -42,8 +37,8 @@ impl ManagedProxy {
 
         ManagedProxy {
             rx,
-            close: Some(close_tx),
-            thread: Some(thread),
+            _close: close_tx,
+            _thread: thread,
         }
     }
 
@@ -51,20 +46,10 @@ impl ManagedProxy {
         match self.rx.try_recv() {
             Ok(l) => {
                 let (request, response) = l.to_parts();
-                Some(RequestInfo::new(request, response))
+                Some(RequestInfo(request, response))
             }
             _ => None,
         }
     }
 }
 
-impl Drop for ManagedProxy {
-    fn drop(&mut self) {
-        if let Some(t) = self.thread.take() {
-            if let Some(close) = self.close.take() {
-                let _ = close.send(());
-            }
-            // t.join().expect("Couldn't gracefully shutdown the proxy.")
-        }
-    }
-}
