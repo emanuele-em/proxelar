@@ -13,9 +13,9 @@ pub fn theme_button() -> Html {
     });
 
     let (data_theme, btn_text) = if *is_dark {
-        ("dark", "light")
+        ("dark", "🔆")
     } else {
-        ("light", "dark")
+        ("light", "🌙")
     };
     if let Some(window) = web_sys::window() {
         if let Some(document) = window.document() {

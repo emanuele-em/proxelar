@@ -43,7 +43,7 @@ pub fn proxy_off(props: &Props) -> Html {
     };
 
     html! {
-        <div class="proxy-on">
+        <div class="proxy-off">
             <TextInput value={proxy_addr.to_string()} onchange={addr_changed}/>
             if let Some(ref error) = *error {
                 <p>{error}</p>

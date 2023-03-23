@@ -47,13 +47,15 @@ pub fn proxy_on(props: &Props) -> Html {
         })
     };
     html! {
-        <>
-            if *paused {
-                <button onclick={Callback::from(move |_| paused.set(false))} ~innerText="Play" />
-            } else {
-                <button onclick={Callback::from(move |_| paused.set(true))} ~innerText="Pause" />
-            }
-            <button class="stop" {onclick} ~innerText={"Stop Proxy"} />
+        <div class="proxy-on">
+            <div class="play-pause-stop">
+                if *paused {
+                    <button onclick={Callback::from(move |_| paused.set(false))} ~innerText="▶" />
+                } else {
+                    <button onclick={Callback::from(move |_| paused.set(true))} ~innerText="⏸" />
+                }
+                <button {onclick} ~innerText={"⏹"} />
+            </div>
             if requests.borrow().len() > 0 {
                 <table class="request-table">
                     <RequestHeader />
@@ -64,8 +66,8 @@ pub fn proxy_on(props: &Props) -> Html {
                     }
                 </table>
             } else {
-                <h3>{"No Request Yet!"}</h3>
+                <h3 class="request-not-found">{"No Request Yet!"}</h3>
             }
-        </>
+        </div>
     }
 }
