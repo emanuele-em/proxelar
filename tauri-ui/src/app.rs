@@ -1,28 +1,20 @@
 use gloo_timers::callback::Timeout;
 use serde::{Deserialize, Serialize};
-use serde_wasm_bindgen::{to_value, from_value};
 use std::net::SocketAddr;
 use wasm_bindgen::prelude::*;
 use wasm_bindgen_futures::spawn_local;
+use gloo_utils::format::JsValueSerdeExt;
 use yew::prelude::*;
 
 #[wasm_bindgen]
 extern "C" {
-    #[wasm_bindgen(js_namespace = ["window", "__TAURI__", "tauri"])]
+    #[wasm_bindgen(js_namespace = ["window.__TAURI__.tauri"])]
     async fn invoke(cmd: &str, args: JsValue) -> JsValue;
-    #[wasm_bindgen(js_namespace = console)]
-    fn log(s: &str);
-
 }
 #[derive(Serialize, Deserialize)]
 struct Start {
     addr: SocketAddr,
 }
-
-#[derive(Serialize, Deserialize)]
-struct P(Option<()>);
-
-
 
 #[function_component(App)]
 pub fn app() -> Html {
@@ -39,7 +31,6 @@ pub fn app() -> Html {
                     let mut count = *request_count;
                     if *proxy_state {
                        let value= invoke("plugin:proxy|fetch_request", JsValue::NULL).await;
-                       log(&format!("{:?}", value));
                        if !value.is_falsy() {
                            count +=1;
                        }
@@ -54,18 +45,16 @@ pub fn app() -> Html {
         Callback::from(move |_| {
             if *proxy_state {
                 spawn_local(async move {
-                   let x = invoke("plugin:proxy|stop_proxy", JsValue::NULL).await;
-                   log(&format!("{:?}", x));
+                   invoke("plugin:proxy|stop_proxy", JsValue::NULL).await;
                 });
                 requests_count.set(0);
             } else {
-                let args = to_value(&Start {
+                let args = JsValue::from_serde(&Start {
                     addr: "127.0.0.1:8100".parse().unwrap(),
                 })
                 .unwrap();
                 spawn_local(async move {
-                   let x= invoke("plugin:proxy|start_proxy", args).await;
-                   log(&format!("{:?}", x));
+                   invoke("plugin:proxy|start_proxy", args).await;
                 });
             };
             proxy_state.set(!*proxy_state);

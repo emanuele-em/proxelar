@@ -1464,7 +1464,6 @@ checksum = "13e2792b0ff0340399d58445b88fd9770e3489eff258a4cbc1523418f12abf84"
 dependencies = [
  "futures-channel",
  "futures-core",
- "futures-executor",
  "futures-io",
  "futures-sink",
  "futures-task",
@@ -2203,29 +2202,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "http-body"
-version = "1.0.0-rc.2"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "951dfc2e32ac02d67c90c0d65bd27009a635dc9b381a2cc7d284ab01e3a0150d"
-dependencies = [
- "bytes",
- "http",
-]
-
-[[package]]
-name = "http-body-util"
-version = "0.1.0-rc.2"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "92445bc9cc14bfa0a3ce56817dc3b5bcc227a168781a356b702410789cec0d10"
-dependencies = [
- "bytes",
- "futures-util",
- "http",
- "http-body 1.0.0-rc.2",
- "pin-project-lite",
-]
-
-[[package]]
 name = "http-range"
 version = "0.1.5"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -2255,7 +2231,7 @@ dependencies = [
  "futures-util",
  "h2",
  "http",
- "http-body 0.4.5",
+ "http-body",
  "httparse",
  "httpdate",
  "itoa 1.0.5",
@@ -2745,7 +2721,6 @@ dependencies = [
  "egui_extras",
  "image",
  "proxyapi",
- "rand 0.8.5",
  "serde",
  "tokio",
 ]
@@ -3486,9 +3461,7 @@ dependencies = [
  "bstr",
  "bytes",
  "chrono",
- "futures",
  "http",
- "http-body-util",
  "hyper",
  "hyper-rustls",
  "hyper-tungstenite",
@@ -4553,8 +4526,6 @@ name = "tauri-ui"
 version = "0.0.0"
 dependencies = [
  "proxyapi",
- "serde",
- "serde_json",
  "tauri",
  "tauri-build",
  "tokio",
@@ -4565,12 +4536,11 @@ name = "tauri-ui-ui"
 version = "0.0.0"
 dependencies = [
  "gloo-timers",
+ "gloo-utils",
  "js-sys",
  "serde",
- "serde-wasm-bindgen",
  "wasm-bindgen",
  "wasm-bindgen-futures",
- "web-sys",
  "yew",
 ]
 
@@ -5153,8 +5123,6 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "31f8dcbc21f30d9b8f2ea926ecb58f6b91192c17e9d33594b3df58b2007ca53b"
 dependencies = [
  "cfg-if",
- "serde",
- "serde_json",
  "wasm-bindgen-macro",
 ]
 
