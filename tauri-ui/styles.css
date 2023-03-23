@@ -12,7 +12,7 @@
 
 @supports (color-scheme: light dark)
   and (background-color: Canvas)
-  and (color: CanvasText) 
+  and (color: CanvasText)
   {
   :root {
     --c-bg: CanvasText;
@@ -22,7 +22,7 @@
 
 @supports (color-scheme: light dark)
   and (background-color: Canvas)
-  and (color: CanvasText) 
+  and (color: CanvasText)
   and @media (prefers-color-scheme: dark)
   {
   :root {
@@ -32,7 +32,7 @@
 }
 
 @supports (background-color: -apple-system-control-background)
-  and (color: text) 
+  and (color: text)
   and @media (prefers-color-scheme: dark)
   {
   :root {
