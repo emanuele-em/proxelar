@@ -1,3 +1,39 @@
+/* https://blog.jim-nielsen.com/2021/css-system-colors/ */
+:root {
+  --c-bg: #fff;
+  --c-text: #000;
+}
+@media (prefers-color-scheme: dark) {
+  :root {
+    --c-bg: #000;
+    --c-text: #fff;
+  }
+}
+
+@supports not (color-scheme: light dark) {
+  html {
+    background: var(--c-bg);
+    color: var(--c-text);
+  }
+}
+
+@supports (color-scheme: light dark)
+  and (background-color: Canvas)
+  and (color: CanvasText) {
+  :root {
+    --c-bg: Canvas;
+    --c-text: CanvasText;
+  }
+}
+
+@supports (background-color: -apple-system-control-background)
+  and (color: text) {
+  :root {
+    --c-bg: -apple-system-control-background;
+    --c-text: text;
+  }
+}
+
 .request-table tr > td:first-child {
   width: 100%
 }
