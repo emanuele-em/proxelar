@@ -1,5 +1,4 @@
 use gloo_timers::callback::Timeout;
-use proxyapi_models::RequestInfo;
 use wasm_bindgen_futures::spawn_local;
 use yew::prelude::*;
 
@@ -14,14 +13,18 @@ pub struct Props {
 #[function_component(ProxyOn)]
 pub fn proxy_on(props: &Props) -> Html {
     let trigger = use_force_update();
-    let requests = use_mut_ref(Vec::<RequestInfo>::new);
+    let paused = use_state(|| false);
+    let requests = use_mut_ref(Vec::new);
     {
         let requests = requests.clone();
+        let paused = paused.clone();
         Timeout::new(1_000, move || {
             spawn_local(async move {
                 let on_request = Callback::from(move |request_info| {
                     let mut r = requests.borrow_mut();
-                    r.push(request_info);
+                    if !*paused {
+                        r.push(request_info);
+                    }
                 });
                 poll_proxy(Some(on_request));
                 trigger.force_update();
@@ -45,7 +48,12 @@ pub fn proxy_on(props: &Props) -> Html {
     };
     html! {
         <>
-            <button {onclick} ~innerText={"Stop Proxy"} />
+            if *paused {
+                <button onclick={Callback::from(move |_| paused.set(false))} ~innerText="Play" />
+            } else {
+                <button onclick={Callback::from(move |_| paused.set(true))} ~innerText="Pause" />
+            }
+            <button class="stop" {onclick} ~innerText={"Stop Proxy"} />
             if requests.borrow().len() > 0 {
                 <table>
                     <RequestHeader />
