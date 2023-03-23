@@ -1,7 +1,4 @@
-use std::{
-    net::SocketAddr,
-    sync::mpsc::Receiver,
-};
+use std::{net::SocketAddr, sync::mpsc::Receiver};
 
 use proxyapi::{Proxy, ProxyHandler};
 use proxyapi_models::RequestInfo;

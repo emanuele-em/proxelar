@@ -1,10 +1,10 @@
 use gloo_timers::callback::Timeout;
-use serde::{Deserialize, Serialize};
+use gloo_utils::format::JsValueSerdeExt;
 use proxyapi_models::RequestInfo;
+use serde::Serialize;
 use std::net::SocketAddr;
 use wasm_bindgen::prelude::*;
 use wasm_bindgen_futures::spawn_local;
-use gloo_utils::format::JsValueSerdeExt;
 use yew::prelude::*;
 
 #[wasm_bindgen]
@@ -12,7 +12,7 @@ extern "C" {
     #[wasm_bindgen(js_namespace = ["window.__TAURI__.tauri"])]
     async fn invoke(cmd: &str, args: JsValue) -> JsValue;
 }
-#[derive(Serialize, Deserialize)]
+#[derive(Serialize)]
 struct Start {
     addr: SocketAddr,
 }
