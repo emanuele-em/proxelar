@@ -1,0 +1,16 @@
+.request-table tr > td:first-child {
+  width: 100%
+}
+
+.request-table {
+  white-space: nowrap;
+}
+
+.request-table td,
+.request-table tr,
+.request-table th,
+.request-table {
+  padding: 0.5em;
+  border: 1px solid black;
+  border-collapse: collapse;
+}

@@ -55,7 +55,7 @@ pub fn proxy_on(props: &Props) -> Html {
             }
             <button class="stop" {onclick} ~innerText={"Stop Proxy"} />
             if requests.borrow().len() > 0 {
-                <table>
+                <table class="request-table">
                     <RequestHeader />
                     {
                         requests.borrow().iter().cloned().map(
