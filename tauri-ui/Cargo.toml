@@ -12,4 +12,9 @@ gloo-utils = { version = "0.1", features = ["serde"]}
 gloo-timers = "0.2"
 wasm-bindgen-futures = "0.4"
 js-sys = "0.3"
+web-sys = "0.3"
 proxyapi_models = {path = "../proxyapi_models"}
+
+# machete identifies js-sys as non required package
+[package.metadata.cargo-machete]
+ignored = ["js-sys"]
