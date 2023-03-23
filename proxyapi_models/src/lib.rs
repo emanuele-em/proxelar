@@ -3,7 +3,7 @@ use http::{HeaderMap, Method, StatusCode, Uri, Version};
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct ProxiedRequest {
     #[serde(with = "http_serde::method")]
     method: Method,
@@ -61,7 +61,7 @@ impl ProxiedRequest {
     }
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct ProxiedResponse {
     #[serde(with = "http_serde::status_code")]
     status: StatusCode,
@@ -145,5 +145,5 @@ impl ToString for Version {
     }
 }
 
-#[derive(Serialize, Deserialize, Debug)]
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq)]
 pub struct RequestInfo(pub Option<ProxiedRequest>, pub Option<ProxiedResponse>);

@@ -1,8 +1,10 @@
-use crate::api::{poll_proxy, stop_proxy};
 use gloo_timers::callback::Timeout;
 use proxyapi_models::RequestInfo;
 use wasm_bindgen_futures::spawn_local;
 use yew::prelude::*;
+
+use crate::api::{poll_proxy, stop_proxy};
+use crate::components::request::{RequestRow, RequestHeader};
 
 #[derive(Clone, PartialEq, Properties)]
 pub struct Props {
@@ -44,10 +46,17 @@ pub fn proxy_on(props: &Props) -> Html {
     html! {
         <>
             <button {onclick} ~innerText={"Stop Proxy"} />
-            {
-                requests.borrow().iter().filter_map(|r| {
-                    r.0.as_ref().map(|r| html!{<li>{r.method().to_string()}</li>})
-                }).collect::<Html>()
+            if requests.borrow().len() > 0 {
+                <table>
+                    <RequestHeader />
+                    {
+                        requests.borrow().iter().cloned().map(
+                            |exchange| html!{ <RequestRow {exchange}/> }
+                        ).collect::<Html>()
+                    }
+                </table>
+            } else {
+                <h3>{"No Request Yet!"}</h3>
             }
         </>
     }
