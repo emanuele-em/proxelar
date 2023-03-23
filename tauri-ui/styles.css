@@ -42,12 +42,28 @@
 }
 
 [data-theme="light"] {
-    --font-color: var(--c-text);
-    --bg-color: var(--c-bg);
+  --font-color: var(--c-text);
+  --bg-color: var(--c-bg);
+  --post: #48cb90;
+  --get: #2a69a7;
+  --put: #d59d58;
+  --delete: #c83232;
+  --options: #24598f;
+  --head: #8c3fcf;
+  --patch: #5cd6bc;
+  --method: darkgray;
 }
 [data-theme="dark"] {
-    --font-color: var(--c-bg);
-    --bg-color: var(--c-text);
+  --font-color: var(--c-bg);
+  --bg-color: var(--c-text);
+  --post: #49cc90;
+  --get: #61affe;
+  --put: #fca130;
+  --delete: #f93e3e;
+  --options: #0d5aa7;
+  --head: #9012fe;
+  --patch: #50e3c2;
+  --method: lightgray;
 }
 
 * {
@@ -105,3 +121,12 @@ button {
 .title button {
   float: right;
 }
+
+.method{color: var(--method)}
+.POST{color: var(--post)}
+.GET{color: var(--get)}
+.PUT{color: var(--put)}
+.DELETE{color: var(--delete)}
+.OPTIONS{color: var(--options)}
+.HEAD{color: var(--head)}
+.PATCH{color: var(--patch)}

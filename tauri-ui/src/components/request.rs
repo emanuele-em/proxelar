@@ -21,15 +21,18 @@ pub fn request_header() -> Html {
 #[function_component(RequestRow)]
 pub fn request_row(props: &Props) -> Html {
     match props.exchange {
-        RequestInfo(Some(ref req), Some(ref res)) => html! {
-            <tr>
-                <td>{req.uri().to_string()}</td>
-                <td>{req.method().to_string()}</td>
-                <td>{res.status().to_string()}</td>
-                <td>{req.body().len()}</td>
-                <td>{((res.time() - req.time()) as f64 * 1e-6).trunc()}</td>
-            </tr>
-        },
+        RequestInfo(Some(ref req), Some(ref res)) => {
+            let method = req.method().to_string();
+            html! {
+                <tr>
+                    <td>{req.uri().to_string()}</td>
+                    <td class={classes!("method", &method)} >{method}</td>
+                    <td>{res.status().to_string()}</td>
+                    <td>{req.body().len()}</td>
+                    <td>{((res.time() - req.time()) as f64 * 1e-6).trunc()}</td>
+                </tr>
+            }
+        }
         _ => {
             html! {
                 <tr>{"Parsing Falied"}</tr>
