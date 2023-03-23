@@ -14,3 +14,8 @@
   border: 1px solid black;
   border-collapse: collapse;
 }
+.proxy-on * {
+  font-size: 2em;
+  display: block;
+  margin: 0 auto;
+}
