@@ -7,7 +7,9 @@ use yew::prelude::*;
 #[derive(Clone, PartialEq, Properties)]
 struct RowProps {
     pub exchange: RequestInfo,
-    pub ondelete: Callback<()>,
+    pub idx: usize,
+    pub ondelete: Callback<usize>,
+    pub onselect: Callback<usize>,
 }
 
 #[function_component(RequestHeader)]
@@ -28,16 +30,22 @@ fn request_header() -> Html {
 fn request_row(props: &RowProps) -> Html {
     match props.exchange {
         RequestInfo(Some(ref req), Some(ref res)) => {
+            let idx = props.idx;
             let method = req.method().to_string();
             let ondelete = props.ondelete.clone();
+            let onselect = props.onselect.clone();
             html! {
-                <tr>
+                <tr onclick={move |_| {onselect.emit(idx)}}>
                     <td>{req.uri().to_string()}</td>
                     <td class={classes!("method", &method)} >{method}</td>
                     <td>{res.status().to_string()}</td>
                     <td>{req.body().len()}</td>
                     <td>{((res.time() - req.time()) as f64 * 1e-6).trunc()}</td>
-                    <td><button onclick={move |_| {ondelete.emit(())}} ~innerText="🗑 "/></td>
+                    <td>
+                        <button
+                            onclick={move |e: MouseEvent| {ondelete.emit(idx); e.stop_immediate_propagation();}}
+                            ~innerText="🗑 "/>
+                    </td>
                 </tr>
             }
         }
@@ -60,12 +68,33 @@ pub fn request_table(props: &Props) -> Html {
     let trigger = use_force_update();
     let requests = props.requests.clone();
     let paused = props.paused;
+    let selected = use_state_eq(|| None as Option<usize>);
+    let onselect = {
+        let requests = requests.clone();
+        let selected = selected.clone();
+        Callback::from(move |id: usize| {
+            let len = requests.borrow().len();
+            if id < len {
+                selected.set(Some(id));
+            }
+        })
+    };
     let ondelete = {
         let requests = requests.clone();
         let trigger = trigger.clone();
+        let selected = selected.clone();
         Callback::from(move |id: usize| {
             let mut r = requests.borrow_mut();
             r.remove(id);
+            match *selected {
+                Some(cur) if cur == id => {
+                    selected.set(None);
+                }
+                Some(cur) if cur > id => {
+                    selected.set(Some(cur - 1));
+                }
+                _ => {}
+            }
             trigger.force_update();
         })
     };
@@ -122,6 +151,9 @@ pub fn request_table(props: &Props) -> Html {
             background-color: var(--bg-color);
             z-index: 1000;
         }
+        .request {
+            flex: 1;
+        }
         "#
     );
     html! {
@@ -131,18 +163,23 @@ pub fn request_table(props: &Props) -> Html {
                     <RequestHeader />
                     {
                         requests.borrow().iter().cloned().enumerate().map(
-                            |(id, exchange)| {
+                            |(idx, exchange)| {
                                 let ondelete = ondelete.clone();
-                                let ondelete = Callback::from(move |()| {
-                                    ondelete.emit(id);
-                                });
+                                let onselect = onselect.clone();
                                 html!{
-                                    <RequestRow {ondelete} {exchange}/>
+                                    <RequestRow {onselect} {idx} {ondelete} {exchange}/>
                                 }
                             }
                         ).collect::<Html>()
                     }
                 </table>
+                if let Some(idx) = *selected {
+                    if let Some(RequestInfo(Some(req), Some( res))) = requests.borrow().iter().nth(idx) {
+                        <div class="request">
+                            {format!("{:?}{:?}", req, res)}
+                        </div>
+                    }
+                }
             </div>
         } else {
             <h3 ~innerText="No Request Yet!" />
