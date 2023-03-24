@@ -4560,7 +4560,6 @@ dependencies = [
 name = "tauri-ui-ui"
 version = "0.0.0"
 dependencies = [
- "gloo-timers",
  "gloo-utils",
  "js-sys",
  "proxyapi_models",
