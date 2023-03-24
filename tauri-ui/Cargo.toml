@@ -6,6 +6,7 @@ edition = "2021"
 # See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
 [dependencies]
 yew = { version = "0.20", features = ["csr"] }
+stylist = { version = "0.12.0", features = ["yew_use_style"] }
 serde = { version = "1.0", features = ["derive"] }
 wasm-bindgen = "0.2"
 gloo-utils = { version = "0.1", features = ["serde"]}

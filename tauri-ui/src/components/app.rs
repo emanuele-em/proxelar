@@ -1,3 +1,4 @@
+use stylist::yew::use_style;
 use yew::prelude::*;
 
 use crate::components::proxy_off::ProxyOff;
@@ -19,8 +20,18 @@ pub fn app() -> Html {
             proxy_state.set(false);
         })
     };
+    let style = use_style!(
+        r#"
+        display: flex;
+        height: 100vh;
+        flex-flow: column;
+        > :last-child {
+            flex: 1;
+        }
+        "#
+    );
     html! {
-        <main>
+        <main class={style}>
             <TitleBar />
             if *proxy_state {
                 <ProxyOn {stop} />

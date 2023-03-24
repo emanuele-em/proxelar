@@ -1,3 +1,4 @@
+use stylist::yew::use_style;
 use yew::prelude::*;
 
 #[function_component(ThemeButton)]
@@ -36,8 +37,25 @@ fn theme_button() -> Html {
 
 #[function_component(TitleBar)]
 pub fn title_bar() -> Html {
+    let style = use_style!(
+        r#"
+        display: flex;
+        flex-flow: row;
+        align-items: center;
+        vertical-align: baseline;
+        h1 {
+            flex: 1;
+        }
+        button {
+        }
+        * {
+           font-size: 2rem;
+           margin: 0.5rem;
+        }
+        "#
+    );
     html! {
-        <div class="title">
+        <div class={style}>
             <h1 ~innerText="Man In The Middle Proxy" />
             <ThemeButton />
         </div>
