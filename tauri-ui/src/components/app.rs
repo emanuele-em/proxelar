@@ -1,8 +1,9 @@
+use stylist::yew::use_style;
 use yew::prelude::*;
 
 use crate::components::proxy_off::ProxyOff;
 use crate::components::proxy_on::ProxyOn;
-use crate::components::theme_button::ThemeButton;
+use crate::components::title_bar::TitleBar;
 
 #[function_component(App)]
 pub fn app() -> Html {
@@ -19,12 +20,29 @@ pub fn app() -> Html {
             proxy_state.set(false);
         })
     };
+    let style = use_style!(
+        r#"
+        display: flex;
+        height: 100vh;
+        flex-flow: column;
+        > :last-child {
+            flex: 1;
+        }
+        "#
+    );
+    #[cfg(debug_assertions)]
+    {
+        // in debug mode some time proxy is left open
+        use_effect_with_deps(
+            move |_| {
+                crate::api::stop_proxy(None);
+            },
+            (),
+        );
+    }
     html! {
-        <main>
-            <div class="title">
-                <h1>{"Man In The Middle Proxy"}</h1>
-                <ThemeButton />
-            </div>
+        <main class={style}>
+            <TitleBar />
             if *proxy_state {
                 <ProxyOn {stop} />
             } else {

@@ -1,6 +1,7 @@
 use crate::api::start_proxy;
 use crate::components::input::TextInput;
 use std::net::SocketAddr;
+use stylist::yew::use_style;
 use yew::prelude::*;
 
 #[derive(Clone, PartialEq, Properties)]
@@ -41,9 +42,19 @@ pub fn proxy_off(props: &Props) -> Html {
             }
         })
     };
-
+    let style = use_style!(
+        r#"
+        display: flex;
+        flex-flow: row;
+        align-items: center;
+        justify-content: center;
+        * {
+           font-size: 2rem;
+        }
+        "#
+    );
     html! {
-        <div class="proxy-off">
+        <div class={style}>
             <TextInput value={proxy_addr.to_string()} onchange={addr_changed}/>
             if let Some(ref error) = *error {
                 <p>{error}</p>
