@@ -30,16 +30,6 @@ pub fn app() -> Html {
         }
         "#
     );
-    #[cfg(debug_assertions)]
-    {
-        // in debug mode some time proxy is left open
-        use_effect_with_deps(
-            move |_| {
-                crate::api::stop_proxy(None);
-            },
-            (),
-        );
-    }
     html! {
         <main class={style}>
             <TitleBar />
