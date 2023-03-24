@@ -32,7 +32,10 @@ async fn start_proxy<R: Runtime>(
     });
 
     let mut proxy = proxy.lock().await;
-    assert!(proxy.is_none());
+    #[cfg(not(debug_assertions))]
+    {
+        assert!(proxy.is_none());
+    }
     proxy.replace((close_tx, thread));
 
     tauri::async_runtime::spawn(async move {
