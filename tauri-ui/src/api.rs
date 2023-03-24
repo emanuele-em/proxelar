@@ -1,7 +1,7 @@
 use gloo_utils::format::JsValueSerdeExt;
-use js_sys::{Promise, Function};
+use js_sys::{Function, Promise};
 use proxyapi_models::RequestInfo;
-use serde::{Serialize, Deserialize};
+use serde::{Deserialize, Serialize};
 use std::net::SocketAddr;
 use wasm_bindgen::prelude::*;
 use wasm_bindgen_futures::spawn_local;
@@ -21,7 +21,10 @@ impl Drop for EventListener {
     fn drop(&mut self) {
         let promise = self.0.clone();
         spawn_local(async move {
-            let unlisten: Function = wasm_bindgen_futures::JsFuture::from(promise).await.unwrap().into();
+            let unlisten: Function = wasm_bindgen_futures::JsFuture::from(promise)
+                .await
+                .unwrap()
+                .into();
             unlisten.call0(&JsValue::undefined()).unwrap();
         });
     }
@@ -32,14 +35,10 @@ fn listen(event: &str, handler: Closure<dyn FnMut(JsValue)>) -> EventListener {
     EventListener(promise, handler)
 }
 
-
 #[derive(Serialize)]
 struct Start {
     addr: SocketAddr,
 }
-
-
-
 
 pub fn start_proxy(addr: SocketAddr, on_start: Option<Callback<()>>) {
     let args = JsValue::from_serde(&Start { addr }).unwrap();
@@ -59,7 +58,6 @@ pub fn stop_proxy(on_stop: Option<Callback<()>>) {
         }
     });
 }
-
 
 #[derive(Deserialize)]
 struct ProxyEvent {

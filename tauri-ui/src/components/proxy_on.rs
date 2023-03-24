@@ -13,6 +13,15 @@ pub fn proxy_on(props: &Props) -> Html {
     let trigger = use_force_update();
     let paused = use_state(|| false);
     let requests = use_mut_ref(Vec::new);
+    let ondelete = {
+        let trigger = trigger.clone();
+        let requests = requests.clone();
+        Callback::from(move |id: usize| {
+            let mut r = requests.borrow_mut();
+            r.remove(id);
+            trigger.force_update();
+        })
+    };
     use_effect_with_deps(
         move |(requests, paused)| {
             let requests = requests.clone();
@@ -57,8 +66,16 @@ pub fn proxy_on(props: &Props) -> Html {
                 <table class="request-table">
                     <RequestHeader />
                     {
-                        requests.borrow().iter().cloned().map(
-                            |exchange| html!{ <RequestRow {exchange}/> }
+                        requests.borrow().iter().cloned().enumerate().map(
+                            |(id, exchange)| {
+                                let ondelete = ondelete.clone();
+                                let ondelete = Callback::from(move |()| {
+                                    ondelete.emit(id);
+                                });
+                                html!{
+                                    <RequestRow {ondelete} {exchange}/>
+                                }
+                            }
                         ).collect::<Html>()
                     }
                 </table>

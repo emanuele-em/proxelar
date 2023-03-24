@@ -1,6 +1,6 @@
 use proxyapi::Proxy;
-use tokio::sync::oneshot::Sender;
 use std::net::SocketAddr;
+use tokio::sync::oneshot::Sender;
 
 use tauri::{
     async_runtime::Mutex,
@@ -38,10 +38,10 @@ async fn start_proxy<R: Runtime>(
     tauri::async_runtime::spawn(async move {
         for exchange in rx.iter() {
             let (request, response) = exchange.to_parts();
-            app.emit_all("proxy_event", RequestInfo(request, response)).unwrap();
+            app.emit_all("proxy_event", RequestInfo(request, response))
+                .unwrap();
         }
     });
-
 
     Ok(())
 }
@@ -60,9 +60,6 @@ pub fn init<R: Runtime>() -> TauriPlugin<R> {
             app_handle.manage(Mutex::new(None) as ProxyState);
             Ok(())
         })
-        .invoke_handler(tauri::generate_handler![
-            start_proxy,
-            stop_proxy,
-        ])
+        .invoke_handler(tauri::generate_handler![start_proxy, stop_proxy,])
         .build()
 }
