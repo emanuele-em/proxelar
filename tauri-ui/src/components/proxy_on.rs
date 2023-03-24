@@ -1,9 +1,7 @@
-use gloo_timers::callback::Timeout;
-use wasm_bindgen_futures::spawn_local;
 use yew::prelude::*;
 
-use crate::api::{poll_proxy, stop_proxy};
-use crate::components::request::{RequestRow, RequestHeader};
+use crate::api::{listen_proxy_event, stop_proxy};
+use crate::components::request::{RequestHeader, RequestRow};
 
 #[derive(Clone, PartialEq, Properties)]
 pub struct Props {
@@ -15,23 +13,22 @@ pub fn proxy_on(props: &Props) -> Html {
     let trigger = use_force_update();
     let paused = use_state(|| false);
     let requests = use_mut_ref(Vec::new);
-    {
-        let requests = requests.clone();
-        let paused = paused.clone();
-        Timeout::new(1_000, move || {
-            spawn_local(async move {
-                let on_request = Callback::from(move |request_info| {
-                    let mut r = requests.borrow_mut();
-                    if !*paused {
-                        r.push(request_info);
-                    }
-                });
-                poll_proxy(Some(on_request));
-                trigger.force_update();
-            })
-        })
-        .forget();
-    };
+    use_effect_with_deps(
+        move |(requests, paused)| {
+            let requests = requests.clone();
+            let paused = *paused;
+            let on_request = Callback::from(move |request_info| {
+                let mut r = requests.borrow_mut();
+                if !paused {
+                    r.push(request_info);
+                    trigger.force_update();
+                }
+            });
+            let listener = listen_proxy_event(Some(on_request));
+            move || drop(listener)
+        },
+        (requests.clone(), *paused),
+    );
     let onclick = {
         let requests = requests.clone();
         let stop = props.stop.clone();

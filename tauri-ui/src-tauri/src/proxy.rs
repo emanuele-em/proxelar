@@ -1,31 +1,49 @@
+use proxyapi::Proxy;
+use tokio::sync::oneshot::Sender;
 use std::net::SocketAddr;
 
 use tauri::{
     async_runtime::Mutex,
     plugin::{Builder, TauriPlugin},
-    Manager, Runtime, State,
+    AppHandle, Manager, Runtime, State,
 };
 
-use crate::managed_proxy::ManagedProxy;
 use proxyapi_models::RequestInfo;
 
-type ProxyState = Mutex<Option<ManagedProxy>>;
+type ProxyState = Mutex<Option<(Sender<()>, tauri::async_runtime::JoinHandle<()>)>>;
 
 #[tauri::command]
-async fn start_proxy(proxy: State<'_, ProxyState>, addr: SocketAddr) -> Result<(), String> {
+async fn start_proxy<R: Runtime>(
+    app: AppHandle<R>,
+    proxy: State<'_, ProxyState>,
+    addr: SocketAddr,
+) -> Result<(), String> {
+    let (tx, rx) = std::sync::mpsc::sync_channel(1);
+    let (close_tx, close_rx) = tokio::sync::oneshot::channel();
+    let thread = tauri::async_runtime::spawn(async move {
+        if let Err(e) = Proxy::new(addr, Some(tx.clone()))
+            .start(async move {
+                let _ = close_rx.await;
+            })
+            .await
+        {
+            eprintln!("Error running proxy on {:?}: {e}", addr);
+        }
+    });
+
     let mut proxy = proxy.lock().await;
     assert!(proxy.is_none());
-    proxy.replace(ManagedProxy::new(addr));
-    Ok(())
-}
+    proxy.replace((close_tx, thread));
 
-#[tauri::command]
-async fn fetch_request(proxy: State<'_, ProxyState>) -> Result<Option<RequestInfo>, String> {
-    let mut proxy = proxy.lock().await;
-    if let Some(ref mut proxy) = *proxy {
-        return Ok(proxy.try_recv_request());
-    };
-    Ok(None)
+    tauri::async_runtime::spawn(async move {
+        for exchange in rx.iter() {
+            let (request, response) = exchange.to_parts();
+            app.emit_all("proxy_event", RequestInfo(request, response)).unwrap();
+        }
+    });
+
+
+    Ok(())
 }
 
 #[tauri::command]
@@ -45,7 +63,6 @@ pub fn init<R: Runtime>() -> TauriPlugin<R> {
         .invoke_handler(tauri::generate_handler![
             start_proxy,
             stop_proxy,
-            fetch_request
         ])
         .build()
 }
