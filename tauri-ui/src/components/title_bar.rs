@@ -1,7 +1,7 @@
 use yew::prelude::*;
 
 #[function_component(ThemeButton)]
-pub fn theme_button() -> Html {
+fn theme_button() -> Html {
     let is_dark = use_state(|| {
         let mut is_dark = false;
         if let Some(window) = web_sys::window() {
@@ -31,5 +31,15 @@ pub fn theme_button() -> Html {
     };
     html! {
         <button {onclick} ~innerText={btn_text} />
+    }
+}
+
+#[function_component(TitleBar)]
+pub fn title_bar() -> Html {
+    html! {
+        <div class="title">
+            <h1 ~innerText="Man In The Middle Proxy" />
+            <ThemeButton />
+        </div>
     }
 }
