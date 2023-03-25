@@ -32,10 +32,6 @@ async fn start_proxy<R: Runtime>(
     });
 
     let mut proxy = proxy.lock().await;
-    #[cfg(not(debug_assertions))]
-    {
-        assert!(proxy.is_none());
-    }
     proxy.replace((close_tx, thread));
 
     tauri::async_runtime::spawn(async move {
@@ -57,12 +53,21 @@ async fn stop_proxy(proxy: State<'_, ProxyState>) -> Result<(), String> {
     Ok(())
 }
 
+#[tauri::command]
+async fn proxy_status(proxy: State<'_, ProxyState>) -> Result<bool, String> {
+    Ok(proxy.lock().await.is_some())
+}
+
 pub fn init<R: Runtime>() -> TauriPlugin<R> {
     Builder::new("proxy")
         .setup(|app_handle| {
             app_handle.manage(Mutex::new(None) as ProxyState);
             Ok(())
         })
-        .invoke_handler(tauri::generate_handler![start_proxy, stop_proxy,])
+        .invoke_handler(tauri::generate_handler![
+            start_proxy,
+            stop_proxy,
+            proxy_status
+        ])
         .build()
 }
