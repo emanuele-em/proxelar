@@ -2,7 +2,7 @@ use std::{cell::RefCell, rc::Rc};
 use stylist::yew::use_style;
 
 use crate::api::listen_proxy_event;
-use proxyapi_models::RequestInfo;
+use proxyapi_models::{ProxiedRequest, ProxiedResponse, RequestInfo};
 use yew::prelude::*;
 #[derive(Clone, PartialEq, Properties)]
 struct RowProps {
@@ -54,6 +54,38 @@ fn request_row(props: &RowProps) -> Html {
                 <tr>{"Parsing Falied"}</tr>
             }
         }
+    }
+}
+
+#[derive(Clone, PartialEq, Properties)]
+pub struct DetailsProps {
+    pub request: ProxiedRequest,
+    pub response: ProxiedResponse,
+    pub ondeselect: Callback<()>,
+}
+
+#[function_component(RequestDetails)]
+fn request_details(props: &DetailsProps) -> Html {
+    let style = use_style!(
+        r#"
+        display: flex;
+        flex-flow: column;
+        flex: 1;
+        "#
+    );
+    let req = props.request.clone();
+    let res = props.response.clone();
+    let ondeselect = {
+        let ondeselect = props.ondeselect.clone();
+        Callback::from(move |_| {
+            ondeselect.emit(());
+        })
+    };
+    html! {
+        <div class={style}>
+            <button onclick={ondeselect} ~innerText="✖" />
+            {format!("{:?}{:?}", req, res)}
+        </div>
     }
 }
 
@@ -114,6 +146,10 @@ pub fn request_table(props: &Props) -> Html {
         },
         (requests.clone(), paused),
     );
+    let ondeselect = {
+        let selected = selected.clone();
+        Callback::from(move |()| selected.set(None))
+    };
     let style = use_style!(
         r#"
         display: flex;
@@ -174,10 +210,8 @@ pub fn request_table(props: &Props) -> Html {
                     }
                 </table>
                 if let Some(idx) = *selected {
-                    if let Some(RequestInfo(Some(req), Some( res))) = requests.borrow().iter().nth(idx) {
-                        <div class="request">
-                            {format!("{:?}{:?}", req, res)}
-                        </div>
+                    if let Some(RequestInfo(Some(req), Some(res))) = requests.borrow().iter().nth(idx) {
+                        <RequestDetails {ondeselect} response={res.clone()} request={req.clone()} />
                     }
                 }
             </div>
