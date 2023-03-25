@@ -4626,6 +4626,7 @@ name = "tauri-ui-ui"
 version = "0.0.0"
 dependencies = [
  "gloo-utils",
+ "http",
  "js-sys",
  "proxyapi_models",
  "serde",

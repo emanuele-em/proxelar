@@ -1,4 +1,7 @@
 mod details;
+mod header;
+mod request_tab;
+mod response_tab;
 mod row;
 
 use self::details::RequestDetails;
