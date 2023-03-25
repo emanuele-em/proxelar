@@ -4,9 +4,14 @@ mod response_tab;
 mod row;
 mod tab_view;
 
+const OPTIONS: [&str; 10] = [
+    "POST", "GET", "PUT", "DELETE", "PATCH", "HEAD", "OPTIONS", "CONNECT", "TRACE", "OTHERS",
+];
+
 use self::details::RequestDetails;
 use self::row::RequestRow;
 use crate::api::listen_proxy_event;
+use crate::components::input::MultipleSelectInput;
 use proxyapi_models::RequestInfo;
 use std::{cell::RefCell, rc::Rc};
 use stylist::yew::use_style;
@@ -18,12 +23,19 @@ pub struct Props {
     pub paused: bool,
 }
 
+pub fn filter_request(method: String, filters: &[String]) -> bool {
+    filters.contains(&method)
+        || (!OPTIONS.contains(&method.as_str()) && filters.contains(&"OTHERS".to_string()))
+}
+
 #[function_component(RequestTable)]
 pub fn request_table(props: &Props) -> Html {
+    let options = OPTIONS.iter().map(|x| x.to_string()).collect::<Vec<_>>();
     let trigger = use_force_update();
     let requests = props.requests.clone();
     let paused = props.paused;
     let selected = use_state_eq(|| None as Option<usize>);
+    let filters = use_state_eq(|| options.clone());
     let onselect = {
         let requests = requests.clone();
         let selected = selected.clone();
@@ -32,6 +44,21 @@ pub fn request_table(props: &Props) -> Html {
             if id < len {
                 selected.set(Some(id));
             }
+        })
+    };
+    let onfilterchange = {
+        let filters = filters.clone();
+        let requests = requests.clone();
+        let selected = selected.clone();
+        Callback::from(move |new_value: Vec<String>| {
+            if let Some(idx) = *selected {
+                if let Some(RequestInfo(Some(req), _)) = requests.borrow().iter().nth(idx) {
+                    if !filter_request(req.method().to_string(), &new_value) {
+                        selected.set(None);
+                    }
+                }
+            }
+            filters.set(new_value)
         })
     };
     let ondelete = {
@@ -90,7 +117,9 @@ pub fn request_table(props: &Props) -> Html {
             text-align: left;
             padding: 0.5em;
         }
-        .request-table tr > td:first-child {
+        .request-table tr > td:first-child,
+        .request-table tr > th:first-child
+        {
             width: 100%
         }
         .request-table td {
@@ -106,11 +135,25 @@ pub fn request_table(props: &Props) -> Html {
             flex: 1;
             align-self: stretch;
             white-space: nowrap;
-            min-height: min-content;
+            min-height: 13em;
             display: block;
             overflow-y: scroll;
             border: none;
         }
+        "#
+    );
+    let method_filter_style = use_style!(
+        r#"
+        position: relative;
+        select {
+            height: 100%;
+            display: none;
+            position: absolute;
+            min-height: 13em;
+            overflow: visible;
+            z-index: 1;
+        }
+        :hover > select {display: block;}
         "#
     );
     html! {
@@ -119,20 +162,28 @@ pub fn request_table(props: &Props) -> Html {
                 <table class="request-table">
                     <tr>
                         <th ~innerText="Path"/>
-                        <th ~innerText="Method"/>
+                        <th class={method_filter_style}>
+                            <span ~innerText={"Method"} />
+                            <MultipleSelectInput {options} onchange={onfilterchange} />
+                        </th>
                         <th ~innerText="Status"/>
                         <th ~innerText="Size"/>
                         <th ~innerText="Time"/>
                         <th ~innerText="Action"/>
                     </tr>
                     {
-                        requests.borrow().iter().cloned().enumerate().map(
+                        requests.borrow().iter().cloned().enumerate().filter_map(
                             |(idx, exchange)| {
                                 let ondelete = ondelete.clone();
                                 let onselect = onselect.clone();
-                                html!{
-                                    <RequestRow {onselect} {idx} {ondelete} {exchange}/>
+                                if let Some(ref req) = exchange.0{
+                                    if filter_request(req.method().to_string(), &filters) {
+                                        return Some(html!{
+                                            <RequestRow {onselect} {idx} {ondelete} {exchange}/>
+                                        })
+                                    }
                                 }
+                                None
                             }
                         ).collect::<Html>()
                     }

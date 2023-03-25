@@ -12,7 +12,7 @@ wasm-bindgen = "0.2"
 gloo-utils = { version = "0.1", features = ["serde"]}
 wasm-bindgen-futures = "0.4"
 js-sys = "0.3"
-web-sys = { version = "0.3", features = ["MediaQueryList", "Window"] }
+web-sys = { version = "0.3", features = ["MediaQueryList", "Window", "HtmlSelectElement", "HtmlOptionElement"] }
 proxyapi_models = {path = "../proxyapi_models"}
 http = "0.2"
 

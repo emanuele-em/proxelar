@@ -1,4 +1,5 @@
 use proxyapi_models::RequestInfo;
+use stylist::yew::use_style;
 use yew::prelude::*;
 
 #[derive(Clone, PartialEq, Properties)]
@@ -11,6 +12,13 @@ pub struct RowProps {
 
 #[function_component(RequestRow)]
 pub fn request_row(props: &RowProps) -> Html {
+    let delete_style = use_style!(
+        r#"
+        margin: auto;
+        display: block;
+        font-size: 2rem;
+        "#
+    );
     match props.exchange {
         RequestInfo(Some(ref req), Some(ref res)) => {
             let idx = props.idx;
@@ -25,7 +33,7 @@ pub fn request_row(props: &RowProps) -> Html {
                     <td>{req.body().len()}</td>
                     <td>{((res.time() - req.time()) as f64 * 1e-6).trunc()}</td>
                     <td>
-                        <button
+                        <button class={delete_style} style=""
                             onclick={move |e: MouseEvent| {ondelete.emit(idx); e.stop_immediate_propagation();}}
                             ~innerText="🗑 "/>
                     </td>
