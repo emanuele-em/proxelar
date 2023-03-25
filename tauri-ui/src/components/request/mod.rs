@@ -104,6 +104,7 @@ pub fn request_table(props: &Props) -> Html {
         r#"
         display: flex;
         flex-flow: row;
+        flex: 1;
         width: 100%;
         vertical-align: baseline;
         overflow-y: hidden;
@@ -135,7 +136,6 @@ pub fn request_table(props: &Props) -> Html {
             flex: 1;
             align-self: stretch;
             white-space: nowrap;
-            min-height: 13em;
             display: block;
             overflow-y: scroll;
             border: none;
