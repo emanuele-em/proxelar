@@ -1,39 +1,34 @@
 use proxyapi_models::RequestInfo;
 use yew::prelude::*;
-#[derive(Clone, PartialEq, Properties)]
-pub struct Props {
-    pub exchange: RequestInfo,
-    pub ondelete: Callback<()>,
-}
 
-#[function_component(RequestHeader)]
-pub fn request_header() -> Html {
-    html! {
-        <tr>
-            <th ~innerText="Path"/>
-            <th ~innerText="Method"/>
-            <th ~innerText="Status"/>
-            <th ~innerText="Size"/>
-            <th ~innerText="Time"/>
-            <th ~innerText="Action"/>
-        </tr>
-    }
+#[derive(Clone, PartialEq, Properties)]
+pub struct RowProps {
+    pub exchange: RequestInfo,
+    pub idx: usize,
+    pub ondelete: Callback<usize>,
+    pub onselect: Callback<usize>,
 }
 
 #[function_component(RequestRow)]
-pub fn request_row(props: &Props) -> Html {
+pub fn request_row(props: &RowProps) -> Html {
     match props.exchange {
         RequestInfo(Some(ref req), Some(ref res)) => {
+            let idx = props.idx;
             let method = req.method().to_string();
             let ondelete = props.ondelete.clone();
+            let onselect = props.onselect.clone();
             html! {
-                <tr>
+                <tr onclick={move |_| {onselect.emit(idx)}}>
                     <td>{req.uri().to_string()}</td>
                     <td class={classes!("method", &method)} >{method}</td>
                     <td>{res.status().to_string()}</td>
                     <td>{req.body().len()}</td>
                     <td>{((res.time() - req.time()) as f64 * 1e-6).trunc()}</td>
-                    <td><button onclick={move |_| {ondelete.emit(())}} ~innerText="🗑 "/></td>
+                    <td>
+                        <button
+                            onclick={move |e: MouseEvent| {ondelete.emit(idx); e.stop_immediate_propagation();}}
+                            ~innerText="🗑 "/>
+                    </td>
                 </tr>
             }
         }
