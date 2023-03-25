@@ -1,6 +1,5 @@
-use super::header::Header;
+use super::tab_view::TabView;
 use proxyapi_models::ProxiedRequest;
-use stylist::yew::use_style;
 use yew::prelude::*;
 
 #[derive(Clone, PartialEq, Properties)]
@@ -11,18 +10,10 @@ pub struct Props {
 #[function_component(RequestTab)]
 pub fn request_tab(props: &Props) -> Html {
     let req = props.request.clone();
-    let body = req.body().clone();
-    let style = use_style!(
-        r#"
-        details {
-            border: 1px solid;
-            border-radius: 4px;
-            padding: 0.5em 0;
-        }
-        "#
-    );
+    let body = req.body().as_ref().to_vec();
+    let headers = req.headers().clone();
     html! {
-        <div class={style}>
+        <TabView {headers} {body}>
             <p>
                 <strong ~innerText="Method:" />
                 <span ~innerText={format!("{:?}", req.method())} />
@@ -35,20 +26,6 @@ pub fn request_tab(props: &Props) -> Html {
                 <strong ~innerText="Time Stamp:" />
                 <span ~innerText={format!("{:?}", req.time())} />
             </p>
-            <details>
-                <summary><strong ~innerText="Headers" /></summary>
-                <hr/>
-                <Header headers={req.headers().clone()} />
-            </details>
-            <details>
-                <summary><strong ~innerText="body" /></summary>
-                <hr/>
-                if let Ok(body) = std::str::from_utf8(&body) {
-                    <p ~innerText={body.to_string()} />
-                } else {
-                    <p ~innerText={format!("{:?}", body)} />
-                }
-            </details>
-        </div>
+        </TabView>
     }
 }

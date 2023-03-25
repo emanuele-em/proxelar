@@ -37,7 +37,11 @@ pub fn proxy_on(props: &Props) -> Html {
         * {
             margin: 0.5em;
         }
-        div:first-child button {
+        "#
+    );
+    let pause_play_style = use_style!(
+        r#"
+        button {
             font-size: 2em;
             width: 5em;
         }
@@ -46,7 +50,7 @@ pub fn proxy_on(props: &Props) -> Html {
     let is_paused = *paused;
     html! {
         <div class={style}>
-            <div>
+            <div class={pause_play_style}>
                 <button
                     onclick={Callback::from(move |_| paused.set(!is_paused))}
                     ~innerText={ if *paused {"▶"} else {"⏸"} }/>

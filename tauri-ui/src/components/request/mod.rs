@@ -3,6 +3,7 @@ mod header;
 mod request_tab;
 mod response_tab;
 mod row;
+mod tab_view;
 
 use self::details::RequestDetails;
 use self::row::RequestRow;
@@ -80,14 +81,6 @@ pub fn request_table(props: &Props) -> Html {
         width: 100%;
         vertical-align: baseline;
         overflow-y: hidden;
-        .request-table {
-            flex: 1;
-            align-self: stretch;
-            white-space: nowrap;
-            min-height: min-content;
-            display: block;
-            overflow-y: scroll;
-        }
         .request-table,
         .request-table th,
         .request-table td {
@@ -110,8 +103,14 @@ pub fn request_table(props: &Props) -> Html {
             background-color: var(--bg-color);
             z-index: 1000;
         }
-        .request {
+        .request-table {
             flex: 1;
+            align-self: stretch;
+            white-space: nowrap;
+            min-height: min-content;
+            display: block;
+            overflow-y: scroll;
+            border: none;
         }
         "#
     );
