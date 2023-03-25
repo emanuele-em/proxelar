@@ -1,93 +1,13 @@
+mod details;
+mod row;
+
+use self::details::RequestDetails;
+use self::row::RequestRow;
+use crate::api::listen_proxy_event;
+use proxyapi_models::RequestInfo;
 use std::{cell::RefCell, rc::Rc};
 use stylist::yew::use_style;
-
-use crate::api::listen_proxy_event;
-use proxyapi_models::{ProxiedRequest, ProxiedResponse, RequestInfo};
 use yew::prelude::*;
-#[derive(Clone, PartialEq, Properties)]
-struct RowProps {
-    pub exchange: RequestInfo,
-    pub idx: usize,
-    pub ondelete: Callback<usize>,
-    pub onselect: Callback<usize>,
-}
-
-#[function_component(RequestHeader)]
-fn request_header() -> Html {
-    html! {
-        <tr>
-            <th ~innerText="Path"/>
-            <th ~innerText="Method"/>
-            <th ~innerText="Status"/>
-            <th ~innerText="Size"/>
-            <th ~innerText="Time"/>
-            <th ~innerText="Action"/>
-        </tr>
-    }
-}
-
-#[function_component(RequestRow)]
-fn request_row(props: &RowProps) -> Html {
-    match props.exchange {
-        RequestInfo(Some(ref req), Some(ref res)) => {
-            let idx = props.idx;
-            let method = req.method().to_string();
-            let ondelete = props.ondelete.clone();
-            let onselect = props.onselect.clone();
-            html! {
-                <tr onclick={move |_| {onselect.emit(idx)}}>
-                    <td>{req.uri().to_string()}</td>
-                    <td class={classes!("method", &method)} >{method}</td>
-                    <td>{res.status().to_string()}</td>
-                    <td>{req.body().len()}</td>
-                    <td>{((res.time() - req.time()) as f64 * 1e-6).trunc()}</td>
-                    <td>
-                        <button
-                            onclick={move |e: MouseEvent| {ondelete.emit(idx); e.stop_immediate_propagation();}}
-                            ~innerText="🗑 "/>
-                    </td>
-                </tr>
-            }
-        }
-        _ => {
-            html! {
-                <tr>{"Parsing Falied"}</tr>
-            }
-        }
-    }
-}
-
-#[derive(Clone, PartialEq, Properties)]
-pub struct DetailsProps {
-    pub request: ProxiedRequest,
-    pub response: ProxiedResponse,
-    pub ondeselect: Callback<()>,
-}
-
-#[function_component(RequestDetails)]
-fn request_details(props: &DetailsProps) -> Html {
-    let style = use_style!(
-        r#"
-        display: flex;
-        flex-flow: column;
-        flex: 1;
-        "#
-    );
-    let req = props.request.clone();
-    let res = props.response.clone();
-    let ondeselect = {
-        let ondeselect = props.ondeselect.clone();
-        Callback::from(move |_| {
-            ondeselect.emit(());
-        })
-    };
-    html! {
-        <div class={style}>
-            <button onclick={ondeselect} ~innerText="✖" />
-            {format!("{:?}{:?}", req, res)}
-        </div>
-    }
-}
 
 #[derive(Clone, PartialEq, Properties)]
 pub struct Props {
@@ -196,7 +116,14 @@ pub fn request_table(props: &Props) -> Html {
         if requests.borrow().len() > 0 {
             <div class={style}>
                 <table class="request-table">
-                    <RequestHeader />
+                    <tr>
+                        <th ~innerText="Path"/>
+                        <th ~innerText="Method"/>
+                        <th ~innerText="Status"/>
+                        <th ~innerText="Size"/>
+                        <th ~innerText="Time"/>
+                        <th ~innerText="Action"/>
+                    </tr>
                     {
                         requests.borrow().iter().cloned().enumerate().map(
                             |(idx, exchange)| {
