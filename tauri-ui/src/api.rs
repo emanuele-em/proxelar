@@ -50,6 +50,13 @@ pub fn start_proxy(addr: SocketAddr, on_start: Option<Callback<()>>) {
     });
 }
 
+pub fn fetch_proxy_status(status_update: Callback<bool>) {
+    spawn_local(async move {
+        let output = invoke("plugin:proxy|proxy_status", JsValue::NULL).await;
+        status_update.emit(output.is_truthy());
+    });
+}
+
 pub fn stop_proxy(on_stop: Option<Callback<()>>) {
     spawn_local(async move {
         invoke("plugin:proxy|stop_proxy", JsValue::NULL).await;
