@@ -2,7 +2,7 @@
 
 - install required tools
 ```bash
-cargo install tauri-cli wasm-bindgen-cli 
+cargo install tauri-cli wasm-bindgen-cli trunk
 ```
 
 - start development
