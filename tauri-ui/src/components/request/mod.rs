@@ -111,7 +111,7 @@ pub fn request_table(props: &Props) -> Html {
         .request-table,
         .request-table th,
         .request-table td {
-            border: 1px solid var(--font-color);
+            border: 1px solid;
             border-spacing: 0;
         }
         .request-table th {
@@ -129,7 +129,7 @@ pub fn request_table(props: &Props) -> Html {
         .request-table tr:first-child {
             position: sticky;
             top: 0;
-            background-color: var(--bg-color);
+            background-color: Canvas;
             z-index: 1000;
         }
         .request-table {

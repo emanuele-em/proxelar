@@ -33,7 +33,8 @@ pub fn request_row(props: &RowProps) -> Html {
                     <td>{req.body().len()}</td>
                     <td>{((res.time() - req.time()) as f64 * 1e-6).trunc()}</td>
                     <td>
-                        <button class={delete_style} style=""
+                        <button 
+                            class={delete_style}
                             onclick={move |e: MouseEvent| {ondelete.emit(idx); e.stop_immediate_propagation();}}
                             ~innerText="🗑 "/>
                     </td>

@@ -1,4 +1,6 @@
 use stylist::yew::use_style;
+use wasm_bindgen::prelude::JsCast;
+use web_sys::HtmlMetaElement;
 use yew::prelude::*;
 
 #[function_component(ThemeButton)]
@@ -13,13 +15,21 @@ fn theme_button() -> Html {
         is_dark
     });
 
-    let (data_theme, btn_text) = if *is_dark {
-        ("dark", "🔆")
+    let (data_theme, style, btn_text) = if *is_dark {
+        ("dark", "color-scheme: light", "🔆")
     } else {
-        ("light", "🌙")
+        ("light", "color-scheme: dark", "🌙")
     };
     if let Some(window) = web_sys::window() {
         if let Some(document) = window.document() {
+            if let Some(meta) = document
+                .get_elements_by_tag_name("meta")
+                .named_item("color-scheme")
+            {
+                if let Ok(color_scheme) = meta.dyn_into::<HtmlMetaElement>() {
+                    color_scheme.set_content(data_theme);
+                }
+            }
             if let Some(body) = document.body() {
                 body.set_attribute("data-theme", data_theme).unwrap();
             }
@@ -31,7 +41,7 @@ fn theme_button() -> Html {
         Callback::from(move |_| is_dark.set(!*is_dark))
     };
     html! {
-        <button {onclick} ~innerText={btn_text} />
+        <button {style} {onclick} ~innerText={btn_text} />
     }
 }
 

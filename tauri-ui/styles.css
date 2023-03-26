@@ -1,49 +1,4 @@
-/* https://blog.jim-nielsen.com/2021/css-system-colors/ */
-:root {
-  --c-bg: #fff;
-  --c-text: #000;
-}
-@media (prefers-color-scheme: dark) {
-  :root {
-    --c-bg: #000;
-    --c-text: #fff;
-  }
-}
-
-@supports (color-scheme: light dark)
-  and (background-color: Canvas)
-  and (color: CanvasText)
-  {
-  :root {
-    --c-bg: CanvasText;
-    --c-text: Canvas;
-  }
-}
-
-@supports (color-scheme: light dark)
-  and (background-color: Canvas)
-  and (color: CanvasText)
-  and @media (prefers-color-scheme: dark)
-  {
-  :root {
-    --c-bg: Canvas;
-    --c-text: CanvasText;
-  }
-}
-
-@supports (background-color: -apple-system-control-background)
-  and (color: text)
-  and @media (prefers-color-scheme: dark)
-  {
-  :root {
-    --c-bg: text;
-    --c-text: -apple-system-control-background;
-  }
-}
-
 [data-theme="light"] {
-  --font-color: var(--c-text);
-  --bg-color: var(--c-bg);
   --post: #48cb90;
   --get: #2a69a7;
   --put: #d59d58;
@@ -54,8 +9,6 @@
   --method: darkgray;
 }
 [data-theme="dark"] {
-  --font-color: var(--c-bg);
-  --bg-color: var(--c-text);
   --post: #49cc90;
   --get: #61affe;
   --put: #fca130;
@@ -80,8 +33,6 @@
 }
 
 body {
-  background-color: var(--bg-color);
-  color: var(--font-color);
   cursor: default;
   overflow: hidden;
 }
