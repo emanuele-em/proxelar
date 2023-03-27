@@ -63,8 +63,6 @@ pub fn title_bar() -> Html {
         h1 {
             flex: 1;
         }
-        button {
-        }
         * {
            font-size: 2rem;
            margin: 0.5rem;
