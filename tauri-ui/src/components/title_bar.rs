@@ -15,10 +15,17 @@ fn theme_button() -> Html {
         is_dark
     });
 
-    let (data_theme, style, btn_text) = if *is_dark {
-        ("dark", "color-scheme: light", "🔆")
+    let button_style = use_style!(
+        r#"
+            border: 2px solid CanvasText;
+            background-color: Canvas;
+        "#
+    );
+
+    let (data_theme, btn_text) = if *is_dark {
+        ("dark", "🔆")
     } else {
-        ("light", "color-scheme: dark", "🌙")
+        ("light", "🌙")
     };
     if let Some(window) = web_sys::window() {
         if let Some(document) = window.document() {
@@ -41,7 +48,7 @@ fn theme_button() -> Html {
         Callback::from(move |_| is_dark.set(!*is_dark))
     };
     html! {
-        <button {style} {onclick} ~innerText={btn_text} />
+        <button class={button_style} {onclick} ~innerText={btn_text} />
     }
 }
 
