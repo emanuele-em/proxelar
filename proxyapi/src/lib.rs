@@ -3,6 +3,7 @@ pub mod proxy;
 mod proxy_handler;
 mod rewind;
 
+pub mod models;
 pub mod ca;
 
 use hyper::{Body, Request, Response, Uri};

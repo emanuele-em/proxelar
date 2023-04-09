@@ -7,7 +7,7 @@ edition = "2021"
 
 [dependencies]
 confy = "0.5.1"
-
+clap = {version = "4.2.1", features = ["derive"]}
 eframe = "0.20.0"
 egui_extras = "0.20"
 serde = { version = "1", features = ["derive"] }

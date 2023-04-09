@@ -1,13 +1,16 @@
 mod managed_proxy;
 mod mitm_proxy;
+mod models;
 mod requests;
 
 use crate::mitm_proxy::MitmProxy;
 
+use clap::Parser;
 use eframe::{
     egui::{self, CentralPanel, Vec2},
     run_native, App,
 };
+use models::Opts;
 
 const X: f32 = 980.;
 const Y: f32 = 960.0;
@@ -49,6 +52,8 @@ fn load_icon(path: &str) -> eframe::IconData {
 }
 
 fn main() {
+    let opts = Opts::parse();
+
     let native_options = eframe::NativeOptions {
         initial_window_size: Some(Vec2::new(X, Y)),
         icon_data: Some(load_icon(LOGO_ASSET_PATH)),
@@ -58,6 +63,6 @@ fn main() {
     run_native(
         "Man In The Middle Proxy",
         native_options,
-        Box::new(|cc| Box::new(MitmProxy::new(cc))),
+        Box::new(|cc| Box::new(MitmProxy::new(cc, opts.cert, opts.key))),
     );
 }

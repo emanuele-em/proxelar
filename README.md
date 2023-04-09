@@ -29,7 +29,7 @@ Rust-based **Man in the Middle proxy**, an early-stage project aimed at providin
 ## Getting Started
 
 1. Generate a Certificate:
-  - go to `~proxyapi/src/ca/`
+  - go to `mitmproxy/` directory
   - start generation with following terminal command: `openssl req -x509 -newkey rsa:4096 -keyout mitmproxy.key -out mitmproxy.cer -sha256 -days 700000 -nodes`
   - You can just hit `Enter` to accept default options but keep in mind to add at least a `common name`
 
