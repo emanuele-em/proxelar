@@ -1,4 +1,4 @@
-use std::{net::SocketAddr, path::PathBuf};
+use std::net::SocketAddr;
 
 use proxyapi::{models::MitmSslConfig, proxy::Proxy};
 
@@ -14,8 +14,18 @@ async fn main() {
         SocketAddr::new([127, 0, 0, 1].into(), 8080),
         None,
         MitmSslConfig {
-            cert: PathBuf::default(),
-            key: PathBuf::default(),
+            cert: concat!(
+                env!("CARGO_MANIFEST_DIR"),
+                "/../mitm_proxy/",
+                "mitmproxy.cer"
+            )
+            .into(),
+            key: concat!(
+                env!("CARGO_MANIFEST_DIR"),
+                "/../mitm_proxy/",
+                "mitmproxy.key"
+            )
+            .into(),
         },
     )
     .await
