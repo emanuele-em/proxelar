@@ -40,23 +40,19 @@ pub struct Ssl {
 
 impl Ssl {
     pub async fn new(ssl_config: MitmSslConfig) -> Self {
-        let mut cert_file = File::open(ssl_config.cert)
-            .await
-            .expect("Provided CA file does not exist...");
-        let mut key_file = File::open(ssl_config.key)
-            .await
-            .expect("Provided key file does not exist...");
+        let mut ca_cert_file = File::open(ssl_config.cert).await.expect("Provided CA file does not exist...");
+        let mut key_file = File::open(ssl_config.key).await.expect("Provided Key file does not exist...");
 
         let mut ca_cert_bytes = vec![];
-        cert_file
+        ca_cert_file
             .read_to_end(&mut ca_cert_bytes)
             .await
-            .expect("Could not read CA file...");
+            .expect("Failed reading CA file...");
         let mut private_key_bytes = vec![];
         key_file
             .read_to_end(&mut private_key_bytes)
             .await
-            .expect("Could not read key file...");
+            .expect("Failed reading key file...");
 
         let pkey =
             PKey::private_key_from_pem(&private_key_bytes).expect("Failed to parse private key");

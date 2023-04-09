@@ -10,7 +10,7 @@ use std::{
 
 use internal::InternalProxy;
 
-use crate::{ca::Ssl, error::Error, proxy_handler};
+use crate::{ca::Ssl, error::Error, models::MitmSslConfig, proxy_handler};
 
 //use builder::{AddrListenerServer, WantsAddr};
 
@@ -25,11 +25,17 @@ use hyper_rustls::HttpsConnectorBuilder;
 pub struct Proxy {
     addr: SocketAddr,
     tx: Option<SyncSender<proxy_handler::ProxyHandler>>,
+    ssl: Ssl,
 }
 
 impl Proxy {
-    pub fn new(addr: SocketAddr, tx: Option<SyncSender<proxy_handler::ProxyHandler>>) -> Self {
-        Self { addr, tx }
+    pub async fn new(
+        addr: SocketAddr,
+        tx: Option<SyncSender<proxy_handler::ProxyHandler>>,
+        mitm_ssl_config: MitmSslConfig,
+    ) -> Self {
+        let ssl = Ssl::new(mitm_ssl_config).await;
+        Self { addr, tx, ssl }
     }
 
     pub async fn start<F: Future<Output = ()>>(self, signal: F) -> Result<(), Error> {
@@ -50,7 +56,7 @@ impl Proxy {
             .http1_preserve_header_case(true)
             .http1_title_case_headers(true);
 
-        let ssl = Arc::new(Ssl::default());
+        let ssl = Arc::new(self.ssl);
 
         let make_service = make_service_fn(move |conn: &AddrStream| {
             let client = client.clone();

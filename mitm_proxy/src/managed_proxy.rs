@@ -4,7 +4,7 @@ use std::{
     thread::{self, JoinHandle},
 };
 
-use proxyapi::{Proxy, ProxyHandler};
+use proxyapi::{models::MitmSslConfig, Proxy, ProxyHandler};
 use tokio::{runtime::Runtime, sync::oneshot::Sender};
 
 use crate::requests::RequestInfo;
@@ -16,7 +16,7 @@ pub struct ManagedProxy {
 }
 
 impl ManagedProxy {
-    pub fn new(addr: SocketAddr) -> ManagedProxy {
+    pub fn new(addr: SocketAddr, mitm_ssl_config: MitmSslConfig) -> ManagedProxy {
         let (tx, rx) = std::sync::mpsc::sync_channel(1);
         let (close_tx, close_rx) = tokio::sync::oneshot::channel();
 
@@ -24,7 +24,7 @@ impl ManagedProxy {
 
         let thread = thread::spawn(move || {
             rt.block_on(async move {
-                if let Err(e) = Proxy::new(addr, Some(tx.clone()))
+                if let Err(e) = Proxy::new(addr, Some(tx.clone()), mitm_ssl_config).await
                     .start(async move {
                         let _ = close_rx.await;
                     })

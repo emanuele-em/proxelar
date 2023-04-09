@@ -1,4 +1,4 @@
-use std::{fmt::Display, net::SocketAddr};
+use std::{fmt::Display, net::SocketAddr, path::PathBuf};
 
 use crate::{
     managed_proxy::ManagedProxy,
@@ -16,7 +16,7 @@ use eframe::{
     Frame,
 };
 use egui_extras::{Column, TableBuilder};
-use proxyapi::hyper::Method;
+use proxyapi::{hyper::Method, models::MitmSslConfig};
 use serde::{Deserialize, Serialize};
 
 const APP_NAME: &str = "MitmProxy";
@@ -109,11 +109,13 @@ pub struct MitmProxy {
     config: MitmProxyConfig,
     state: MitmProxyState,
     proxy: Option<ManagedProxy>,
+    mitm_ssl_config: MitmSslConfig
 }
 
 impl MitmProxy {
-    pub fn new(cc: &eframe::CreationContext<'_>) -> Self {
+    pub fn new(cc: &eframe::CreationContext<'_>, cert: PathBuf, key: PathBuf) -> Self {
         Self::configure_fonts(cc);
+        let mitm_ssl_config = MitmSslConfig { cert, key };
         let config: MitmProxyConfig = confy::load(APP_NAME, None).unwrap_or_default();
         let state = MitmProxyState::new();
 
@@ -122,6 +124,7 @@ impl MitmProxy {
             config,
             state,
             proxy: None,
+            mitm_ssl_config
         }
     }
 
@@ -135,7 +138,7 @@ impl MitmProxy {
     fn start_proxy(&mut self, addr: SocketAddr) {
         assert!(self.proxy.is_none());
 
-        self.proxy = Some(ManagedProxy::new(addr));
+        self.proxy = Some(ManagedProxy::new(addr, self.mitm_ssl_config.clone()));
         self.requests = vec![];
     }
 

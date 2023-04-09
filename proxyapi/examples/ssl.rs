@@ -1,6 +1,6 @@
-use std::net::SocketAddr;
+use std::{net::SocketAddr, path::PathBuf};
 
-use proxyapi::proxy::Proxy;
+use proxyapi::{models::MitmSslConfig, proxy::Proxy};
 
 async fn shutdown_signal() {
     tokio::signal::ctrl_c()
@@ -10,9 +10,17 @@ async fn shutdown_signal() {
 
 #[tokio::main]
 async fn main() {
-    if let Err(e) = Proxy::new(SocketAddr::new([127, 0, 0, 1].into(), 8080), None)
-        .start(shutdown_signal())
-        .await
+    if let Err(e) = Proxy::new(
+        SocketAddr::new([127, 0, 0, 1].into(), 8080),
+        None,
+        MitmSslConfig {
+            cert: PathBuf::default(),
+            key: PathBuf::default(),
+        },
+    )
+    .await
+    .start(shutdown_signal())
+    .await
     {
         eprintln!("{e}");
     }
