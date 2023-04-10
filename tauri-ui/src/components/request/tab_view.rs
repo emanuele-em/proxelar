@@ -19,7 +19,6 @@ pub fn tab_view(props: &Props) -> Html {
         details {
             border: 1px solid;
             border-radius: 4px;
-            padding: 0.5em 0;
         }
         "#
     );

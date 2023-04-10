@@ -1,7 +1,6 @@
 [workspace]
 
 members = [
-    "mitm_proxy",
     "proxyapi",
     "proxyapi_models",
     "tauri-ui",

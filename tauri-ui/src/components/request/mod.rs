@@ -102,46 +102,46 @@ pub fn request_table(props: &Props) -> Html {
     };
     let style = use_style!(
         r#"
-        display: flex;
-        flex-flow: row;
-        flex: 1;
         width: 100%;
-        vertical-align: baseline;
-        overflow-y: hidden;
-        .request-table,
-        .request-table th,
-        .request-table td {
-            border: 1px solid var(--font-color);
-            border-spacing: 0;
+        overflow-y: auto;
+        padding-bottom: 80px;
+        
+        .request-table{
+            width: 100%;
+            max-height: 100%;
+            border-collapse: collapse;
+            table-layout: auto;
         }
-        .request-table th {
-            text-align: left;
-            padding: 0.5em;
-        }
-        .request-table tr > td:first-child,
-        .request-table tr > th:first-child
+        .request-table tr
         {
-            width: 100%
+            border: 1px solid var(--bg-color);
+            background: var(--bg-input);
+            border-spacing: 0;
+            font-size:0.8rem;
+            height: fit-content;
+            cursor: pointer;
         }
-        .request-table td {
-           padding: 0.5em;
+        .request-table td{
+        }
+        .request-table td:first-child,
+        .request-table th:first-child{
+            width: 100%;
+            max-width: 70vw;
+        }
+        .request-table td,
+        .request-table th,
+        {
+           padding: 5px 10px;
+           height: fit-content;
+           white-space: nowrap;
+           overflow:hidden;
         }
         .request-table tr:first-child {
             position: sticky;
             top: 0;
-            background-color: var(--bg-color);
             z-index: 1000;
         }
-        .request-table {
-            flex: 1;
-            align-self: stretch;
-            white-space: nowrap;
-            display: block;
-            overflow-y: scroll;
-            border: none;
-        }
-        "#
-    );
+        "#);
     let method_filter_style = use_style!(
         r#"
         position: relative;
@@ -156,6 +156,39 @@ pub fn request_table(props: &Props) -> Html {
         :hover > select {display: block;}
         "#
     );
+    let loader = use_style!(
+r#"
+            position: absolute;
+            top:0;
+            bottom:0;
+            margin:auto;
+            width:  48px;
+            height: 48px;
+            background: var(--gradient);
+            transform: rotateX(65deg) rotate(45deg);
+            transform: perspective(200px) rotateX(65deg) rotate(45deg); 
+            color: var(--loader-color);
+            animation: layers1 1s linear infinite alternate;
+
+        :after {
+            content: '';
+            position: absolute;
+            inset: 0;
+            background: var(--bg-input);
+            animation: layerTr 1s linear infinite alternate;
+        }
+
+        @keyframes layers1 {
+            0% { box-shadow: 0px 0px 0 0px  var(--bg-input)}
+            90% , 100% { box-shadow: 20px 20px 0 -4px var(--bg-input)}
+        }
+        @keyframes layerTr {
+            0% { transform:  translate(0, 0) scale(1) }
+            100% {  transform: translate(-25px, -25px) scale(1) }
+        }
+    "#
+    );
+
     html! {
         if requests.borrow().len() > 0 {
             <div class={style}>
@@ -163,7 +196,7 @@ pub fn request_table(props: &Props) -> Html {
                     <tr>
                         <th ~innerText="Path"/>
                         <th class={method_filter_style}>
-                            <span ~innerText={"Method"} />
+                            <span ~innerText={"Method ↓"} />
                             <MultipleSelectInput {options} onchange={onfilterchange} />
                         </th>
                         <th ~innerText="Status"/>
@@ -195,7 +228,7 @@ pub fn request_table(props: &Props) -> Html {
                 }
             </div>
         } else {
-            <h3 ~innerText="No Request Yet!" />
+            <span class={loader}></span>
         }
     }
 }

@@ -1,6 +1,5 @@
 use stylist::yew::use_style;
 use yew::prelude::*;
-
 #[function_component(ThemeButton)]
 fn theme_button() -> Html {
     let is_dark = use_state(|| {
@@ -13,11 +12,13 @@ fn theme_button() -> Html {
         is_dark
     });
 
-    let (data_theme, btn_text) = if *is_dark {
-        ("dark", "🔆")
-    } else {
-        ("light", "🌙")
+
+
+    let (data_theme, btn_text) = match *is_dark {
+        true => ("dark", "🔆"),
+        false => ("light", "🌙")
     };
+
     if let Some(window) = web_sys::window() {
         if let Some(document) = window.document() {
             if let Some(body) = document.body() {
@@ -42,15 +43,36 @@ pub fn title_bar() -> Html {
         display: flex;
         flex-flow: row;
         align-items: center;
-        vertical-align: baseline;
-        h1 {
-            flex: 1;
+        justify-content:space-between;
+        position: relative;
+        h1{
+            right:0;
+            left:0;
+            text-align:center;
+            font-size: 1.2rem;
+            font-weight: normal;
+            flex: none;
+            margin:auto;
+            text-transform: uppercase;
+            font-size: 1rem;
+            font-weight: bold;
+            position:absolute;
+            margin:auto;
+            z-index:-1;
         }
-        button {
-        }
-        * {
-           font-size: 2rem;
-           margin: 0.5rem;
+        button{
+            background: var(--bg-input);
+            border: 0px;
+            width:45px;
+            text-align:center;
+            height: 45px;
+            line-height:42px;
+            border-radius: 100px; 
+            color: white;
+            box-shadow: var(--box-shadow);
+            margin-left:auto;
+            text-shadow: 2px 2px 8px #00000033; 
+            cursor:pointer;
         }
         "#
     );

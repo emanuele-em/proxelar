@@ -35,15 +35,31 @@ pub fn proxy_on(props: &Props) -> Html {
         vertical-align: baseline;
         overflow: auto;
         * {
-            margin: 0.5em;
         }
         "#
     );
     let pause_play_style = use_style!(
         r#"
+        position:fixed;
+        background:var(--bg-input);
+        bottom: 10px;
+        border:0;
+        box-shadow: var(--box-shadow);
+        border-radius: 10px;
+        padding: 3px  10px;
         button {
-            font-size: 2em;
-            width: 5em;
+            font-size: 1rem;
+            height:30px;
+            width: 30px;
+            border:0;
+            background: var(--gradient);
+            border-radius: 30px;
+            color: rgba(255,255,255,0.8);
+            margin: 5px;
+        }
+        button:nth-of-type(2){
+            background: var(--bg-color);
+            color: var(--font-color);
         }
         "#
     );

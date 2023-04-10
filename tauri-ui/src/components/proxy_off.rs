@@ -48,18 +48,39 @@ pub fn proxy_off(props: &Props) -> Html {
         flex-flow: row;
         align-items: center;
         justify-content: center;
-        * {
-           font-size: 2rem;
+        position:relative;
+        width:350px;
+        margin:auto;
+        input{
+            height:40px;
+            width:100%;
+            line-height:40px;
+            border-radius:50px;
+            padding:10px; 
+            border:none;
+            padding-right:35px;
+            padding-left:20px;
+            
+        }
+        button {
+          border-radius: 50%;
+          height:30px;
+          width: 30px;
+          color:rgba(255,255,255,.8);
+          border: none;
+          background: var(--gradient);
+          position:absolute;
+          right:5px;
         }
         "#
     );
     html! {
-        <div class={style}>
-            <TextInput value={proxy_addr.to_string()} onchange={addr_changed}/>
-            if let Some(ref error) = *error {
-                <p>{error}</p>
-            }
-            <button {onclick} ~innerText={"Start Proxy"}/>
-        </div>
+            <div class={style}>
+                    <TextInput value={proxy_addr.to_string()} onchange={addr_changed}/>
+                    if let Some(ref error) = *error {
+                        <p>{error}</p>
+                    }
+                    <button {onclick} ~innerText={"▶"}/>
+            </div>
     }
 }
