@@ -23,29 +23,79 @@ pub fn request_details(props: &Props) -> Html {
     let tab_style = use_style!(
         r#"
         display: flex;
+        justify-content: space-between;
+        align-items:stretch;
+        margin:25px auto;
+        background: var(--bg-color);
+        padding:5px;
+        border-radius: 5px;
+        border: 1px solid var(--bg-color); 
+
         button {
-            font-size: 2em;
             margin: 0;
             min-width: fit-content;
-            padding: 0 .5rem;
             opacity: 0.6;
+            padding: 8px 0;
+            width: 100%;
+            margin: 0 5px;
+            font-size:.8rem;
+            border-radius: 5px;
+            font-weight: bold;
+            border: 1px solid transparent;
+            background: transparent;
         }
         .tab_selected {
             opacity: 1;
-        }
-        button:last-child {
-            opacity: 1;
-            width: 2rem;
-            margin-left: auto;
-            align-self: flex-end;
+            background: white;
+            border: 1px solid lightgrey;
         }
         "#
     );
     let style = use_style!(
         r#"
-        display: flex;
-        flex-flow: column;
-        flex: 1;
+        position:fixed;
+        margin: auto;
+        top:0;
+        bottom:0;
+        left: 0;
+        right: 0;
+        width: 750px;
+        height: 450px;
+        background: #fff;
+        z-index: 999999;
+        padding:20px;
+        border-radius: 15px;
+
+        .delete_button{
+            color: var(--bg-color);
+            border: 1px solid var(--bg-color);
+            position:absolute;
+            right: 10px;
+            top: 10px;
+            height: 25px;
+            width: 25px;
+            text-align:center;
+            background: white;
+            border-radius: 5px;
+            padding:0;
+            font-size: 18px;
+        }
+
+        "#
+    );
+    let background = use_style!(
+        r#"
+            position:fixed;
+            top:0;
+            bottom:0;
+            left:0;
+            right:0;
+            width:100vw;
+            height: 100vh;
+            background:rgba(0,0,0,.6);
+            content: "";
+            z-index: 99999;
+
         "#
     );
     let tab = use_state_eq(Tab::default);
@@ -62,30 +112,33 @@ pub fn request_details(props: &Props) -> Html {
         })
     };
     html! {
-        <div class={style}>
-            <div class={tab_style}>
-                <button
-                    class={(*tab==Tab::Request).then_some("tab_selected")}
-                    onclick={
-                        let ontabchange = ontabchange.clone();
-                        move |_| ontabchange.emit(Tab::Request)
+        <div>
+            <div class={background}/>
+            <div class={style}>
+                <button class="delete_button" onclick={ondeselect} ~innerText="×" />
+                <div class={tab_style}>
+                    <button
+                        class={(*tab==Tab::Request).then_some("tab_selected")}
+                        onclick={
+                            let ontabchange = ontabchange.clone();
+                            move |_| ontabchange.emit(Tab::Request)
+                        }
+                        ~innerText="Request" />
+                    <button
+                        class={(*tab==Tab::Response).then_some("tab_selected")}
+                        onclick={
+                            let ontabchange = ontabchange.clone();
+                            move |_| ontabchange.emit(Tab::Response)
+                        }
+                        ~innerText="Response" />
+                </div>
+                {
+                    match *tab {
+                        Tab::Request => html!{<RequestTab request={req} />},
+                        Tab::Response => html!{<ResponseTab response={res} />},
                     }
-                    ~innerText="Request" />
-                <button
-                    class={(*tab==Tab::Response).then_some("tab_selected")}
-                    onclick={
-                        let ontabchange = ontabchange.clone();
-                        move |_| ontabchange.emit(Tab::Response)
-                    }
-                    ~innerText="Response" />
-                <button onclick={ondeselect} ~innerText="✖" />
-            </div>
-            {
-                match *tab {
-                    Tab::Request => html!{<RequestTab request={req} />},
-                    Tab::Response => html!{<ResponseTab response={res} />},
                 }
-            }
+            </div>
         </div>
     }
 }

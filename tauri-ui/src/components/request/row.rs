@@ -27,6 +27,7 @@ pub fn request_row(props: &RowProps) -> Html {
     let path_style = use_style!(
        r#"
        position:relative;
+       width:100%;
        
        .hide{
         max-height: 0;
@@ -47,7 +48,6 @@ pub fn request_row(props: &RowProps) -> Html {
         width: 100%;
         display: flex;
         justify-content:flex-start;
-        align-items:center;
         pointer-events:none;
         padding-left: 10px;
         margin:3px 0;
@@ -77,7 +77,7 @@ pub fn request_row(props: &RowProps) -> Html {
             let ondelete = props.ondelete.clone();
             let onselect = props.onselect.clone();
             html! {
-                <tr onclick={move |_| {onselect.emit(idx)}}>
+                <tr class="grid-body" onclick={move |_| {onselect.emit(idx)}}>
                     <td class={path_style}>
                         <b>{authority}</b><br />
                         <div class="hide">
@@ -90,10 +90,10 @@ pub fn request_row(props: &RowProps) -> Html {
                             }
                         </div>
                     </td>
-                    <td class={classes!("method", &method)} >{method}</td>
+                    <td  class={classes!("method", &method)} >{method}</td>
                     <td>{res.status().to_string()}</td>
-                    <td>{req.body().len()}</td>
-                    <td>{((res.time() - req.time()) as f64 * 1e-6).trunc()}</td>
+                    <td >{req.body().len()}</td>
+                    <td >{((res.time() - req.time()) as f64 * 1e-6).trunc()}</td>
                     <td>
                         <button title={"Delete"} class={delete_style}
                             onclick={move |e: MouseEvent| {ondelete.emit(idx); e.stop_immediate_propagation();}}

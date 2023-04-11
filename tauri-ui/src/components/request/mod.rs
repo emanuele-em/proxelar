@@ -107,39 +107,64 @@ pub fn request_table(props: &Props) -> Html {
         padding-bottom: 80px;
         
         .request-table{
-            width: 100%;
+            width: 95%;
+            margin:25px auto;
             max-height: 100%;
             border-collapse: collapse;
-            table-layout: auto;
+            table-layout: fixed;
+            color: canvasText;
+            border-radius: 10px;
+            box-shadow: var(--box-shadow);
+            overflow:hidden;
         }
         .request-table tr
         {
             border: 1px solid var(--bg-color);
             background: var(--bg-input);
-            border-spacing: 0;
             font-size:0.8rem;
-            height: fit-content;
             cursor: pointer;
+            margin-top: 5px;
+            margin-bottom: 5px;
         }
         .request-table td{
+            max-width: 50px;
         }
         .request-table td:first-child,
         .request-table th:first-child{
-            width: 100%;
-            max-width: 70vw;
+            overflow:hidden;
+            white-space: nowrap;
         }
         .request-table td,
         .request-table th,
         {
            padding: 5px 10px;
-           height: fit-content;
            white-space: nowrap;
            overflow:hidden;
+           width: 100px;
+           text-overflow: ellipsis;
+           text-align: left;
+        }
+
+        .request-table th{
+            padding: 10px;
+        }
+        .request-table tr td:first-child,
+        .request-table tr th:first-child
+        {
+            width: 100%;
+            min-width:100%;
+        }
+        .request-table tr td:last-child,
+        .request-table tr th:last-child
+        {
+            text-align:center;
         }
         .request-table tr:first-child {
             position: sticky;
             top: 0;
             z-index: 1000;
+            padding: 10px auto;
+            width:100%;
         }
         "#);
     let method_filter_style = use_style!(
