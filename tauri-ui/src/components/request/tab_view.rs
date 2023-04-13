@@ -76,7 +76,7 @@ pub fn tab_view(props: &Props) -> Html {
                 </div>
                 
             </div>
-            if body.len() > 0 {
+            if !body.is_empty() {
                 <div>
                     <strong ~innerText="body" />
                     <div class="container_body">
