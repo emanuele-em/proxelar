@@ -14,18 +14,18 @@ pub fn response_tab(props: &Props) -> Html {
     let headers = res.headers().clone();
     html! {
         <TabView {headers} {body}>
-            <p>
+            <div class="single_header">
                 <strong ~innerText="Status:" />
-                <span ~innerText={format!("{:?}", res.status())} />
-            </p>
-            <p>
+                <p ~innerText={format!("{:?}", res.status())} />
+            </div>
+            <div class="single_header">
                 <strong ~innerText="Version:" />
-                <span ~innerText={format!("{:?}", res.version())} />
-            </p>
-            <p>
-                <strong ~innerText="Time Stamp:" />
-                <span ~innerText={format!("{:?}", res.time())} />
-            </p>
+                <p ~innerText={format!("{:?}", res.version())} />
+            </div>
+            <div class="single_header">
+                <strong ~innerText="Timestamp: " />
+                <p ~innerText={format!("{:?}", res.time())} />
+            </div>
         </TabView>
     }
 }

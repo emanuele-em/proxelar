@@ -112,15 +112,15 @@ pub fn request_table(props: &Props) -> Html {
             max-height: 100%;
             border-collapse: collapse;
             table-layout: fixed;
-            color: canvasText;
+            color: var(--font-color);
             border-radius: 10px;
             box-shadow: var(--box-shadow);
             overflow:hidden;
         }
         .request-table tr
         {
-            border: 1px solid var(--bg-color);
-            background: var(--bg-input);
+            border-bottom: 1px solid var(--little-contrast);
+            background: var(--bg-color-secondary);
             font-size:0.8rem;
             cursor: pointer;
             margin-top: 5px;
@@ -200,12 +200,13 @@ r#"
             position: absolute;
             inset: 0;
             background: var(--bg-input);
+            opacity:.9;
             animation: layerTr 1s linear infinite alternate;
         }
 
         @keyframes layers1 {
-            0% { box-shadow: 0px 0px 0 0px  var(--bg-input)}
-            90% , 100% { box-shadow: 20px 20px 0 -4px var(--bg-input)}
+            0% { box-shadow: 0px 0px 0 0px  var(--bg-color-secondary)}
+            90% , 100% { box-shadow: 20px 20px 0 -4px var(--bg-color-secondary)}
         }
         @keyframes layerTr {
             0% { transform:  translate(0, 0) scale(1) }

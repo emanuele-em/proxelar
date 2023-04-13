@@ -58,7 +58,7 @@ pub fn proxy_on(props: &Props) -> Html {
             margin: 5px;
         }
         button:nth-of-type(2){
-            background: var(--bg-color);
+            background: var(--bg-color-secondary);
             color: var(--font-color);
         }
         "#

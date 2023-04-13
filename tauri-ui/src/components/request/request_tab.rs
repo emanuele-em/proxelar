@@ -14,18 +14,18 @@ pub fn request_tab(props: &Props) -> Html {
     let headers = req.headers().clone();
     html! {
         <TabView {headers} {body}>
-            <p>
+            <div class="single_header">
                 <strong ~innerText="Method:" />
-                <span ~innerText={format!("{:?}", req.method())} />
-            </p>
-            <p>
+                <p ~innerText={format!("{:?}", req.method())} />
+            </div>
+            <div class="single_header">
                 <strong ~innerText="Version:" />
-                <span ~innerText={format!("{:?}", req.version())} />
-            </p>
-            <p>
-                <strong ~innerText="Time Stamp:" />
-                <span ~innerText={format!("{:?}", req.time())} />
-            </p>
+                <p ~innerText={format!("{:?}", req.version())} />
+            </div>
+            <div class="single_header">
+                <strong ~innerText="Timestamp: " />
+                <p ~innerText={format!("{:?}", req.time())} />
+            </div>
         </TabView>
     }
 }

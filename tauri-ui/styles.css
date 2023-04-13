@@ -5,7 +5,9 @@
 }
 [data-theme="light"] {
   --bg-color: #dee5f3;
+  --bg-color-secondary: #efefef;
   --font-color: #474547;
+  --font-color-emphasis: #474547; 
   --post: #48cb90;
   --get: #2a69a7;
   --put: #d59d58;
@@ -14,12 +16,15 @@
   --head: #8c3fcf;
   --patch: #5cd6bc;
   --method: darkgray;
+  --little-contrast:#e4e4e4;
   --bg-input: #fff;
   --shadow-color: 220deg 47% 85%;
 }
 [data-theme="dark"] {
-  --font-color: #ceced1;
-  --bg-color: #242427;
+  --font-color-emphasis: rgba(255,255,255,.87);
+  --font-color: rgba(255,255,255,.6);
+  --bg-color: #121212;
+  --bg-color-secondary: #1d1d1d;
   --post: #49cc90;
   --get: #61affe;
   --put: #fca130;
@@ -28,7 +33,8 @@
   --head: #9012fe;
   --patch: #50e3c2;
   --method: lightgray;
-  --bg-input: rgba(255, 255, 255, 0.4);
+  --little-contrast:#2a2a2a;
+  --bg-input: #373737;
   --shadow-color: 240deg 4% 14%;
 }
 [data-theme= "dark"], [data-theme ="light"] {

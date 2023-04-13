@@ -16,44 +16,78 @@ pub fn tab_view(props: &Props) -> Html {
     let headers = props.headers.clone();
     let style = use_style!(
         r#"
-        details {
-            border: 1px solid;
-            border-radius: 4px;
+
+        > div{
+            margin-top:10px;
+            margin-bottom:25px;
+        }
+        > div > strong{
+            margin-top:20px;
+            margin-bottom: 10px;
+            display:block;
+        }
+        .headers {
+        }
+        .single_header{
+            font-size:.7rem;
+            display: flex;
+            justify-content: flex-start;
+            border-bottom: 1px solid var(--little-contrast);
+            padding-top: 10px;
+            padding-bottom:10px;
+
+        }
+        .single_header > strong {
+            width:200px;
+        }
+        .single_header > p{
+            margin:0;
+            width: calc(100% - 200px);
+            word-break: break-all;
+        }
+        .container_body{
+            font-size:.7rem;
         }
         "#
     );
     html! {
         <div class={style}>
-            <details>
-                <summary><strong ~innerText="Properties" /></summary>
-                <hr/>
-                {properties}
-            </details>
-            <details>
-                <summary><strong ~innerText="Headers" /></summary>
-                <hr/>
-                {
-                    headers.iter().map(
-                        |(key, value)| {
-                            html!{
-                                <p>
-                                    <strong ~innerText={format!("{}:",key)} />
-                                    <span ~innerText={value.to_str().unwrap_or("").to_string()} />
-                                </p>
+            <div>
+                <strong ~innerText="Properties" />
+                <div class="headers">
+                    {properties}
+                </div>
+            </div>
+            <div>
+                <strong ~innerText="Headers" />
+                <div class="headers">
+                    {
+                        headers.iter().map(
+                            |(key, value)| {
+                                html!{
+                                    <div class="single_header">
+                                        <strong ~innerText={format!("{}:",key)} />
+                                        <p ~innerText={value.to_str().unwrap_or("").to_string()} />
+                                    </div>
+                                }
                             }
+                        ).collect::<Html>()
+                    } 
+                </div>
+                
+            </div>
+            if body.len() > 0 {
+                <div>
+                    <strong ~innerText="body" />
+                    <div class="container_body">
+                        if let Ok(body) = std::str::from_utf8(&body) {
+                            <p ~innerText={ body.to_string()} />
+                        } else {
+                            <p ~innerText={format!("{:?}", body)} />
                         }
-                    ).collect::<Html>()
-                }
-            </details>
-            <details>
-                <summary><strong ~innerText="body" /></summary>
-                <hr/>
-                if let Ok(body) = std::str::from_utf8(&body) {
-                    <p ~innerText={body.to_string()} />
-                } else {
-                    <p ~innerText={format!("{:?}", body)} />
-                }
-            </details>
+                    </div>
+                </div>
+            }
         </div>
     }
 }

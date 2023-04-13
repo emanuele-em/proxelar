@@ -26,10 +26,10 @@ pub fn request_details(props: &Props) -> Html {
         justify-content: space-between;
         align-items:stretch;
         margin:25px auto;
-        background: var(--bg-color);
+        background: var(--bg-input);
         padding:5px;
         border-radius: 5px;
-        border: 1px solid var(--bg-color); 
+        border: 1px solid var(--bg-input); 
 
         button {
             margin: 0;
@@ -43,11 +43,12 @@ pub fn request_details(props: &Props) -> Html {
             font-weight: bold;
             border: 1px solid transparent;
             background: transparent;
+            color: var(--font-color); 
         }
         .tab_selected {
             opacity: 1;
-            background: white;
-            border: 1px solid lightgrey;
+            background: var(--bg-color-secondary);
+            border: 1px solid var(--bg-color-secondary);
         }
         "#
     );
@@ -61,21 +62,22 @@ pub fn request_details(props: &Props) -> Html {
         right: 0;
         width: 750px;
         height: 450px;
-        background: #fff;
+        background: var(--bg-color-secondary); 
         z-index: 999999;
         padding:20px;
-        border-radius: 15px;
+        border-radius: 7px;
+        overflow:auto;
 
-        .delete_button{
-            color: var(--bg-color);
-            border: 1px solid var(--bg-color);
+        .close_button{
+            color: var(--font-color);
+            border: 1px solid var(--little-contrast);
             position:absolute;
             right: 10px;
             top: 10px;
             height: 25px;
             width: 25px;
             text-align:center;
-            background: white;
+            background: transparent;
             border-radius: 5px;
             padding:0;
             font-size: 18px;
@@ -92,7 +94,8 @@ pub fn request_details(props: &Props) -> Html {
             right:0;
             width:100vw;
             height: 100vh;
-            background:rgba(0,0,0,.6);
+            background:var(--font-color);
+            opacity: .9;
             content: "";
             z-index: 99999;
 
@@ -113,9 +116,9 @@ pub fn request_details(props: &Props) -> Html {
     };
     html! {
         <div>
-            <div class={background}/>
+            <div class={background} onclick={&ondeselect}/>
             <div class={style}>
-                <button class="delete_button" onclick={ondeselect} ~innerText="×" />
+                <button class="close_button" onclick={&ondeselect} ~innerText="×" />
                 <div class={tab_style}>
                     <button
                         class={(*tab==Tab::Request).then_some("tab_selected")}
