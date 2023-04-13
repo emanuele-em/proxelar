@@ -1,0 +1,87 @@
+/* https://blog.jim-nielsen.com/2021/css-system-colors/ */
+:root {
+  --gradient: linear-gradient(312deg, rgba(99,69,177,1) 35%, rgba(203,135,173,1) 100%);
+  font-family: Verdana, Geneva, Tahoma, sans-serif;
+}
+[data-theme="light"] {
+  --bg-color: #dee5f3;
+  --bg-color-secondary: #efefef;
+  --font-color: #474547;
+  --font-color-emphasis: #474547; 
+  --post: #48cb90;
+  --get: #2a69a7;
+  --put: #d59d58;
+  --delete: #c83232;
+  --options: #24598f;
+  --head: #8c3fcf;
+  --patch: #5cd6bc;
+  --method: darkgray;
+  --little-contrast:#e4e4e4;
+  --bg-input: #fff;
+  --shadow-color: 220deg 47% 85%;
+}
+[data-theme="dark"] {
+  --font-color-emphasis: rgba(255,255,255,.87);
+  --font-color: rgba(255,255,255,.6);
+  --bg-color: #121212;
+  --bg-color-secondary: #1d1d1d;
+  --post: #49cc90;
+  --get: #61affe;
+  --put: #fca130;
+  --delete: #f93e3e;
+  --options: #0d5aa7;
+  --head: #9012fe;
+  --patch: #50e3c2;
+  --method: lightgray;
+  --little-contrast:#2a2a2a;
+  --bg-input: #373737;
+  --shadow-color: 240deg 4% 14%;
+}
+[data-theme= "dark"], [data-theme ="light"] {
+    --box-shadow: 1px 2px 2px hsl(var(--shadow-color) / 0.2),
+      2px 4px 4px hsl(var(--shadow-color) / 0.2),
+      4px 8px 8px hsl(var(--shadow-color) / 0.2),
+      8px 8px 16px hsl(var(--shadow-color) / 0.2),
+      16px 16px 32px hsl(var(--shadow-color) / 0.2);
+    --gradient: linear-gradient(312deg, rgba(99,69,177,1) 35%, rgba(203,135,173,1) 100%);
+}
+.method {
+  color: var(--method);
+}
+.POST {
+  color: var(--post);
+}
+.GET {
+  color: var(--get);
+}
+.PUT {
+  color: var(--put);
+}
+.DELETE {
+  color: var(--delete);
+}
+.OPTIONS {
+  color: var(--options);
+}
+.HEAD {
+  color: var(--head);
+}
+.PATCH {
+  color: var(--patch);
+}
+* {
+  box-sizing: border-box;
+}
+body {
+  background-color: var(--bg-color);
+  color: var(--font-color);
+  cursor: default;
+  overflow: hidden;
+}
+button {
+  cursor: pointer;
+}
+input{
+  background: var(--bg-input);
+  box-shadow: var(--box-shadow);
+}
