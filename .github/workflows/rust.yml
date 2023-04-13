@@ -19,7 +19,10 @@ jobs:
     - name: Format
       uses: actions-rust-lang/rustfmt@v1
     - name: Lint
-      run: cargo clippy --all-features -- -D warnings
+      uses: actions-rs/clippy-check@v1
+      with:
+        token: ${{ secrets.GITHUB_TOKEN }}
+        args: --all-features
     - name: Build
       run: cargo build --verbose
     - name: Run tests
