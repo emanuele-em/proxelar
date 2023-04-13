@@ -72,9 +72,9 @@ pub fn tab_view(props: &Props) -> Html {
                                 }
                             }
                         ).collect::<Html>()
-                    } 
+                    }
                 </div>
-                
+
             </div>
             if !body.is_empty() {
                 <div>

@@ -22,10 +22,9 @@ pub fn request_row(props: &RowProps) -> Html {
         border:none;
         background:transparent;
         "#
-    
     );
     let path_style = use_style!(
-       r#"
+        r#"
        position:relative;
        width:100%;
        
@@ -71,9 +70,10 @@ pub fn request_row(props: &RowProps) -> Html {
             let idx = props.idx;
             let method = req.method().to_string();
             let authority = req.uri().authority().unwrap().to_string();
-            let query = Url::parse(&req.uri().to_string()).unwrap(); 
-            let query = query.query_pairs()
-            .map(|(key, value)| (key.to_string(), value.to_string()));
+            let query = Url::parse(&req.uri().to_string()).unwrap();
+            let query = query
+                .query_pairs()
+                .map(|(key, value)| (key.to_string(), value.to_string()));
             let ondelete = props.ondelete.clone();
             let onselect = props.onselect.clone();
             html! {
@@ -108,5 +108,4 @@ pub fn request_row(props: &RowProps) -> Html {
             }
         }
     }
-
 }

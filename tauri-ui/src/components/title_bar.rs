@@ -12,11 +12,9 @@ fn theme_button() -> Html {
         is_dark
     });
 
-
-
     let (data_theme, btn_text) = match *is_dark {
         true => ("dark", "🔆"),
-        false => ("light", "🌙")
+        false => ("light", "🌙"),
     };
 
     if let Some(window) = web_sys::window() {

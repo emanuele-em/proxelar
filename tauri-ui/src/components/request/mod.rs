@@ -166,7 +166,8 @@ pub fn request_table(props: &Props) -> Html {
             padding: 10px auto;
             width:100%;
         }
-        "#);
+        "#
+    );
     let method_filter_style = use_style!(
         r#"
         position: relative;
@@ -182,7 +183,7 @@ pub fn request_table(props: &Props) -> Html {
         "#
     );
     let loader = use_style!(
-r#"
+        r#"
             position: absolute;
             top:0;
             bottom:0;
