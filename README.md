@@ -45,6 +45,11 @@ Rust-based **Man in the Middle proxy**, an early-stage project aimed at providin
   - [Ubuntu guide](https://help.ubuntu.com/stable/ubuntu-help/net-proxy.html.en)
   - [Windows guide](https://support.microsoft.com/en-us/windows/use-a-proxy-server-in-windows-03096c53-0554-4ffe-b6ab-8b1deee8dae1#:~:text=a%20VPN%20connection-,Select%20the%20Start%20button%2C%20then%20select%20Settings%20%3E%20Network%20%26%20Internet,information%20for%20that%20VPN%20connection.)
 
+## Start Development
+```bash
+cargo tauri dev
+```
+
 ## Documentation and Help
 
 If you have questions on how to use [Man In The Middle Proxy](https://github.com/emanuele-em/man-in-the-middle-proxy), please use GitHub Discussions!
@@ -67,16 +72,18 @@ See [LICENSE-APACHE](LICENSE-APACHE), [LICENSE-MIT](LICENSE-MIT) for details
 
 ### Input of Listening Address
 
-![Mitm proxy Screenshot 1](assets/screenshots/1w.png)
 ![Mitm proxy Screenshot 1](assets/screenshots/1b.png)
+![Mitm proxy Screenshot 1](assets/screenshots/1w.png)
+![Mitm proxy Screenshot 1](assets/screenshots/2w.png)
 
 ### Requests List
 
-![Mitm proxy Screenshot 2](assets/screenshots/2w.png)
-![Mitm proxy Screenshot 2](assets/screenshots/2b.png)
+![Mitm proxy Screenshot 2](assets/screenshots/3w.png)
+![Mitm proxy Screenshot 2](assets/screenshots/3b.png)
+![Mitm proxy Screenshot 2](assets/screenshots/4b.png)
 
 ### Request and Response Details
 
-![Mitm proxy Screenshot 3](assets/screenshots/3w.png)
-![Mitm proxy Screenshot 3](assets/screenshots/3b.png)
+![Mitm proxy Screenshot 3](assets/screenshots/5b.png)
+![Mitm proxy Screenshot 3](assets/screenshots/5w.png)
 

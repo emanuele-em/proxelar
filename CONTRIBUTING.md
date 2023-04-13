@@ -13,6 +13,24 @@ Here are some steps to get started with contributing to this project:
 
 We appreciate contributions of any size, from small bug fixes to major new features. If you're unsure about a change you'd like to make, feel free to open an issue first to discuss it with the maintainers.
 
+### Contribute to UI with Tauri UI
+
+- install required tools
+```bash
+cargo install tauri-cli wasm-bindgen-cli trunk
+```
+
+- start development
+```bash
+cargo tauri dev
+```
+
+- package and release
+```bash
+cargo tauri build
+```
+
+
 ## Test request generation
 
 * Install http server and client.

@@ -47,6 +47,7 @@ pub fn proxy_on(props: &Props) -> Html {
         box-shadow: var(--box-shadow);
         border-radius: 10px;
         padding: 3px  10px;
+        z-index:999;
         button {
             font-size: 1rem;
             height:30px;
