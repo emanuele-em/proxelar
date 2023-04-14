@@ -16,9 +16,13 @@ jobs:
 
     steps:
     - uses: actions/checkout@v3
+    - uses: actions/setup-node@v3
+      with:
+        node-version: 16
     - name: Format
       uses: actions-rust-lang/rustfmt@v1
-    - run: cargo install tauri-cli wasm-bindgen-cli trunk gdk-sys
+    - run: sudo apt-get install gdk-3.0
+    - run: cargo install tauri-cli wasm-bindgen-cli trunk
     - name: Clippy Check
       uses: actions-rs/clippy-check@v1
       with:
