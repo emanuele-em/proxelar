@@ -21,15 +21,11 @@ jobs:
         node-version: 16
     - name: Format
       uses: actions-rust-lang/rustfmt@v1
-    - run: sudo apt-get install pkg-config gdk-3.0 libgtk-3-dev libsoup2.4-dev javascriptcoregtk-4.0 webkit2gtk-4.0
-    #- run: cargo install tauri-cli wasm-bindgen-cli trunk
-    - run: mkdir dist
-    - run: rustup component add clippy
-    - name: Clippy Check
-      uses: actions-rs/clippy-check@v1
-      with:
-        token: ${{ secrets.GITHUB_TOKEN }}
-        args: --all-features
+    - run: cargo install clippy
+    - name: Run Clippy
+      run: |
+        cd src
+        clippy --all --workspace
     - name: Build
       run: cargo build --verbose
     - name: Run tests
