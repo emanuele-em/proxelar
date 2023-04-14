@@ -29,7 +29,7 @@ jobs:
       uses: actions-rs/clippy@master
       with:
         args: --all-features --all-targets
-    - run: sudo apt-get install pkg-config libgtk-3-dev
+    - run: sudo apt-get install pkg-config libgtk-3-dev libsoup2.4-dev
     - name: Build
       run: cargo build --verbose
     - name: Run tests
