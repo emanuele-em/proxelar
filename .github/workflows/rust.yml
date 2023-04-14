@@ -21,9 +21,15 @@ jobs:
         node-version: 16
     - name: Format
       uses: actions-rust-lang/rustfmt@v1
-    - run: rustup component add clippy
-    - name: Run Clippy
-      run: cargo clippy
+    - name: Clippy
+    - uses: actions/checkout@v1
+    - uses: actions-rs/toolchain@v1
+      with:
+        toolchain: stable
+        components: clippy
+    - uses: actions-rs/clippy@master
+      with:
+        args: --all-features --all-targets
     - name: Build
       run: cargo build --verbose
     - name: Run tests
