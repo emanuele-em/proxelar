@@ -19,7 +19,6 @@ jobs:
     - name: Format
       uses: actions-rust-lang/rustfmt@v1
     - run: cargo install tauri-cli wasm-bindgen-cli trunk
-    - run: cargo tauri build
     - name: Clippy Check
       uses: actions-rs/clippy-check@v1
       with:
