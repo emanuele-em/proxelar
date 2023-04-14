@@ -29,6 +29,7 @@ jobs:
       uses: actions-rs/clippy@master
       with:
         args: --all-features --all-targets
+    - run: apt-get install pkg-config
     - name: Build
       run: cargo build --verbose
     - name: Run tests
