@@ -1,3 +1,5 @@
+// This code was derived from the hudsucker repository: 
+// https://github.com/omjadas/hudsucker
 use std::sync::mpsc::SyncSender;
 
 use async_trait::async_trait;

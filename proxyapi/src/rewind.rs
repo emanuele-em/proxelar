@@ -1,3 +1,5 @@
+// This code was derived from the hudsucker repository: 
+// https://github.com/omjadas/hudsucker
 use bytes::{Buf, Bytes};
 use std::{
     cmp, io,

@@ -1,3 +1,5 @@
+// This code was derived from the hudsucker repository: 
+// https://github.com/omjadas/hudsucker
 use crate::{ca::CertificateAuthority, rewind::Rewind, HttpContext, HttpHandler, RequestResponse};
 use http::uri::{Authority, Scheme};
 use hyper::{
