@@ -1,11 +1,11 @@
 // This code was derived from the hudsucker repository:
 // https://github.com/omjadas/hudsucker
 
-use std::sync::mpsc::SyncSender;
 use async_trait::async_trait;
 use http::{Request, Response};
 use hyper::{body::to_bytes, Body};
 pub use proxyapi_models::{ProxiedRequest, ProxiedResponse};
+use std::sync::mpsc::SyncSender;
 
 use crate::{HttpContext, HttpHandler, RequestResponse};
 
