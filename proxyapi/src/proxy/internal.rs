@@ -1,5 +1,6 @@
-// This code was derived from the hudsucker repository: 
+// This code was derived from the hudsucker repository:
 // https://github.com/omjadas/hudsucker
+
 use crate::{ca::CertificateAuthority, rewind::Rewind, HttpContext, HttpHandler, RequestResponse};
 use http::uri::{Authority, Scheme};
 use hyper::{
@@ -12,10 +13,7 @@ use tokio::{
     net::TcpStream,
 };
 use tokio_rustls::TlsAcceptor;
-use tokio_tungstenite::{
-    tungstenite::{self},
-    Connector, WebSocketStream,
-};
+use tokio_tungstenite::{tungstenite, Connector, WebSocketStream};
 
 pub struct InternalProxy<C, CA, H> {
     pub ca: Arc<CA>,
