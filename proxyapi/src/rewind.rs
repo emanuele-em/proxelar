@@ -15,6 +15,7 @@ pub(crate) struct Rewind<T> {
     inner: T,
 }
 
+
 impl<T> Rewind<T> {
     #[allow(dead_code)]
     pub(crate) fn new(io: T) -> Self {
@@ -23,6 +24,7 @@ impl<T> Rewind<T> {
             inner: io,
         }
     }
+
 
     pub(crate) fn new_buffered(io: T, buf: Bytes) -> Self {
         Rewind {
