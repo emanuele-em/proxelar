@@ -34,5 +34,7 @@ jobs:
       run: cargo build --verbose
     - name: Run tests
       run: cargo test --verbose
+    - name: Install frontend dependecies
+      run: npm install
     - name: Tauri
       run: cargo tauri dev
