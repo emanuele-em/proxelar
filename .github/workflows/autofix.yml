@@ -6,25 +6,27 @@ on:
     branches: [ "master" ]
 permissions:
   contents: read
+env:
+  rust_clippy: 1.73
 jobs:
   autofix:
 
     runs-on: ubuntu-latest
 
     steps:
-    - uses: actions/checkout@v4
-    - uses: actions/cache@v3
-      with:
-        path: |
-          ~/.cargo/bin/
-          ~/.cargo/registry/index/
-          ~/.cargo/registry/cache/
-          ~/.cargo/git/db/
-          target/
-        key: autofix-${{ hashFiles('**/Cargo.lock') }}
-    - run: rustup toolchain install ${{ env.rust_clippy }} --profile minimal --component rustfmt --component clippy
-    - run: rustup default ${{ env.rust_clippy }}
-    - run: cargo clippy --fix --workspace
-    - run: cargo fmt --all
+      - uses: actions/checkout@v4
+      - uses: actions/cache@v3
+        with:
+          path: |
+            ~/.cargo/bin/
+            ~/.cargo/registry/index/
+            ~/.cargo/registry/cache/
+            ~/.cargo/git/db/
+            target/
+          key: autofix-${{ hashFiles('**/Cargo.lock') }}
+      - run: rustup toolchain install ${{ env.rust_clippy }} --profile minimal --component rustfmt --component clippy
+      - run: rustup default ${{ env.rust_clippy }}
+      - run: cargo clippy --fix --workspace
+      - run: cargo fmt --all
 
-    - uses: autofix-ci/action@d3e591514b99d0fca6779455ff8338516663f7cc
+      - uses: autofix-ci/action@d3e591514b99d0fca6779455ff8338516663f7cc
