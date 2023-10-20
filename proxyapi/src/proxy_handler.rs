@@ -67,7 +67,6 @@ impl HttpHandler for ProxyHandler {
         _ctx: &HttpContext,
         mut req: Request<Body>,
     ) -> RequestResponse {
-        //println!("request{:?}\n", req);
         let mut body_mut = req.body_mut();
         let body_bytes = to_bytes(&mut body_mut).await.unwrap_or_default();
         *body_mut = Body::from(body_bytes.clone()); // Replacing the potentially mutated body with a reference to the entire contents
@@ -78,7 +77,7 @@ impl HttpHandler for ProxyHandler {
             req.version(),
             req.headers().clone(),
             body_bytes,
-            chrono::Local::now().timestamp_nanos(),
+            chrono::Local::now().timestamp_nanos_opt().unwrap_or_default(),
         );
         *self = self.set_req(output_request);
 
@@ -90,7 +89,6 @@ impl HttpHandler for ProxyHandler {
         _ctx: &HttpContext,
         mut res: Response<Body>,
     ) -> Response<Body> {
-        //println!("res: {:?}\n\n", res);
         let mut body_mut = res.body_mut();
         let body_bytes = to_bytes(&mut body_mut).await.unwrap_or_default();
         *body_mut = Body::from(body_bytes.clone()); // Replacing the potentially mutated body with a reference to the entire contents
@@ -100,12 +98,11 @@ impl HttpHandler for ProxyHandler {
             res.version(),
             res.headers().clone(),
             body_bytes,
-            chrono::Local::now().timestamp_nanos(),
+            chrono::Local::now().timestamp_nanos_opt().unwrap_or_default(),
         );
 
         self.set_res(output_response).send_output();
 
-        //Self::sanitize_body(res.body_mut());
         res
     }
 }
