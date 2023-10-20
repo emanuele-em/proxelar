@@ -77,7 +77,9 @@ impl HttpHandler for ProxyHandler {
             req.version(),
             req.headers().clone(),
             body_bytes,
-            chrono::Local::now().timestamp_nanos_opt().unwrap_or_default(),
+            chrono::Local::now()
+                .timestamp_nanos_opt()
+                .unwrap_or_default(),
         );
         *self = self.set_req(output_request);
 
@@ -98,7 +100,9 @@ impl HttpHandler for ProxyHandler {
             res.version(),
             res.headers().clone(),
             body_bytes,
-            chrono::Local::now().timestamp_nanos_opt().unwrap_or_default(),
+            chrono::Local::now()
+                .timestamp_nanos_opt()
+                .unwrap_or_default(),
         );
 
         self.set_res(output_response).send_output();
