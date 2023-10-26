@@ -16,7 +16,7 @@ chrono = "0.4.23"
 http = "0.2.8"
 hyper = {version="0.14.23", features=["full"]}
 hyper-rustls = {version = "0.23.2",  features = ["http1", "logging", "tls12", "webpki-tokio"]}
-hyper-tungstenite = "0.9.0"
+hyper-tungstenite = "0.11"
 moka = {version="0.9.6", features= ["future"]}
 openssl = {version = "0.10.45", features = ["vendored"]}
 thiserror = "1.0.38"
