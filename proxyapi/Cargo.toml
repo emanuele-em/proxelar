@@ -22,5 +22,5 @@ openssl = {version = "0.10.45", features = ["vendored"]}
 thiserror = "1.0.38"
 tokio = {version = "1.25.0", features = ["full"]}
 tokio-rustls = "0.23.4"
-tokio-tungstenite = {version = "0.18.0", features =["rustls-tls-webpki-roots"]}
+tokio-tungstenite = {version = "0.20.1", features =["rustls-tls-webpki-roots"]}
 proxyapi_models = {path = "../proxyapi_models"}

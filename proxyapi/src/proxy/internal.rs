@@ -13,7 +13,7 @@ use tokio::{
     net::TcpStream,
 };
 use tokio_rustls::TlsAcceptor;
-use tokio_tungstenite::{tungstenite, Connector, WebSocketStream};
+use tokio_tungstenite::{tungstenite, Connector};
 
 pub struct InternalProxy<C, CA, H> {
     pub ca: Arc<CA>,
@@ -188,7 +188,7 @@ where
 
     async fn handle_websocket(
         self,
-        _server_socket: WebSocketStream<Upgraded>,
+        _server_socket: hyper_tungstenite::WebSocketStream<Upgraded>,
         _req: Request<()>,
     ) -> Result<(), tungstenite::Error> {
         Ok(())
