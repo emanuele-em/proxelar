@@ -18,7 +18,7 @@ hyper = {version="0.14.23", features=["full"]}
 hyper-rustls = {version = "0.23.2",  features = ["http1", "logging", "tls12", "webpki-tokio"]}
 hyper-tungstenite = "0.11"
 moka = {version="0.9.6", features= ["future"]}
-openssl = {version = "0.10.45", features = ["vendored"]}
+openssl = {version = "0.10.60", features = ["vendored"]}
 thiserror = "1.0.38"
 tokio = {version = "1.25.0", features = ["full"]}
 tokio-rustls = "0.23.4"
