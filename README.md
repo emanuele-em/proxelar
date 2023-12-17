@@ -52,7 +52,7 @@ cargo tauri dev
 
 ## Documentation and Help
 
-If you have questions on how to use [Man In The Middle Proxy](https://github.com/emanuele-em/proxelar), please use GitHub Discussions!
+If you have questions on how to use [Proxelar](https://github.com/emanuele-em/proxelar), please use GitHub Discussions!
 ![GitHub Discussions](https://img.shields.io/github/discussions/emanuele-em/proxelar)
 
 ## Contributing
