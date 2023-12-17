@@ -1,13 +1,13 @@
 <div align="center">
 <img style="width:100px; margin:auto" src="assets/logo.png">
-<h1> Man In The Middle Proxy </h1>
+<h1> Proxelar </h1>
+<h2> A simple <i>Man In The Middle</i> proxy</h2>
 </div>
 
-
-[![build](https://github.com/emanuele-em/man-in-the-middle-proxy/actions/workflows/autofix.yml/badge.svg?branch=master)](https://github.com/emanuele-em/man-in-the-middle-proxy/actions/workflows/autofix.yml)
-![GitHub](https://img.shields.io/github/license/emanuele-em/man-in-the-middle-proxy)
-![GitHub last commit](https://img.shields.io/github/last-commit/emanuele-em/man-in-the-middle-proxy)
-![GitHub top language](https://img.shields.io/github/languages/top/emanuele-em/man-in-the-middle-proxy)
+[![build](https://github.com/emanuele-em/proxelar/actions/workflows/autofix.yml/badge.svg?branch=master)](https://github.com/emanuele-em/proxelar/actions/workflows/autofix.yml)
+![GitHub](https://img.shields.io/github/license/emanuele-em/proxelar)
+![GitHub last commit](https://img.shields.io/github/last-commit/emanuele-em/proxelar)
+![GitHub top language](https://img.shields.io/github/languages/top/emanuele-em/proxelar)
 
 
 ## Description
@@ -52,8 +52,8 @@ cargo tauri dev
 
 ## Documentation and Help
 
-If you have questions on how to use [Man In The Middle Proxy](https://github.com/emanuele-em/man-in-the-middle-proxy), please use GitHub Discussions!
-![GitHub Discussions](https://img.shields.io/github/discussions/emanuele-em/man-in-the-middle-proxy)
+If you have questions on how to use [Man In The Middle Proxy](https://github.com/emanuele-em/proxelar), please use GitHub Discussions!
+![GitHub Discussions](https://img.shields.io/github/discussions/emanuele-em/proxelar)
 
 ## Contributing
 
