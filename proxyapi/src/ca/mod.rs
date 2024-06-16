@@ -37,7 +37,9 @@ pub struct Ssl {
 
 impl Default for Ssl {
     fn default() -> Self {
+        #[allow(clippy::all)]
         let private_key_bytes: &[u8] = include_bytes!("proxelar.key");
+        #[allow(clippy::all)]
         let ca_cert_bytes: &[u8] = include_bytes!("proxelar.cer");
 
         let pkey =

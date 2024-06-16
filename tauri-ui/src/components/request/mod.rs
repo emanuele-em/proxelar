@@ -52,7 +52,7 @@ pub fn request_table(props: &Props) -> Html {
         let selected = selected.clone();
         Callback::from(move |new_value: Vec<String>| {
             if let Some(idx) = *selected {
-                if let Some(RequestInfo(Some(req), _)) = requests.borrow().iter().nth(idx) {
+                if let Some(RequestInfo(Some(req), _)) = requests.borrow().get(idx) {
                     if !filter_request(req.method().to_string(), &new_value) {
                         selected.set(None);
                     }
@@ -249,7 +249,7 @@ pub fn request_table(props: &Props) -> Html {
                     }
                 </table>
                 if let Some(idx) = *selected {
-                    if let Some(RequestInfo(Some(req), Some(res))) = requests.borrow().iter().nth(idx) {
+                    if let Some(RequestInfo(Some(req), Some(res))) = requests.borrow().get(idx) {
                         <RequestDetails {ondeselect} response={res.clone()} request={req.clone()} />
                     }
                 }
