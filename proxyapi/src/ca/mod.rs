@@ -37,8 +37,8 @@ pub struct Ssl {
 
 impl Default for Ssl {
     fn default() -> Self {
-        let private_key_bytes: &[u8] = include_bytes!("mitmproxy.key");
-        let ca_cert_bytes: &[u8] = include_bytes!("mitmproxy.cer");
+        let private_key_bytes: &[u8] = include_bytes!("proxelar.key");
+        let ca_cert_bytes: &[u8] = include_bytes!("proxelar.cer");
 
         let pkey =
             PKey::private_key_from_pem(private_key_bytes).expect("Failed to parse private key");

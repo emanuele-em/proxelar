@@ -1,2 +1,4 @@
 /target
 .DS_Store
+proxyapi/src/ca/*.key
+proxyapi/src/ca/*.cer
