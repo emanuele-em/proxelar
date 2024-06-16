@@ -7,7 +7,7 @@ on:
 permissions:
   contents: read
 env:
-  rust_clippy: "1.73"
+  rust_clippy: "1.79"
 jobs:
   autofix:
 
