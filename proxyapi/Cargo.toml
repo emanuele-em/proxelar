@@ -11,7 +11,7 @@ name = "ssl"
 [dependencies]
 async-trait = "0.1.64"
 bstr = "1.2.0"
-bytes = "1.4.0"
+bytes = "1.11.1"
 chrono = "0.4.23"
 http = "0.2.8"
 hyper = {version="0.14.23", features=["full"]}
