@@ -16,7 +16,7 @@ cargo fmt --all --check                # format check
 cargo audit                            # security vulnerability scan
 ```
 
-MSRV: 1.76. CI runs on ubuntu, macos, and windows.
+MSRV: 1.88. CI runs on ubuntu, macos, and windows.
 
 ## Workspace Structure
 
