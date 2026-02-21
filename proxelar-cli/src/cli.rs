@@ -10,7 +10,7 @@ use std::path::PathBuf;
 )]
 pub struct Args {
     /// Interface mode
-    #[arg(short, long, default_value = "terminal", value_enum)]
+    #[arg(short, long, default_value = "tui", value_enum)]
     pub interface: Interface,
 
     /// Proxy mode
@@ -58,7 +58,7 @@ mod tests {
     #[test]
     fn test_default_args() {
         let args = Args::parse_from(["proxelar"]);
-        assert!(matches!(args.interface, Interface::Terminal));
+        assert!(matches!(args.interface, Interface::Tui));
         assert!(matches!(args.mode, Mode::Forward));
         assert_eq!(args.port, 8080);
     }

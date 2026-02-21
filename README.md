@@ -29,7 +29,7 @@ Intercept, inspect, and debug HTTP/HTTPS traffic with a terminal, TUI, or web in
 # Install
 cargo install --path proxelar-cli
 
-# Run (forward proxy, terminal output)
+# Run (forward proxy, TUI)
 proxelar
 
 # Install the CA certificate
@@ -42,8 +42,8 @@ proxelar
 ## Usage
 
 ```bash
-proxelar                                          # terminal output (default)
-proxelar -i tui                                   # interactive TUI
+proxelar                                          # interactive TUI (default)
+proxelar -i terminal                              # terminal output
 proxelar -i gui                                   # web GUI at localhost:8081
 proxelar -m reverse --target http://localhost:3000 # reverse proxy
 proxelar -b 0.0.0.0 -p 9090                       # custom bind address and port
@@ -54,7 +54,7 @@ proxelar -b 0.0.0.0 -p 9090                       # custom bind address and port
 
 | Flag | Description | Default |
 |------|-------------|---------|
-| `-i, --interface` | `terminal` · `tui` · `gui` | `terminal` |
+| `-i, --interface` | `terminal` · `tui` · `gui` | `tui` |
 | `-m, --mode` | `forward` · `reverse` | `forward` |
 | `-p, --port` | Listening port | `8080` |
 | `-b, --addr` | Bind address | `127.0.0.1` |

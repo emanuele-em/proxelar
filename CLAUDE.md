@@ -83,7 +83,7 @@ Cert download server intercepts requests to `proxel.ar` hostname, serving PEM/DE
 
 | Flag | Default | Description |
 |------|---------|-------------|
-| `-i, --interface` | `terminal` | `terminal` / `tui` / `gui` |
+| `-i, --interface` | `tui` | `terminal` / `tui` / `gui` |
 | `-m, --mode` | `forward` | `forward` / `reverse` |
 | `-p, --port` | `8080` | Proxy listen port |
 | `-b, --addr` | `127.0.0.1` | Bind address |
