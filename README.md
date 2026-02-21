@@ -8,8 +8,10 @@
 
 Intercept, inspect, and debug HTTP/HTTPS traffic with a terminal, TUI, or web interface.
 
-[![build](https://github.com/emanuele-em/proxelar/actions/workflows/autofix.yml/badge.svg?branch=master)](https://github.com/emanuele-em/proxelar/actions/workflows/autofix.yml)
-[![license](https://img.shields.io/github/license/emanuele-em/proxelar)](LICENSE-MIT)
+[![CI](https://github.com/emanuele-em/proxelar/actions/workflows/autofix.yml/badge.svg)](https://github.com/emanuele-em/proxelar/actions/workflows/autofix.yml)
+[![Dependabot Updates](https://github.com/emanuele-em/proxelar/actions/workflows/dependabot/dependabot-updates/badge.svg)](https://github.com/emanuele-em/proxelar/actions/workflows/dependabot/dependabot-updates)
+[![Dependency check](https://github.com/emanuele-em/proxelar/actions/workflows/deny.yml/badge.svg)](https://github.com/emanuele-em/proxelar/actions/workflows/deny.yml)
+
 
 </div>
 
