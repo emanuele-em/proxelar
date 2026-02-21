@@ -23,7 +23,7 @@ rustls = { version = "0.23", default-features = false, features = ["ring"] }
 open = "5"
 
 # TUI
-ratatui = "0.29"
+ratatui = "0.30"
 crossterm = { version = "0.28", features = ["event-stream"] }
 futures = "0.3"
 
