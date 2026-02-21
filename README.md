@@ -1,102 +1,89 @@
 <div align="center">
-<img style="width:100px; margin:auto" src="assets/logo.png">
-<h1> Proxelar </h1>
-<h2> A Man In The Middle proxy with multiple interface modes</h2>
-</div>
+
+<img src="assets/logo.png" width="120">
+
+# Proxelar
+
+**A Man-in-the-Middle proxy written in Rust.**
+
+Intercept, inspect, and debug HTTP/HTTPS traffic with a terminal, TUI, or web interface.
 
 [![build](https://github.com/emanuele-em/proxelar/actions/workflows/autofix.yml/badge.svg?branch=master)](https://github.com/emanuele-em/proxelar/actions/workflows/autofix.yml)
-![GitHub](https://img.shields.io/github/license/emanuele-em/proxelar)
-![GitHub last commit](https://img.shields.io/github/last-commit/emanuele-em/proxelar)
-![GitHub top language](https://img.shields.io/github/languages/top/emanuele-em/proxelar)
+[![license](https://img.shields.io/github/license/emanuele-em/proxelar)](LICENSE-MIT)
 
-## Description
+</div>
 
-Rust-based **Man in the Middle proxy** providing visibility into HTTP and HTTPS network traffic. Supports forward and reverse proxy modes with three interface options: terminal output, interactive TUI, and web GUI.
+---
 
 ## Features
 
-- HTTP / HTTPS interception (forward proxy with CONNECT tunneling)
-- Reverse proxy mode with URI rewriting
-- Certificate download via `http://proxel.ar` (when proxy is configured)
-- Three interface modes:
-  - **Terminal** — colored log output
-  - **TUI** — interactive ratatui-based interface with filtering and detail views
-  - **Web GUI** — browser-based UI with WebSocket live updates
-- Filtering and request/response detail inspection
+- **HTTPS interception** — automatic CA generation and per-host certificate minting
+- **Forward & reverse proxy** — CONNECT tunneling or upstream URI rewriting
+- **Three interfaces** — terminal, interactive TUI (ratatui), web GUI (axum + WebSocket)
+- **Request filtering** — search and inspect request/response pairs in detail
+- **Easy CA install** — visit `http://proxel.ar` through the proxy to download the certificate
 
-## Installation
+## Quick Start
 
 ```bash
+# Install
 cargo install --path proxelar-cli
+
+# Run (forward proxy, terminal output)
+proxelar
+
+# Install the CA certificate
+# Option A: visit http://proxel.ar through the proxy
+# Option B: manually install ~/.proxelar/proxelar-ca.pem
+
+# Configure your system proxy to 127.0.0.1:8080
 ```
-
-## Getting Started
-
-1. Start the proxy — a CA certificate is automatically generated in `~/.proxelar/` on first run.
-
-2. Install the CA certificate so your system trusts proxied HTTPS traffic. You have two options:
-   - Visit `http://proxel.ar` through the proxy to download the certificate interactively.
-   - Or find the generated `proxelar-ca.pem` in `~/.proxelar/` and install it manually:
-     - [macOS guide](https://support.apple.com/guide/keychain-access/change-the-trust-settings-of-a-certificate-kyca11871/mac)
-     - [Ubuntu guide](https://ubuntu.com/server/docs/security-trust-store)
-     - [Windows guide](https://learn.microsoft.com/en-us/skype-sdk/sdn/articles/installing-the-trusted-root-certificate)
-
-3. Configure your local system proxy to `127.0.0.1:8080`.
 
 ## Usage
 
 ```bash
-# Forward proxy with terminal output (default)
-proxelar
-
-# Forward proxy with TUI
-proxelar -i tui
-
-# Forward proxy with web GUI (opens browser)
-proxelar -i gui
-
-# Reverse proxy targeting an upstream server
-proxelar -m reverse --target http://localhost:3000
-
-# Custom address and port
-proxelar -b 0.0.0.0 -p 9090
+proxelar                                          # terminal output (default)
+proxelar -i tui                                   # interactive TUI
+proxelar -i gui                                   # web GUI at localhost:8081
+proxelar -m reverse --target http://localhost:3000 # reverse proxy
+proxelar -b 0.0.0.0 -p 9090                       # custom bind address and port
 ```
 
-### CLI Options
+<details>
+<summary><strong>All CLI options</strong></summary>
 
 | Flag | Description | Default |
 |------|-------------|---------|
-| `-i, --interface` | Interface mode: `terminal`, `tui`, `gui` | `terminal` |
-| `-m, --mode` | Proxy mode: `forward`, `reverse` | `forward` |
+| `-i, --interface` | `terminal` · `tui` · `gui` | `terminal` |
+| `-m, --mode` | `forward` · `reverse` | `forward` |
 | `-p, --port` | Listening port | `8080` |
 | `-b, --addr` | Bind address | `127.0.0.1` |
-| `-t, --target` | Upstream target (required for reverse mode) | - |
-| `--gui-port` | Web GUI port (gui mode only) | `8081` |
+| `-t, --target` | Upstream target (required for reverse) | — |
+| `--gui-port` | Web GUI port | `8081` |
+| `--ca-dir` | CA certificate directory | `~/.proxelar` |
 
-### TUI Key Bindings
+</details>
+
+<details>
+<summary><strong>TUI key bindings</strong></summary>
 
 | Key | Action |
 |-----|--------|
-| `q` / `Ctrl+C` | Quit |
-| `j` / `k` / arrows | Navigate requests |
+| `j` / `k` / arrows | Navigate |
 | `Enter` | Toggle detail panel |
-| `Tab` | Switch between Request/Response |
-| `/` | Filter mode |
-| `Esc` | Close detail / clear filter |
-| `g` / `G` | Go to top / bottom |
-| `c` | Clear all requests |
+| `Tab` | Switch Request / Response |
+| `/` | Filter |
+| `Esc` | Close panel / clear filter |
+| `g` / `G` | Top / bottom |
+| `c` | Clear requests |
+| `q` / `Ctrl+C` | Quit |
 
-## Documentation and Help
-
-If you have questions on how to use [Proxelar](https://github.com/emanuele-em/proxelar), please use GitHub Discussions!
-![GitHub Discussions](https://img.shields.io/github/discussions/emanuele-em/proxelar)
+</details>
 
 ## Contributing
 
-Contributions are always welcome!
+Contributions are welcome! Feel free to open an issue or submit a pull request.
 
-See `contributing.md` for ways to get started.
+## License
 
-## Licenses
-
-See [LICENSE-APACHE](LICENSE-APACHE), [LICENSE-MIT](LICENSE-MIT) for details
+Dual-licensed under [MIT](LICENSE-MIT) and [Apache 2.0](LICENSE-APACHE).
