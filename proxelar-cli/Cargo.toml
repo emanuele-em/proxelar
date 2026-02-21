@@ -5,7 +5,7 @@ edition = "2021"
 rust-version.workspace = true
 authors = ["Emanuele Micheletti <micheletti.emanuele@hotmail.com>"]
 description = "MITM proxy for HTTP/HTTPS traffic"
-license = "MIT OR Apache-2.0"
+license = "MIT"
 repository = "https://github.com/emanuele-em/proxelar"
 
 [dependencies]

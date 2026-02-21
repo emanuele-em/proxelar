@@ -1,0 +1,103 @@
+name: Release
+
+on:
+  push:
+    tags: ["v*"]
+
+permissions:
+  contents: write
+
+env:
+  CARGO_INCREMENTAL: 0
+  CARGO_TERM_COLOR: always
+
+jobs:
+  build:
+    name: Build (${{ matrix.target }})
+    runs-on: ${{ matrix.runner }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - target: x86_64-unknown-linux-gnu
+            runner: ubuntu-latest
+            cross: false
+            archive: tar.gz
+          - target: aarch64-unknown-linux-gnu
+            runner: ubuntu-latest
+            cross: true
+            archive: tar.gz
+          - target: x86_64-apple-darwin
+            runner: macos-13
+            cross: false
+            archive: tar.gz
+          - target: aarch64-apple-darwin
+            runner: macos-latest
+            cross: false
+            archive: tar.gz
+          - target: x86_64-pc-windows-msvc
+            runner: windows-latest
+            cross: false
+            archive: zip
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: ${{ matrix.target }}
+
+      - name: Install cross
+        if: matrix.cross
+        run: cargo install cross --locked
+
+      - name: Build (cross)
+        if: matrix.cross
+        run: cross build --release --locked --target ${{ matrix.target }}
+
+      - name: Build (native)
+        if: "!matrix.cross"
+        run: cargo build --release --locked --target ${{ matrix.target }}
+
+      - name: Package (unix)
+        if: matrix.archive == 'tar.gz'
+        run: |
+          cd target/${{ matrix.target }}/release
+          tar czf ../../../proxelar-${{ github.ref_name }}-${{ matrix.target }}.tar.gz proxelar
+          cd ../../..
+
+      - name: Package (windows)
+        if: matrix.archive == 'zip'
+        shell: pwsh
+        run: |
+          Compress-Archive -Path "target/${{ matrix.target }}/release/proxelar.exe" -DestinationPath "proxelar-${{ github.ref_name }}-${{ matrix.target }}.zip"
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: proxelar-${{ matrix.target }}
+          path: proxelar-${{ github.ref_name }}-${{ matrix.target }}.*
+
+  release:
+    name: Create release
+    needs: build
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/download-artifact@v4
+        with:
+          path: artifacts
+          merge-multiple: true
+
+      - name: Create GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          files: artifacts/*
+          generate_release_notes: true
+          prerelease: ${{ contains(github.ref_name, '-') }}
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}

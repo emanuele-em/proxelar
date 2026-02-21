@@ -3,47 +3,70 @@ name: CI
 on:
   pull_request:
   push:
-    branches: [ "master" ]
+    branches: ["master"]
 
 permissions:
   contents: read
 
+env:
+  CARGO_INCREMENTAL: 0
+  CARGO_TERM_COLOR: always
+
 jobs:
+  fmt:
+    name: Rustfmt
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt
+      - run: cargo fmt --all --check
+
   check:
+    name: Check (${{ matrix.os }})
+    needs: fmt
     runs-on: ${{ matrix.os }}
     strategy:
+      fail-fast: false
       matrix:
         include:
           - os: ubuntu-latest
           - os: macos-latest
           - os: windows-latest
-
     steps:
       - uses: actions/checkout@v4
-      - run: rustup toolchain install stable --profile minimal --component rustfmt --component clippy
-      - run: rustup default stable
-
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy
+      - uses: Swatinem/rust-cache@v2
       - name: Build
         run: cargo build --workspace
-
       - name: Clippy
         run: cargo clippy --workspace -- -D warnings
-
       - name: Test
         run: cargo test --workspace
 
-      - name: Format check
-        run: cargo fmt --all --check
-
-  audit:
+  msrv:
+    name: MSRV (1.76)
+    needs: fmt
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-      - uses: actions/cache@v4
+      - uses: dtolnay/rust-toolchain@master
         with:
-          path: ~/.cargo/bin/cargo-audit
-          key: cargo-audit-${{ runner.os }}
-      - name: Install cargo-audit
-        run: command -v cargo-audit || cargo install cargo-audit
-      - name: Security audit
-        run: cargo audit
+          toolchain: "1.76"
+      - uses: Swatinem/rust-cache@v2
+      - name: Build
+        run: cargo build --workspace
+      - name: Test
+        run: cargo test --workspace
+
+  audit:
+    name: Security audit
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: rustsec/audit-check@v2
+        with:
+          token: ${{ secrets.GITHUB_TOKEN }}
