@@ -13,23 +13,26 @@ Here are some steps to get started with contributing to this project:
 
 We appreciate contributions of any size, from small bug fixes to major new features. If you're unsure about a change you'd like to make, feel free to open an issue first to discuss it with the maintainers.
 
-### Contribute to UI with Tauri UI
+### Project Structure
 
-- install required tools
+The workspace consists of three crates:
+
+- **`proxelar-cli`** — the CLI binary with terminal, TUI, and web GUI interfaces
+- **`proxyapi`** — the core proxy library (forward/reverse proxy, TLS MITM, CA management)
+- **`proxyapi_models`** — shared data models for captured requests/responses
+
+### Running the Project
+
 ```bash
-cargo install tauri-cli wasm-bindgen-cli trunk
-```
+# Build the entire workspace
+cargo build --workspace
 
-- start development
-```bash
-cargo tauri dev
-```
+# Run tests
+cargo test --workspace
 
-- package and release
-```bash
-cargo tauri build
+# Run with logging enabled
+RUST_LOG=debug cargo run
 ```
-
 
 ## Test request generation
 

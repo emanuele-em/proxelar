@@ -1,7 +1,7 @@
 <div align="center">
 <img style="width:100px; margin:auto" src="assets/logo.png">
 <h1> Proxelar </h1>
-<h2> A simple <i>Man In The Middle</i> proxy</h2>
+<h2> A Man In The Middle proxy with multiple interface modes</h2>
 </div>
 
 [![build](https://github.com/emanuele-em/proxelar/actions/workflows/autofix.yml/badge.svg?branch=master)](https://github.com/emanuele-em/proxelar/actions/workflows/autofix.yml)
@@ -9,45 +9,82 @@
 ![GitHub last commit](https://img.shields.io/github/last-commit/emanuele-em/proxelar)
 ![GitHub top language](https://img.shields.io/github/languages/top/emanuele-em/proxelar)
 
-
 ## Description
-Rust-based **Man in the Middle proxy**, an early-stage project aimed at providing visibility into network traffic. Currently, it displays both HTTP and HTTPS requests and responses, but our future goal is to allow for manipulation of the traffic for more advanced use cases.
 
-![Cast](assets/screenshots/0.gif)
+Rust-based **Man in the Middle proxy** providing visibility into HTTP and HTTPS network traffic. Supports forward and reverse proxy modes with three interface options: terminal output, interactive TUI, and web GUI.
 
 ## Features
 
-- 🔐 HTTP / HTTP(s)
-- 🖱️ Gui
-- ⌨️ Possibility of choosing a customised address and listening port
-- 🔍 Details for each request and response
-- 🎯 Filtering the list of requests by method
-- ❌ Deleting a single request from the list
-- 🚫 Clear all requests and clean the table
-- 🌌 Dark / light theme
+- HTTP / HTTPS interception (forward proxy with CONNECT tunneling)
+- Reverse proxy mode with URI rewriting
+- Certificate download via `http://proxel.ar` (when proxy is configured)
+- Three interface modes:
+  - **Terminal** — colored log output
+  - **TUI** — interactive ratatui-based interface with filtering and detail views
+  - **Web GUI** — browser-based UI with WebSocket live updates
+- Filtering and request/response detail inspection
+
+## Installation
+
+```bash
+cargo install --path proxelar-cli
+```
 
 ## Getting Started
 
-1. Generate a Certificate:
+1. Start the proxy — a CA certificate is automatically generated in `~/.proxelar/` on first run.
+
+2. Install the CA certificate so your system trusts proxied HTTPS traffic. You have two options:
+   - Visit `http://proxel.ar` through the proxy to download the certificate interactively.
+   - Or find the generated `proxelar-ca.pem` in `~/.proxelar/` and install it manually:
+     - [macOS guide](https://support.apple.com/guide/keychain-access/change-the-trust-settings-of-a-certificate-kyca11871/mac)
+     - [Ubuntu guide](https://ubuntu.com/server/docs/security-trust-store)
+     - [Windows guide](https://learn.microsoft.com/en-us/skype-sdk/sdn/articles/installing-the-trusted-root-certificate)
+
+3. Configure your local system proxy to `127.0.0.1:8080`.
+
+## Usage
+
 ```bash
-sh install_cer.sh
+# Forward proxy with terminal output (default)
+proxelar
+
+# Forward proxy with TUI
+proxelar -i tui
+
+# Forward proxy with web GUI (opens browser)
+proxelar -i gui
+
+# Reverse proxy targeting an upstream server
+proxelar -m reverse --target http://localhost:3000
+
+# Custom address and port
+proxelar -b 0.0.0.0 -p 9090
 ```
-The just generated certificate is located in `./proxyapi/src/ca/proxelar.cer`
 
-2. Install `.cer` file locally and trust it.
-  - [MacOS guide](https://support.apple.com/guide/keychain-access/change-the-trust-settings-of-a-certificate-kyca11871/mac#:~:text=In%20the%20Keychain%20Access%20app,from%20the%20pop%2Dup%20menus.)
-  - [Ubuntu guide](https://ubuntu.com/server/docs/security-trust-store)
-  - [Windows guide](https://learn.microsoft.com/en-us/skype-sdk/sdn/articles/installing-the-trusted-root-certificate)
+### CLI Options
 
-3. Configure your local system proxy on `127.0.0.1:8100`.
-  - [MacOS guide](https://support.apple.com/it-it/guide/mac-help/mchlp2591/mac)
-  - [Ubuntu guide](https://help.ubuntu.com/stable/ubuntu-help/net-proxy.html.en)
-  - [Windows guide](https://support.microsoft.com/en-us/windows/use-a-proxy-server-in-windows-03096c53-0554-4ffe-b6ab-8b1deee8dae1#:~:text=a%20VPN%20connection-,Select%20the%20Start%20button%2C%20then%20select%20Settings%20%3E%20Network%20%26%20Internet,information%20for%20that%20VPN%20connection.)
+| Flag | Description | Default |
+|------|-------------|---------|
+| `-i, --interface` | Interface mode: `terminal`, `tui`, `gui` | `terminal` |
+| `-m, --mode` | Proxy mode: `forward`, `reverse` | `forward` |
+| `-p, --port` | Listening port | `8080` |
+| `-b, --addr` | Bind address | `127.0.0.1` |
+| `-t, --target` | Upstream target (required for reverse mode) | - |
+| `--gui-port` | Web GUI port (gui mode only) | `8081` |
 
-## Start Development
-```bash
-cargo tauri dev
-```
+### TUI Key Bindings
+
+| Key | Action |
+|-----|--------|
+| `q` / `Ctrl+C` | Quit |
+| `j` / `k` / arrows | Navigate requests |
+| `Enter` | Toggle detail panel |
+| `Tab` | Switch between Request/Response |
+| `/` | Filter mode |
+| `Esc` | Close detail / clear filter |
+| `g` / `G` | Go to top / bottom |
+| `c` | Clear all requests |
 
 ## Documentation and Help
 
@@ -60,29 +97,6 @@ Contributions are always welcome!
 
 See `contributing.md` for ways to get started.
 
-Please adhere to this project's `code of conduct`.
-
-
 ## Licenses
 
 See [LICENSE-APACHE](LICENSE-APACHE), [LICENSE-MIT](LICENSE-MIT) for details
-
-## Screenshots
-
-### Input of Listening Address
-
-![Mitm proxy Screenshot 1](assets/screenshots/1b.png)
-![Mitm proxy Screenshot 1](assets/screenshots/1w.png)
-![Mitm proxy Screenshot 1](assets/screenshots/2w.png)
-
-### Requests List
-
-![Mitm proxy Screenshot 2](assets/screenshots/3w.png)
-![Mitm proxy Screenshot 2](assets/screenshots/3b.png)
-![Mitm proxy Screenshot 2](assets/screenshots/4b.png)
-
-### Request and Response Details
-
-![Mitm proxy Screenshot 3](assets/screenshots/5b.png)
-![Mitm proxy Screenshot 3](assets/screenshots/5w.png)
-

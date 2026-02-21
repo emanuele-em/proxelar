@@ -1,12 +1,18 @@
 [package]
 name = "proxyapi_models"
-version = "0.1.0"
+version = "0.2.0"
 edition = "2021"
-
-# See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
+rust-version.workspace = true
+authors = ["Emanuele Micheletti <micheletti.emanuele@hotmail.com>"]
+description = "Data models for the Proxelar MITM proxy"
+license = "MIT OR Apache-2.0"
+repository = "https://github.com/emanuele-em/proxelar"
 
 [dependencies]
 serde = { version = "1.0", features = ["derive"] }
-bytes = { version = "1.4.0", features = ["serde"]}
-http-serde = "1.1"
-http = "0.2"
+bytes = { version = "1.9", features = ["serde"] }
+http-serde = "2.1"
+http = "1.2"
+
+[dev-dependencies]
+serde_json = "1.0"

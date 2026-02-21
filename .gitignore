@@ -1,4 +1,7 @@
 /target
 .DS_Store
-proxyapi/src/ca/*.key
-proxyapi/src/ca/*.cer
+
+# CA certificate files (generated at runtime)
+*.cer
+*.key
+proxelar-ca.pem

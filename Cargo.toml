@@ -1,15 +1,7 @@
 [workspace]
 resolver = "2"
+members = ["proxelar-cli", "proxyapi", "proxyapi_models"]
+default-members = ["proxelar-cli"]
 
-members = [
-    "proxyapi",
-    "proxyapi_models",
-    "tauri-ui",
-    "tauri-ui/src-tauri",
-]
-
-
-
-
-
-
+[workspace.package]
+rust-version = "1.76"

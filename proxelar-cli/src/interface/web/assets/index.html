@@ -1,0 +1,56 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Proxelar</title>
+    <link rel="stylesheet" href="/style.css">
+</head>
+<body>
+    <header>
+        <h1>Proxelar</h1>
+        <div class="controls">
+            <select id="method-filter">
+                <option value="">All Methods</option>
+                <option value="GET">GET</option>
+                <option value="POST">POST</option>
+                <option value="PUT">PUT</option>
+                <option value="DELETE">DELETE</option>
+                <option value="PATCH">PATCH</option>
+            </select>
+            <input type="text" id="search" placeholder="Filter by URL...">
+            <button id="clear-btn">Clear</button>
+            <span id="status" class="status disconnected">Disconnected</span>
+        </div>
+    </header>
+
+    <main>
+        <table id="requests-table">
+            <thead>
+                <tr>
+                    <th>#</th>
+                    <th>Method</th>
+                    <th>Status</th>
+                    <th>Host</th>
+                    <th>Path</th>
+                    <th>Size</th>
+                </tr>
+            </thead>
+            <tbody id="requests-body"></tbody>
+        </table>
+    </main>
+
+    <div id="detail-panel" class="detail-panel hidden">
+        <div class="detail-header">
+            <div class="tabs">
+                <button class="tab active" data-tab="request">Request</button>
+                <button class="tab" data-tab="response">Response</button>
+            </div>
+            <button id="close-detail">&times;</button>
+        </div>
+        <div id="detail-content" class="detail-content"></div>
+    </div>
+
+    <script src="/app.js"></script>
+</body>
+</html>

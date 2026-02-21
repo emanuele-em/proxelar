@@ -1,0 +1,33 @@
+[package]
+name = "proxelar"
+version = "0.2.0"
+edition = "2021"
+rust-version.workspace = true
+authors = ["Emanuele Micheletti <micheletti.emanuele@hotmail.com>"]
+description = "MITM proxy for HTTP/HTTPS traffic"
+license = "MIT OR Apache-2.0"
+repository = "https://github.com/emanuele-em/proxelar"
+
+[dependencies]
+proxyapi = { path = "../proxyapi" }
+http = "1.2"
+proxyapi_models = { path = "../proxyapi_models" }
+clap = { version = "4.5", features = ["derive"] }
+dirs = "6"
+tokio = { version = "1.43", features = ["rt-multi-thread", "macros", "sync", "signal", "time", "net"] }
+tokio-util = "0.7"
+chrono = "0.4"
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+rustls = { version = "0.23", default-features = false, features = ["ring"] }
+open = "5"
+
+# TUI
+ratatui = "0.29"
+crossterm = { version = "0.28", features = ["event-stream"] }
+futures = "0.3"
+
+# Web GUI
+axum = { version = "0.8", features = ["ws"] }
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
