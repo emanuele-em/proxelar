@@ -25,12 +25,16 @@ Intercept, inspect, and debug HTTP/HTTPS traffic with a terminal, TUI, or web in
 - **Request filtering** — search and inspect request/response pairs in detail
 - **Easy CA install** — visit `http://proxel.ar` through the proxy to download the certificate
 
+## Installation
+
+```bash
+cargo install proxelar
+```
+
+
 ## Quick Start
 
 ```bash
-# Install
-cargo install --path proxelar-cli
-
 # Run (forward proxy, TUI)
 proxelar
 
