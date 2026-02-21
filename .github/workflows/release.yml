@@ -28,7 +28,7 @@ jobs:
             cross: true
             archive: tar.gz
           - target: x86_64-apple-darwin
-            runner: macos-13
+            runner: macos-latest
             cross: false
             archive: tar.gz
           - target: aarch64-apple-darwin
