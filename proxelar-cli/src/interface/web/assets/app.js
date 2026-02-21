@@ -14,7 +14,7 @@
     let activeTab = 'request';
 
     function connect() {
-        const ws = new WebSocket('ws://' + location.host + '/ws');
+        const ws = new WebSocket('ws://' + location.host + '/ws?token=__WS_TOKEN__');
 
         ws.onopen = function() {
             statusEl.textContent = 'Connected';

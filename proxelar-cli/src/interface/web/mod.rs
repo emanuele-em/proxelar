@@ -1,13 +1,15 @@
 use axum::{
     extract::{
         ws::{Message, WebSocket, WebSocketUpgrade},
-        State,
+        Query, State,
     },
     response::{Html, IntoResponse},
     routing::get,
     Router,
 };
 use proxyapi::ProxyEvent;
+use rand::Rng;
+use std::collections::HashMap;
 use std::sync::Arc;
 use tokio::sync::{broadcast, mpsc};
 use tokio_util::sync::CancellationToken;
@@ -18,6 +20,13 @@ const APP_JS: &str = include_str!("assets/app.js");
 
 struct WebState {
     broadcast_tx: broadcast::Sender<String>,
+    token: String,
+    gui_port: u16,
+}
+
+fn generate_token() -> String {
+    let bytes: [u8; 32] = rand::rng().random();
+    bytes.iter().map(|b| format!("{b:02x}")).collect()
 }
 
 pub async fn run(
@@ -25,9 +34,12 @@ pub async fn run(
     gui_port: u16,
     cancel: CancellationToken,
 ) {
+    let token = generate_token();
     let (broadcast_tx, _) = broadcast::channel::<String>(256);
     let state = Arc::new(WebState {
         broadcast_tx: broadcast_tx.clone(),
+        token,
+        gui_port,
     });
 
     // Background task: forward proxy events to broadcast channel
@@ -86,17 +98,36 @@ async fn css_handler() -> impl IntoResponse {
     ([(axum::http::header::CONTENT_TYPE, "text/css")], STYLE_CSS)
 }
 
-async fn js_handler() -> impl IntoResponse {
+async fn js_handler(State(state): State<Arc<WebState>>) -> impl IntoResponse {
+    let js = APP_JS.replace("__WS_TOKEN__", &state.token);
     (
         [(axum::http::header::CONTENT_TYPE, "application/javascript")],
-        APP_JS,
+        js,
     )
 }
 
 async fn ws_handler(
     ws: WebSocketUpgrade,
+    headers: axum::http::HeaderMap,
+    Query(params): Query<HashMap<String, String>>,
     State(state): State<Arc<WebState>>,
 ) -> axum::response::Response {
+    // Validate Origin header
+    let allowed_origins = [
+        format!("http://127.0.0.1:{}", state.gui_port),
+        format!("http://localhost:{}", state.gui_port),
+    ];
+    match headers.get("origin").and_then(|v| v.to_str().ok()) {
+        Some(origin) if allowed_origins.iter().any(|a| a == origin) => {}
+        _ => return (axum::http::StatusCode::FORBIDDEN, "Forbidden").into_response(),
+    }
+
+    // Validate token
+    match params.get("token") {
+        Some(t) if t == &state.token => {}
+        _ => return (axum::http::StatusCode::FORBIDDEN, "Forbidden").into_response(),
+    }
+
     ws.on_upgrade(move |socket| handle_socket(socket, state))
 }
 

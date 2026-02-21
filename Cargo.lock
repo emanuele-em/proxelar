@@ -1573,6 +1573,7 @@ dependencies = [
  "open",
  "proxyapi",
  "proxyapi_models",
+ "rand",
  "ratatui",
  "rustls",
  "serde",
