@@ -1,45 +1,23 @@
-// This code was derived from the hudsucker repository:
-// https://github.com/omjadas/hudsucker
-
 use bytes::{Buf, Bytes};
 use std::{
     cmp, io,
-    marker::Unpin,
     pin::Pin,
     task::{self, Poll},
 };
 use tokio::io::{AsyncRead, AsyncWrite, ReadBuf};
 
+/// A stream wrapper that prepends buffered bytes before delegating to the inner stream.
 pub(crate) struct Rewind<T> {
     pre: Option<Bytes>,
     inner: T,
 }
 
 impl<T> Rewind<T> {
-    #[allow(dead_code)]
-    pub(crate) fn new(io: T) -> Self {
-        Rewind {
-            pre: None,
-            inner: io,
-        }
-    }
-
-    pub(crate) fn new_buffered(io: T, buf: Bytes) -> Self {
-        Rewind {
+    pub(crate) const fn new_buffered(io: T, buf: Bytes) -> Self {
+        Self {
             pre: Some(buf),
             inner: io,
         }
-    }
-
-    #[allow(dead_code)]
-    pub(crate) fn rewind(&mut self, bs: Bytes) {
-        debug_assert!(self.pre.is_none());
-        self.pre = Some(bs);
-    }
-
-    #[allow(dead_code)]
-    pub(crate) fn into_inner(self) -> (T, Bytes) {
-        (self.inner, self.pre.unwrap_or_default())
     }
 }
 
@@ -53,13 +31,10 @@ where
         buf: &mut ReadBuf<'_>,
     ) -> Poll<io::Result<()>> {
         if let Some(mut prefix) = self.pre.take() {
-            // If there are no remaining bytes, let the bytes get dropped.
             if !prefix.is_empty() {
                 let copy_len = cmp::min(prefix.len(), buf.remaining());
-                // TODO: There should be a way to do following two lines cleaner...
                 buf.put_slice(&prefix[..copy_len]);
                 prefix.advance(copy_len);
-                // Put back whats left
                 if !prefix.is_empty() {
                     self.pre = Some(prefix);
                 }

@@ -1,73 +1,54 @@
-mod error;
+//! `proxyapi` — core library for the Proxelar MITM proxy.
+//!
+//! Provides HTTP/HTTPS forward and reverse proxy functionality with
+//! request/response interception via the [`HttpHandler`] trait.
+
+#![forbid(unsafe_code)]
+
+pub mod body;
+pub mod ca;
+pub mod error;
+pub mod event;
+pub(crate) mod handler;
 pub mod proxy;
-mod proxy_handler;
 mod rewind;
 
-pub mod ca;
-
-use hyper::{Body, Request, Response, Uri};
+use body::ProxyBody;
+use hyper::{Request, Response};
 use std::net::SocketAddr;
-use tokio_tungstenite::tungstenite::Message;
 
-pub use async_trait;
-pub use hyper;
-pub use openssl;
-pub use tokio_rustls;
-pub use tokio_tungstenite;
+pub use error::Error;
+pub use event::ProxyEvent;
+pub use handler::CapturingHandler;
+pub use proxy::{Proxy, ProxyConfig, ProxyMode};
 
-//decoder
-// pub use decoder;
-// pub use error;
-// pub use noop;
-pub use proxy::*;
-pub use proxy_handler::*;
-
-#[derive(Debug)]
-pub enum RequestResponse {
-    Request(Request<Body>),
-    Response(Response<Body>),
+/// Returned by [`HttpHandler::handle_request`] to either forward or short-circuit.
+pub enum RequestOrResponse {
+    Request(Request<ProxyBody>),
+    Response(Response<ProxyBody>),
 }
 
-impl From<Request<Body>> for RequestResponse {
-    fn from(req: Request<Body>) -> Self {
-        Self::Request(req)
-    }
-}
-
-impl From<Response<Body>> for RequestResponse {
-    fn from(res: Response<Body>) -> Self {
-        Self::Response(res)
-    }
-}
-
+/// Metadata about the incoming connection.
 #[derive(Clone, Debug, Eq, Hash, PartialEq)]
 pub struct HttpContext {
     pub remote_addr: SocketAddr,
 }
 
-pub enum WebSocketContext {
-    ClientToServer { src: SocketAddr, dst: Uri },
-    ServerToClient { src: Uri, dst: SocketAddr },
-}
-
+/// Trait for intercepting and modifying proxied HTTP traffic.
+///
+/// Implementations must be `Clone` because the proxy clones the handler
+/// for each connection/request pair.
 #[async_trait::async_trait]
 pub trait HttpHandler: Clone + Send + Sync + 'static {
-    async fn handle_request(&mut self, _ctx: &HttpContext, req: Request<Body>) -> RequestResponse {
-        req.into()
-    }
-
-    async fn handle_response(&mut self, _ctx: &HttpContext, res: Response<Body>) -> Response<Body> {
-        res
-    }
-}
-
-#[async_trait::async_trait]
-pub trait WebSocketHandler: Clone + Send + Sync + 'static {
-    async fn handle_message(
+    async fn handle_request(
         &mut self,
-        _ctx: &WebSocketContext,
-        message: Message,
-    ) -> Option<Message> {
-        Some(message)
-    }
+        ctx: &HttpContext,
+        req: Request<hyper::body::Incoming>,
+    ) -> RequestOrResponse;
+
+    async fn handle_response(
+        &mut self,
+        ctx: &HttpContext,
+        res: Response<hyper::body::Incoming>,
+    ) -> Response<ProxyBody>;
 }

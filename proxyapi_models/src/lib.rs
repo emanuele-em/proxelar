@@ -1,9 +1,15 @@
+//! Data models for captured HTTP requests and responses.
+
+#![forbid(unsafe_code)]
+
 use bytes::Bytes;
 use http::{HeaderMap, Method, StatusCode, Uri, Version};
 use serde::{Deserialize, Serialize};
-use std::collections::HashMap;
 
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+/// A captured HTTP request.
+///
+/// The `time` field stores the capture timestamp as milliseconds since the Unix epoch.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct ProxiedRequest {
     #[serde(with = "http_serde::method")]
     method: Method,
@@ -18,7 +24,8 @@ pub struct ProxiedRequest {
 }
 
 impl ProxiedRequest {
-    pub fn new(
+    /// Create a new captured request snapshot.
+    pub const fn new(
         method: Method,
         uri: Uri,
         version: Version,
@@ -36,32 +43,41 @@ impl ProxiedRequest {
         }
     }
 
-    pub fn method(&self) -> &Method {
+    /// Returns the HTTP method (GET, POST, etc.).
+    pub const fn method(&self) -> &Method {
         &self.method
     }
 
-    pub fn uri(&self) -> &Uri {
+    /// Returns the request URI.
+    pub const fn uri(&self) -> &Uri {
         &self.uri
     }
 
-    pub fn version(&self) -> &Version {
-        &self.version
+    /// Returns the HTTP version.
+    pub const fn version(&self) -> Version {
+        self.version
     }
 
-    pub fn headers(&self) -> &HeaderMap {
+    /// Returns the request headers.
+    pub const fn headers(&self) -> &HeaderMap {
         &self.headers
     }
 
-    pub fn body(&self) -> &Bytes {
+    /// Returns the request body bytes.
+    pub const fn body(&self) -> &Bytes {
         &self.body
     }
 
-    pub fn time(&self) -> i64 {
+    /// Returns the capture timestamp in milliseconds since the Unix epoch.
+    pub const fn time(&self) -> i64 {
         self.time
     }
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+/// A captured HTTP response.
+///
+/// The `time` field stores the capture timestamp as milliseconds since the Unix epoch.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct ProxiedResponse {
     #[serde(with = "http_serde::status_code")]
     status: StatusCode,
@@ -74,7 +90,8 @@ pub struct ProxiedResponse {
 }
 
 impl ProxiedResponse {
-    pub fn new(
+    /// Create a new captured response snapshot.
+    pub const fn new(
         status: StatusCode,
         version: Version,
         headers: HeaderMap,
@@ -90,60 +107,28 @@ impl ProxiedResponse {
         }
     }
 
-    pub fn status(&self) -> &StatusCode {
-        &self.status
+    /// Returns the HTTP status code.
+    pub const fn status(&self) -> StatusCode {
+        self.status
     }
 
-    pub fn version(&self) -> &Version {
-        &self.version
+    /// Returns the HTTP version.
+    pub const fn version(&self) -> Version {
+        self.version
     }
 
-    pub fn headers(&self) -> &HeaderMap {
+    /// Returns the response headers.
+    pub const fn headers(&self) -> &HeaderMap {
         &self.headers
     }
 
-    pub fn body(&self) -> &Bytes {
+    /// Returns the response body bytes.
+    pub const fn body(&self) -> &Bytes {
         &self.body
     }
 
-    pub fn time(&self) -> i64 {
+    /// Returns the capture timestamp in milliseconds since the Unix epoch.
+    pub const fn time(&self) -> i64 {
         self.time
     }
 }
-
-trait ToString {
-    fn to_string(&self) -> String;
-}
-
-trait ToHashString {
-    fn to_hash_string(&self) -> HashMap<String, String>;
-}
-
-impl ToHashString for HeaderMap {
-    fn to_hash_string(&self) -> HashMap<String, String> {
-        let mut headers: HashMap<String, String> = HashMap::new();
-
-        for (k, v) in self.iter() {
-            headers
-                .insert(k.as_str().to_string(), v.to_str().unwrap().to_string())
-                .unwrap_or("NO header".to_string());
-        }
-        headers
-    }
-}
-
-impl ToString for Version {
-    fn to_string(&self) -> String {
-        match *self {
-            Version::HTTP_09 => "HTTP_09".to_string(),
-            Version::HTTP_10 => "HTTP_10".to_string(),
-            Version::HTTP_11 => "HTTP_11".to_string(),
-            Version::HTTP_2 => "HTTP_2".to_string(),
-            Version::HTTP_3 => "HTTP_3".to_string(),
-            _ => "__NonExhaustive".to_string(),
-        }
-    }
-}
-
-#[derive(Serialize, Deserialize, Debug, Clone, PartialEq)]
-pub struct RequestInfo(pub Option<ProxiedRequest>, pub Option<ProxiedResponse>);

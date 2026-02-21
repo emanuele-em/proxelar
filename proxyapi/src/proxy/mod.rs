@@ -1,81 +1,125 @@
-mod internal;
-//pub mod builder;
+pub(crate) mod forward;
+pub(crate) mod reverse;
 
-use std::{
-    convert::Infallible,
-    future::Future,
-    net::SocketAddr,
-    sync::{mpsc::SyncSender, Arc},
-};
+use std::{future::Future, net::SocketAddr, path::PathBuf, sync::Arc};
 
-use internal::InternalProxy;
+use hyper::Uri;
+use hyper_util::client::legacy::connect::HttpConnector;
+use hyper_util::rt::TokioExecutor;
+use tokio::net::TcpListener;
+use tokio::sync::mpsc;
 
-use crate::{ca::Ssl, error::Error, proxy_handler};
+use crate::body::ProxyBody;
+use crate::ca::Ssl;
+use crate::error::Error;
+use crate::event::ProxyEvent;
+use crate::handler::CapturingHandler;
 
-//use builder::{AddrListenerServer, WantsAddr};
+/// Shared HTTP(S) client type used by both forward and reverse proxy.
+pub(crate) type Client =
+    hyper_util::client::legacy::Client<hyper_rustls::HttpsConnector<HttpConnector>, ProxyBody>;
 
-use hyper::{
-    server::conn::AddrStream,
-    service::{make_service_fn, service_fn},
-    Client, Server,
-};
+/// Check if an error is a benign "shutting down" or "connection closed" error.
+///
+/// hyper emits these when the client closes the connection before the server
+/// finishes its shutdown handshake. They are not actionable.
+pub(crate) fn is_benign_shutdown_error(e: &dyn std::error::Error) -> bool {
+    let msg = e.to_string();
+    msg.contains("shutting down") || msg.contains("connection was not closed cleanly")
+}
 
-use hyper_rustls::HttpsConnectorBuilder;
+/// Configuration for creating a [`Proxy`].
+pub struct ProxyConfig {
+    /// Address to listen on.
+    pub addr: SocketAddr,
+    /// Forward or reverse proxy mode.
+    pub mode: ProxyMode,
+    /// Channel for emitting captured proxy events.
+    pub event_tx: mpsc::Sender<ProxyEvent>,
+    /// Directory for CA certificate and key files.
+    pub ca_dir: PathBuf,
+}
 
+/// Whether the proxy operates in forward (CONNECT tunneling) or reverse mode.
+#[derive(Debug, Clone)]
+pub enum ProxyMode {
+    /// Forward proxy: clients send CONNECT requests, proxy tunnels and intercepts.
+    Forward,
+    /// Reverse proxy: all requests are rewritten to the given target URI.
+    Reverse {
+        /// Target upstream (must include scheme and authority, e.g. `http://localhost:3000`).
+        target: Uri,
+    },
+}
+
+/// The proxy server.
 pub struct Proxy {
-    addr: SocketAddr,
-    tx: Option<SyncSender<proxy_handler::ProxyHandler>>,
+    config: ProxyConfig,
 }
 
 impl Proxy {
-    pub fn new(addr: SocketAddr, tx: Option<SyncSender<proxy_handler::ProxyHandler>>) -> Self {
-        Self { addr, tx }
+    /// Create a new proxy with the given configuration.
+    pub const fn new(config: ProxyConfig) -> Self {
+        Self { config }
     }
 
-    pub async fn start<F: Future<Output = ()>>(self, signal: F) -> Result<(), Error> {
-        let addr = self.addr;
+    /// Start the proxy and run until the `shutdown` future resolves.
+    pub async fn start(self, shutdown: impl Future<Output = ()>) -> Result<(), Error> {
+        let listener = TcpListener::bind(self.config.addr).await?;
+        tracing::info!("Proxy listening on {}", self.config.addr);
 
-        let https = HttpsConnectorBuilder::new()
+        let ca_dir = self.config.ca_dir.clone();
+        let ca =
+            Arc::new(tokio::task::spawn_blocking(move || Ssl::load_or_generate(&ca_dir)).await??);
+
+        let https = hyper_rustls::HttpsConnectorBuilder::new()
             .with_webpki_roots()
             .https_or_http()
             .enable_http1()
             .build();
 
-        let client = Client::builder()
-            .http1_preserve_header_case(true)
-            .http1_title_case_headers(true)
-            .build(https);
+        let client = Arc::new(
+            hyper_util::client::legacy::Client::builder(TokioExecutor::new()).build(https),
+        );
 
-        let server_builder = Server::try_bind(&addr)?
-            .http1_preserve_header_case(true)
-            .http1_title_case_headers(true);
+        tokio::pin!(shutdown);
 
-        let ssl = Arc::new(Ssl::default());
+        loop {
+            tokio::select! {
+                result = listener.accept() => {
+                    let (stream, remote_addr) = match result {
+                        Ok(conn) => conn,
+                        Err(e) => {
+                            tracing::warn!("Failed to accept connection: {e}");
+                            continue;
+                        }
+                    };
+                    let handler = CapturingHandler::new(self.config.event_tx.clone());
+                    let ca = Arc::clone(&ca);
+                    let client = Arc::clone(&client);
 
-        let make_service = make_service_fn(move |conn: &AddrStream| {
-            let client = client.clone();
-            let ca = Arc::clone(&ssl);
-            let http_handler = proxy_handler::ProxyHandler::new(self.tx.clone().unwrap());
-            let websocket_connector = None;
-            let remote_addr = conn.remote_addr();
-            async move {
-                Ok::<_, Infallible>(service_fn(move |req| {
-                    InternalProxy {
-                        ca: Arc::clone(&ca),
-                        client: client.clone(),
-                        http_handler: http_handler.clone(),
-                        remote_addr,
-                        websocket_connector: websocket_connector.clone(),
+                    match &self.config.mode {
+                        ProxyMode::Forward => {
+                            let listen_addr = self.config.addr;
+                            tokio::spawn(forward::handle_connection(
+                                stream, remote_addr, handler, ca, client, listen_addr,
+                            ));
+                        }
+                        ProxyMode::Reverse { target } => {
+                            let target = target.clone();
+                            tokio::spawn(reverse::handle_connection(
+                                stream, remote_addr, handler, target, client,
+                            ));
+                        }
                     }
-                    .proxy(req)
-                }))
+                }
+                () = &mut shutdown => {
+                    tracing::info!("Proxy shutting down");
+                    break;
+                }
             }
-        });
+        }
 
-        server_builder
-            .serve(make_service)
-            .with_graceful_shutdown(signal)
-            .await
-            .map_err(Into::into)
+        Ok(())
     }
 }
