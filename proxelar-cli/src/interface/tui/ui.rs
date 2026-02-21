@@ -151,8 +151,7 @@ pub fn draw(f: &mut Frame, state: &mut AppState) {
             " q:quit  /:filter  j/k:nav  Enter:details  Tab:req/res  c:clear | Filter: {filter} "
         )
     } else {
-        " q:quit  /:filter  j/k:nav  Enter:details  Tab:req/res  g/G:top/bottom  c:clear "
-            .into()
+        " q:quit  /:filter  j/k:nav  Enter:details  Tab:req/res  g/G:top/bottom  c:clear ".into()
     };
 
     let status_bar = Paragraph::new(status_text.as_str())
