@@ -9,7 +9,7 @@ license = "MIT"
 repository = "https://github.com/emanuele-em/proxelar"
 
 [dependencies]
-hyper = { version = "1.6", features = ["http1", "server", "client"] }
+hyper = { version = "1.8", features = ["http1", "server", "client"] }
 hyper-util = { version = "0.1", features = ["tokio", "server-auto", "client-legacy", "http1"] }
 http = "1.2"
 http-body-util = "0.1"
