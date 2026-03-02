@@ -12,7 +12,10 @@ Intercept, inspect, and debug HTTP/HTTPS traffic with a terminal, TUI, or web in
 [![Dependabot Updates](https://github.com/emanuele-em/proxelar/actions/workflows/dependabot/dependabot-updates/badge.svg)](https://github.com/emanuele-em/proxelar/actions/workflows/dependabot/dependabot-updates)
 [![Dependency check](https://github.com/emanuele-em/proxelar/actions/workflows/deny.yml/badge.svg)](https://github.com/emanuele-em/proxelar/actions/workflows/deny.yml)
 
-
+<table><tr>
+<td><img  height="500" alt="image" src="https://github.com/user-attachments/assets/f02b81f1-49f2-41b2-b2c7-70bd01ff1bb7" /></td>
+<td><img  height="500" alt="image" src="https://github.com/user-attachments/assets/dc1e16ad-3b7a-4ff2-8f02-b40036ba9c01" /></td>
+</tr></table>
 </div>
 
 ---
