@@ -5,3 +5,4 @@
 *.cer
 *.key
 proxelar-ca.pem
+.local
