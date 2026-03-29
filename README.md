@@ -1,21 +1,17 @@
 <div align="center">
-
-<img src="assets/logo.png" width="120">
-
-# Proxelar
-
-**A Man-in-the-Middle proxy written in Rust.**
-
-Intercept, inspect, and modify HTTP/HTTPS traffic with Lua scripting, a TUI, and a web interface.
-
-[![Crates.io](https://img.shields.io/crates/v/proxelar)](https://crates.io/crates/proxelar)
-[![License: MIT](https://img.shields.io/crates/l/proxelar)](LICENSE-MIT)
-[![CI](https://github.com/emanuele-em/proxelar/actions/workflows/autofix.yml/badge.svg)](https://github.com/emanuele-em/proxelar/actions/workflows/autofix.yml)
-[![Docs](https://img.shields.io/badge/docs-proxelar.micheletti.io-blue)](https://proxelar.micheletti.io)
-
+<img src="assets/logo.png" width="100"><br>
+<h1>Proxelar</h1>
+<p><strong>A Man-in-the-Middle proxy written in Rust.</strong><br>
+Intercept, inspect, and modify HTTP/HTTPS traffic with Lua scripting, a TUI, and a web interface.</p>
+<p>
+<a href="https://crates.io/crates/proxelar"><img src="https://img.shields.io/crates/v/proxelar" alt="Crates.io"></a>
+<a href="LICENSE-MIT"><img src="https://img.shields.io/crates/l/proxelar" alt="License: MIT"></a>
+<a href="https://github.com/emanuele-em/proxelar/actions/workflows/autofix.yml"><img src="https://github.com/emanuele-em/proxelar/actions/workflows/autofix.yml/badge.svg" alt="CI"></a>
+<a href="https://proxelar.micheletti.io"><img src="https://img.shields.io/badge/docs-proxelar.micheletti.io-blue" alt="Docs"></a>
+</p>
 <table><tr>
-<td><img  height="500" alt="image" src="https://github.com/user-attachments/assets/f02b81f1-49f2-41b2-b2c7-70bd01ff1bb7" /></td>
-<td><img  height="500" alt="image" src="https://github.com/user-attachments/assets/dc1e16ad-3b7a-4ff2-8f02-b40036ba9c01" /></td>
+<td><img height="500" alt="TUI" src="https://github.com/user-attachments/assets/f02b81f1-49f2-41b2-b2c7-70bd01ff1bb7"></td>
+<td><img height="500" alt="Web GUI" src="https://github.com/user-attachments/assets/dc1e16ad-3b7a-4ff2-8f02-b40036ba9c01"></td>
 </tr></table>
 </div>
 
