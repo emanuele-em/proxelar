@@ -36,6 +36,10 @@ pub struct Args {
     /// Directory for CA certificate and key (default: ~/.proxelar)
     #[arg(long, value_name = "DIR")]
     pub ca_dir: Option<PathBuf>,
+
+    /// Path to a Lua script for request/response hooks
+    #[arg(short = 's', long = "script", value_name = "FILE")]
+    pub script: Option<PathBuf>,
 }
 
 #[derive(Clone, Debug, ValueEnum)]

@@ -12,6 +12,8 @@ pub mod event;
 pub(crate) mod handler;
 pub mod proxy;
 mod rewind;
+#[cfg(feature = "scripting")]
+pub mod scripting;
 
 use body::ProxyBody;
 use hyper::{Request, Response};

@@ -1,6 +1,6 @@
 [package]
 name = "proxyapi"
-version = "0.2.0"
+version = "0.3.0"
 edition = "2021"
 rust-version.workspace = true
 authors = ["Emanuele Micheletti <micheletti.emanuele@hotmail.com>"]
@@ -8,7 +8,12 @@ description = "Core library for the Proxelar MITM proxy"
 license = "MIT"
 repository = "https://github.com/emanuele-em/proxelar"
 
+[features]
+default = []
+scripting = ["mlua"]
+
 [dependencies]
+mlua = { version = "0.10", features = ["lua54", "vendored", "send"], optional = true }
 hyper = { version = "1.8", features = ["http1", "server", "client"] }
 hyper-util = { version = "0.1", features = ["tokio", "server-auto", "client-legacy", "http1"] }
 http = "1.2"
@@ -27,7 +32,7 @@ chrono = "0.4"
 thiserror = "2.0"
 tracing = "0.1"
 serde = { version = "1.0", features = ["derive"] }
-proxyapi_models = { version = "0.2.0", path = "../proxyapi_models" }
+proxyapi_models = { version = "0.3.0", path = "../proxyapi_models" }
 
 [dev-dependencies]
 tokio-test = "0.4"

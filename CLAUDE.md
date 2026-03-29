@@ -5,10 +5,13 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 ## Build & Test Commands
 
 ```bash
-cargo build --workspace                # build all crates
+cargo build --workspace                # build all crates (includes scripting by default)
+cargo build --workspace --no-default-features  # build without Lua scripting
 cargo run                              # run CLI (default member is proxelar-cli)
+cargo run -- --script examples/scripts/add_header.lua  # run with a Lua script
 cargo test --workspace                 # all tests
 cargo test -p proxyapi                 # test only core library
+cargo test -p proxyapi -- scripting    # test only scripting module
 cargo test -p proxyapi_models          # test only data models
 cargo test -p proxyapi -- cert_authority  # single test module
 cargo clippy --workspace -- -D warnings   # lint (CI treats warnings as errors)
@@ -23,7 +26,7 @@ MSRV: 1.94. CI runs on ubuntu, macos, and windows.
 Three crates with a strict dependency direction: `proxelar-cli` → `proxyapi` → `proxyapi_models`.
 
 - **`proxyapi_models`** — Pure data types (`ProxiedRequest`, `ProxiedResponse`). Serializable via serde + http-serde. No async, no network. `#![forbid(unsafe_code)]`.
-- **`proxyapi`** — Core proxy engine. Forward proxy (CONNECT tunneling, HTTPS MITM), reverse proxy, CA cert generation/caching, `HttpHandler` trait. Uses hyper 1.6, rustls 0.23, tokio-rustls 0.26, openssl (vendored). `#![forbid(unsafe_code)]`.
+- **`proxyapi`** — Core proxy engine. Forward proxy (CONNECT tunneling, HTTPS MITM), reverse proxy, CA cert generation/caching, `HttpHandler` trait, Lua scripting (`scripting` feature). Uses hyper 1.6, rustls 0.23, tokio-rustls 0.26, openssl (vendored), mlua (vendored Lua 5.4). `#![forbid(unsafe_code)]`.
 - **`proxelar-cli`** — Binary. CLI (clap), three interface modes: terminal (colored stdout), TUI (ratatui), web GUI (axum + WebSocket).
 
 ## Architecture
@@ -69,6 +72,19 @@ Cert download server intercepts requests to `proxel.ar` hostname, serving PEM/DE
 | `HttpHandler` | `proxyapi::lib` | Async trait: `handle_request()` + `handle_response()`. Must be `Clone + Send + Sync + 'static` |
 | `RequestOrResponse` | `proxyapi::lib` | Return from `handle_request`; allows short-circuiting with a response |
 | `Rewind<T>` | `proxyapi::rewind` | AsyncRead+AsyncWrite wrapper that replays buffered bytes before inner stream |
+| `ScriptEngine` | `proxyapi::scripting` | Lua VM wrapper (`Mutex<mlua::Lua>`). Calls `on_request`/`on_response` hooks. Feature-gated behind `scripting` |
+
+### Lua Scripting (`proxyapi/src/scripting.rs`)
+
+Optional feature (`scripting`, enabled by default). Users write Lua scripts with `on_request(request)` and/or `on_response(request, response)` hooks. Scripts are loaded at proxy startup and called for every request/response.
+
+- `ScriptEngine` holds a `std::sync::Mutex<mlua::Lua>` — never hold the guard across `.await`
+- Injected into `CapturingHandler` via optional `Arc<ScriptEngine>` field
+- Request hook runs in `handle_request()` after body collection, before forwarding
+- Response hook runs in `collect_and_emit()` before event emission
+- Script errors are logged and fall through to pass-through (never crash the proxy)
+- Headers: single-value → Lua string, multi-value → Lua array. Accepts both forms on input.
+- Example scripts in `examples/scripts/`
 
 ## Important Patterns
 
@@ -90,5 +106,6 @@ Cert download server intercepts requests to `proxel.ar` hostname, serving PEM/DE
 | `-t, --target` | (required for reverse) | Upstream URI for reverse mode |
 | `--gui-port` | `8081` | Web GUI port |
 | `--ca-dir` | `~/.proxelar` | CA cert/key directory |
+| `-s, --script` | (none) | Path to Lua script for request/response hooks |
 
 Environment: `RUST_LOG` controls tracing output (e.g. `RUST_LOG=debug`, `RUST_LOG=proxyapi=trace`).

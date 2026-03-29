@@ -27,6 +27,9 @@ pub enum Error {
     /// A spawned background task panicked or was cancelled.
     #[error("task join: {0}")]
     TaskJoin(#[from] tokio::task::JoinError),
+    /// Lua script error (load failure, runtime error, etc.).
+    #[error("script: {0}")]
+    Script(String),
     /// Catch-all for errors that don't fit other variants.
     #[error("{0}")]
     Other(String),

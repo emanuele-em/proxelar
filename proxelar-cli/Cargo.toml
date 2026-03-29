@@ -1,6 +1,6 @@
 [package]
 name = "proxelar"
-version = "0.2.0"
+version = "0.3.0"
 edition = "2021"
 rust-version.workspace = true
 authors = ["Emanuele Micheletti <micheletti.emanuele@hotmail.com>"]
@@ -8,10 +8,14 @@ description = "MITM proxy for HTTP/HTTPS traffic"
 license = "MIT"
 repository = "https://github.com/emanuele-em/proxelar"
 
+[features]
+default = ["scripting"]
+scripting = ["proxyapi/scripting"]
+
 [dependencies]
-proxyapi = { version = "0.2.0", path = "../proxyapi" }
+proxyapi = { version = "0.3.0", path = "../proxyapi" }
 http = "1.2"
-proxyapi_models = { version = "0.2.0", path = "../proxyapi_models" }
+proxyapi_models = { version = "0.3.0", path = "../proxyapi_models" }
 clap = { version = "4.6", features = ["derive"] }
 dirs = "6"
 tokio = { version = "1.50", features = ["rt-multi-thread", "macros", "sync", "signal", "time", "net"] }

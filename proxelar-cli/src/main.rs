@@ -53,6 +53,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         mode: proxy_mode,
         event_tx,
         ca_dir,
+        #[cfg(feature = "scripting")]
+        script_path: args.script,
     };
 
     let proxy = Proxy::new(proxy_config);

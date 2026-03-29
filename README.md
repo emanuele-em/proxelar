@@ -22,6 +22,7 @@ Intercept, inspect, and debug HTTP/HTTPS traffic with a terminal, TUI, or web in
 
 ## Features
 
+- **Lua scripting** — write `on_request` / `on_response` hooks to modify, block, or mock traffic at runtime
 - **HTTPS interception** — automatic CA generation and per-host certificate minting
 - **Forward & reverse proxy** — CONNECT tunneling or upstream URI rewriting
 - **Three interfaces** — terminal, interactive TUI (ratatui), web GUI (axum + WebSocket)
@@ -56,6 +57,7 @@ proxelar -i terminal                              # terminal output
 proxelar -i gui                                   # web GUI at localhost:8081
 proxelar -m reverse --target http://localhost:3000 # reverse proxy
 proxelar -b 0.0.0.0 -p 9090                       # custom bind address and port
+proxelar --script examples/scripts/block_domain.lua # run with a Lua script
 ```
 
 <details>
@@ -70,6 +72,7 @@ proxelar -b 0.0.0.0 -p 9090                       # custom bind address and port
 | `-t, --target` | Upstream target (required for reverse) | — |
 | `--gui-port` | Web GUI port | `8081` |
 | `--ca-dir` | CA certificate directory | `~/.proxelar` |
+| `-s, --script` | Lua script for request/response hooks | — |
 
 </details>
 
@@ -88,6 +91,73 @@ proxelar -b 0.0.0.0 -p 9090                       # custom bind address and port
 | `q` / `Ctrl+C` | Quit |
 
 </details>
+
+## Scripting
+
+Write Lua scripts to intercept and transform traffic. Define `on_request` and/or `on_response` hooks:
+
+```lua
+function on_request(request)
+    -- request.method, request.url, request.headers, request.body
+    -- Return the request to forward it (modified or not)
+    -- Return a response table to short-circuit: { status = 403, headers = {}, body = "Blocked" }
+    -- Return nil to pass through unchanged
+end
+
+function on_response(request, response)
+    -- response.status, response.headers, response.body
+    -- Return the response (modified or not), or nil to pass through
+end
+```
+
+<details>
+<summary><strong>Example: block domains</strong></summary>
+
+```lua
+local blocked = { "ads%.example%.com", "tracker%.example%.com" }
+
+function on_request(request)
+    for _, pattern in ipairs(blocked) do
+        if string.find(request.url, pattern) then
+            return { status = 403, headers = {}, body = "Blocked" }
+        end
+    end
+end
+```
+
+</details>
+
+<details>
+<summary><strong>Example: add CORS headers</strong></summary>
+
+```lua
+function on_response(request, response)
+    response.headers["Access-Control-Allow-Origin"] = "*"
+    response.headers["Access-Control-Allow-Methods"] = "GET, POST, PUT, DELETE, OPTIONS"
+    return response
+end
+```
+
+</details>
+
+<details>
+<summary><strong>Example: mock API endpoints</strong></summary>
+
+```lua
+function on_request(request)
+    if request.method == "GET" and string.find(request.url, "/api/user/me") then
+        return {
+            status = 200,
+            headers = { ["Content-Type"] = "application/json" },
+            body = '{"id": 1, "name": "Test User"}',
+        }
+    end
+end
+```
+
+</details>
+
+See [`examples/scripts/`](examples/scripts/) for more examples including header injection, cookie stripping, HTML rewriting, request body modification, and traffic logging.
 
 ## Contributing
 

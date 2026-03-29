@@ -14,6 +14,8 @@ use crate::ca::Ssl;
 use crate::error::Error;
 use crate::event::ProxyEvent;
 use crate::handler::CapturingHandler;
+#[cfg(feature = "scripting")]
+use crate::scripting::ScriptEngine;
 
 /// Shared HTTP(S) client type used by both forward and reverse proxy.
 pub(crate) type Client =
@@ -38,6 +40,9 @@ pub struct ProxyConfig {
     pub event_tx: mpsc::Sender<ProxyEvent>,
     /// Directory for CA certificate and key files.
     pub ca_dir: PathBuf,
+    /// Optional path to a Lua script for request/response hooks.
+    #[cfg(feature = "scripting")]
+    pub script_path: Option<PathBuf>,
 }
 
 /// Whether the proxy operates in forward (CONNECT tunneling) or reverse mode.
@@ -68,6 +73,18 @@ impl Proxy {
         let listener = TcpListener::bind(self.config.addr).await?;
         tracing::info!("Proxy listening on {}", self.config.addr);
 
+        // Load Lua script engine if a script path was provided.
+        #[cfg(feature = "scripting")]
+        let script_engine: Option<Arc<ScriptEngine>> = self
+            .config
+            .script_path
+            .as_ref()
+            .map(|p| {
+                tracing::info!("Loading Lua script: {}", p.display());
+                ScriptEngine::new(p).map(Arc::new)
+            })
+            .transpose()?;
+
         let ca_dir = self.config.ca_dir.clone();
         let ca =
             Arc::new(tokio::task::spawn_blocking(move || Ssl::load_or_generate(&ca_dir)).await??);
@@ -94,7 +111,12 @@ impl Proxy {
                             continue;
                         }
                     };
-                    let handler = CapturingHandler::new(self.config.event_tx.clone());
+                    #[allow(unused_mut)]
+                    let mut handler = CapturingHandler::new(self.config.event_tx.clone());
+                    #[cfg(feature = "scripting")]
+                    if let Some(ref engine) = script_engine {
+                        handler = handler.with_script_engine(Arc::clone(engine));
+                    }
                     let ca = Arc::clone(&ca);
                     let client = Arc::clone(&client);
 

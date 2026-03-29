@@ -17,6 +17,8 @@ async fn test_forward_proxy_starts_and_shuts_down() {
         mode: ProxyMode::Forward,
         event_tx,
         ca_dir: ca_dir.path().to_path_buf(),
+        #[cfg(feature = "scripting")]
+        script_path: None,
     };
 
     let proxy = Proxy::new(config);

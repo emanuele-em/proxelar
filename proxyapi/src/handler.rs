@@ -5,6 +5,9 @@ use hyper::{Request, Response};
 use proxyapi_models::{ProxiedRequest, ProxiedResponse};
 use tokio::sync::mpsc;
 
+#[cfg(feature = "scripting")]
+use std::sync::Arc;
+
 use crate::body::{self, ProxyBody};
 use crate::event::{next_id, ProxyEvent};
 use crate::{HttpContext, HttpHandler, RequestOrResponse};
@@ -22,12 +25,47 @@ fn now_millis() -> i64 {
 /// Collect the response body, emit a [`ProxyEvent`], and return the reconstructed response.
 ///
 /// This is the single source of truth for response capture, used by both
-/// forward and reverse proxy paths.
+/// forward and reverse proxy paths. When scripting is enabled, the Lua
+/// `on_response` hook is called here before building the final response.
 pub fn collect_and_emit(
     handler: &mut CapturingHandler,
-    parts: http::response::Parts,
-    body_bytes: Bytes,
+    #[allow(unused_mut)] mut parts: http::response::Parts,
+    #[allow(unused_mut)] mut body_bytes: Bytes,
 ) -> Response<ProxyBody> {
+    // Run Lua on_response hook (if scripting is enabled and a script is loaded).
+    #[cfg(feature = "scripting")]
+    if let Some(ref engine) = handler.script_engine {
+        let (req_method, req_url) = handler
+            .captured_request
+            .as_ref()
+            .map(|r| (r.method().as_str().to_owned(), r.uri().to_string()))
+            .unwrap_or_default();
+
+        match engine.on_response(
+            &req_method,
+            &req_url,
+            parts.status.as_u16(),
+            &parts.headers,
+            &body_bytes,
+        ) {
+            Ok(crate::scripting::ScriptResponseAction::Modified {
+                status,
+                headers,
+                body,
+            }) => {
+                if let Ok(s) = http::StatusCode::from_u16(status) {
+                    parts.status = s;
+                }
+                parts.headers = headers;
+                body_bytes = body;
+            }
+            Ok(crate::scripting::ScriptResponseAction::PassThrough) => {}
+            Err(e) => {
+                tracing::warn!("Lua on_response error (passing through): {e}");
+            }
+        }
+    }
+
     let proxied_response = ProxiedResponse::new(
         parts.status,
         parts.version,
@@ -64,10 +102,24 @@ pub async fn collect_body(body: hyper::body::Incoming) -> Bytes {
 }
 
 /// Default handler that captures request/response pairs and emits [`ProxyEvent`]s.
-#[derive(Clone, Debug)]
+///
+/// When the `scripting` feature is enabled and a [`ScriptEngine`] is attached,
+/// Lua `on_request` / `on_response` hooks are called for every request/response.
+#[derive(Clone)]
 pub struct CapturingHandler {
     event_tx: mpsc::Sender<ProxyEvent>,
     captured_request: Option<ProxiedRequest>,
+    #[cfg(feature = "scripting")]
+    script_engine: Option<Arc<crate::scripting::ScriptEngine>>,
+}
+
+impl std::fmt::Debug for CapturingHandler {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("CapturingHandler")
+            .field("event_tx", &self.event_tx)
+            .field("captured_request", &self.captured_request)
+            .finish()
+    }
 }
 
 impl CapturingHandler {
@@ -77,7 +129,17 @@ impl CapturingHandler {
         Self {
             event_tx,
             captured_request: None,
+            #[cfg(feature = "scripting")]
+            script_engine: None,
         }
+    }
+
+    /// Attach a Lua script engine for request/response transformation.
+    #[cfg(feature = "scripting")]
+    #[must_use]
+    pub fn with_script_engine(mut self, engine: Arc<crate::scripting::ScriptEngine>) -> Self {
+        self.script_engine = Some(engine);
+        self
     }
 
     pub(crate) fn take_captured_request(&mut self) -> Option<ProxiedRequest> {
@@ -104,8 +166,10 @@ impl HttpHandler for CapturingHandler {
         _ctx: &HttpContext,
         req: Request<hyper::body::Incoming>,
     ) -> RequestOrResponse {
-        let (parts, incoming) = req.into_parts();
-        let body_bytes = Limited::new(incoming, MAX_BODY_SIZE)
+        #[allow(unused_mut)]
+        let (mut parts, incoming) = req.into_parts();
+        #[allow(unused_mut)]
+        let mut body_bytes = Limited::new(incoming, MAX_BODY_SIZE)
             .collect()
             .await
             .map(http_body_util::Collected::to_bytes)
@@ -113,6 +177,65 @@ impl HttpHandler for CapturingHandler {
                 tracing::warn!("Failed to collect request body: {e}");
                 Bytes::new()
             });
+
+        // Run Lua on_request hook (if scripting is enabled and a script is loaded).
+        // This runs synchronously — the body has already been collected above.
+        #[cfg(feature = "scripting")]
+        if let Some(ref engine) = self.script_engine {
+            match engine.on_request(
+                parts.method.as_str(),
+                &parts.uri.to_string(),
+                &parts.headers,
+                &body_bytes,
+            ) {
+                Ok(crate::scripting::ScriptRequestAction::Forward {
+                    method,
+                    url,
+                    headers,
+                    body,
+                }) => {
+                    if let Ok(m) = method.parse() {
+                        parts.method = m;
+                    }
+                    if let Ok(u) = url.parse() {
+                        parts.uri = u;
+                    }
+                    parts.headers = headers;
+                    body_bytes = body;
+                }
+                Ok(crate::scripting::ScriptRequestAction::ShortCircuit {
+                    status,
+                    headers,
+                    body,
+                }) => {
+                    // Capture the original request before short-circuiting
+                    let proxied_request = ProxiedRequest::new(
+                        parts.method.clone(),
+                        parts.uri.clone(),
+                        parts.version,
+                        parts.headers.clone(),
+                        body_bytes.clone(),
+                        now_millis(),
+                    );
+                    self.captured_request = Some(proxied_request);
+
+                    let status_code = http::StatusCode::from_u16(status)
+                        .unwrap_or(http::StatusCode::INTERNAL_SERVER_ERROR);
+                    let mut builder = Response::builder().status(status_code);
+                    if let Some(h) = builder.headers_mut() {
+                        *h = headers;
+                    }
+                    let response = builder
+                        .body(body::full(body))
+                        .unwrap_or_else(|_| Response::new(body::empty()));
+                    return RequestOrResponse::Response(response);
+                }
+                Ok(crate::scripting::ScriptRequestAction::PassThrough) => {}
+                Err(e) => {
+                    tracing::warn!("Lua on_request error (passing through): {e}");
+                }
+            }
+        }
 
         let proxied_request = ProxiedRequest::new(
             parts.method.clone(),

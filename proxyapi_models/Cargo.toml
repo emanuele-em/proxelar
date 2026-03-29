@@ -1,6 +1,6 @@
 [package]
 name = "proxyapi_models"
-version = "0.2.0"
+version = "0.3.0"
 edition = "2021"
 rust-version.workspace = true
 authors = ["Emanuele Micheletti <micheletti.emanuele@hotmail.com>"]
