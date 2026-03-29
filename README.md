@@ -30,6 +30,14 @@ Intercept, inspect, and debug HTTP/HTTPS traffic with a terminal, TUI, or web in
 
 ## Installation
 
+### Homebrew (macOS / Linux)
+
+```bash
+brew install proxelar
+```
+
+### Cargo
+
 ```bash
 cargo install proxelar
 ```
