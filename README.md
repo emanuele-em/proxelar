@@ -6,19 +6,18 @@
 
 **A Man-in-the-Middle proxy written in Rust.**
 
-Intercept, inspect, and debug HTTP/HTTPS traffic with a terminal, TUI, or web interface.
+Intercept, inspect, and modify HTTP/HTTPS traffic with Lua scripting, a TUI, and a web interface.
 
+[![Crates.io](https://img.shields.io/crates/v/proxelar)](https://crates.io/crates/proxelar)
+[![License: MIT](https://img.shields.io/crates/l/proxelar)](LICENSE-MIT)
 [![CI](https://github.com/emanuele-em/proxelar/actions/workflows/autofix.yml/badge.svg)](https://github.com/emanuele-em/proxelar/actions/workflows/autofix.yml)
-[![Dependabot Updates](https://github.com/emanuele-em/proxelar/actions/workflows/dependabot/dependabot-updates/badge.svg)](https://github.com/emanuele-em/proxelar/actions/workflows/dependabot/dependabot-updates)
-[![Dependency check](https://github.com/emanuele-em/proxelar/actions/workflows/deny.yml/badge.svg)](https://github.com/emanuele-em/proxelar/actions/workflows/deny.yml)
+[![Docs](https://img.shields.io/badge/docs-proxelar.micheletti.io-blue)](https://proxelar.micheletti.io)
 
 <table><tr>
 <td><img  height="500" alt="image" src="https://github.com/user-attachments/assets/f02b81f1-49f2-41b2-b2c7-70bd01ff1bb7" /></td>
 <td><img  height="500" alt="image" src="https://github.com/user-attachments/assets/dc1e16ad-3b7a-4ff2-8f02-b40036ba9c01" /></td>
 </tr></table>
 </div>
-
----
 
 ## Features
 
@@ -35,16 +34,14 @@ Intercept, inspect, and debug HTTP/HTTPS traffic with a terminal, TUI, or web in
 cargo install proxelar
 ```
 
-
 ## Quick Start
 
 ```bash
-# Run (forward proxy, TUI)
+# Start the proxy (forward mode, interactive TUI)
 proxelar
 
-# Install the CA certificate
-# Option A: visit http://proxel.ar through the proxy
-# Option B: manually install ~/.proxelar/proxelar-ca.pem
+# Install the CA certificate — visit http://proxel.ar through the proxy
+# or manually install ~/.proxelar/proxelar-ca.pem
 
 # Configure your system proxy to 127.0.0.1:8080
 ```
@@ -157,7 +154,16 @@ end
 
 </details>
 
-See [`examples/scripts/`](examples/scripts/) for more examples including header injection, cookie stripping, HTML rewriting, request body modification, and traffic logging.
+See [`examples/scripts/`](examples/scripts/) for more examples including header injection, cookie stripping, HTML rewriting, request body modification, and traffic logging. Full scripting documentation is available at [proxelar.micheletti.io](https://proxelar.micheletti.io).
+
+## Documentation
+
+Full documentation is available at **[proxelar.micheletti.io](https://proxelar.micheletti.io)**, covering:
+
+- [Getting started](https://proxelar.micheletti.io/quick-start.html)
+- [Forward & reverse proxy modes](https://proxelar.micheletti.io/proxy-modes/forward.html)
+- [Lua scripting API reference](https://proxelar.micheletti.io/scripting/api-reference.html)
+- [CA certificate installation](https://proxelar.micheletti.io/ca-certificate.html)
 
 ## Contributing
 
