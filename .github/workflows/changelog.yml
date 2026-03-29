@@ -1,0 +1,59 @@
+name: Changelog Attribution
+
+on:
+  push:
+    branches: [main]
+    paths: [CHANGELOG.md]
+
+permissions:
+  contents: write
+
+jobs:
+  add-pr-ref:
+    runs-on: ubuntu-latest
+    if: github.actor != 'github-actions[bot]'
+
+    steps:
+      - uses: actions/checkout@v6
+
+      - name: Get PR info for this commit
+        id: pr
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          PR_JSON=$(gh api "repos/${{ github.repository }}/commits/${{ github.sha }}/pulls" --jq '.[0] // empty' 2>/dev/null || true)
+          if [ -z "$PR_JSON" ]; then
+            echo "skip=true" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          echo "skip=false" >> "$GITHUB_OUTPUT"
+          echo "number=$(echo "$PR_JSON" | jq -r '.number')" >> "$GITHUB_OUTPUT"
+          echo "author=$(echo "$PR_JSON" | jq -r '.user.login')" >> "$GITHUB_OUTPUT"
+          echo "url=$(echo "$PR_JSON" | jq -r '.html_url')" >> "$GITHUB_OUTPUT"
+
+      - name: Add PR reference to changelog entries
+        if: steps.pr.outputs.skip != 'true'
+        env:
+          PR_NUMBER: ${{ steps.pr.outputs.number }}
+          PR_AUTHOR: ${{ steps.pr.outputs.author }}
+          PR_URL: ${{ steps.pr.outputs.url }}
+        run: |
+          # Find bullet points in [Unreleased] that don't already have a PR ref
+          awk -v pr_num="$PR_NUMBER" -v pr_url="$PR_URL" -v pr_author="$PR_AUTHOR" '
+            /^## \[Unreleased\]/ { in_unreleased=1 }
+            /^## \[/ && !/\[Unreleased\]/ { in_unreleased=0 }
+            in_unreleased && /^- / && !/\(#[0-9]/ && !/\[#[0-9]/ {
+              sub(/[[:space:]]*$/, "")
+              $0 = $0 " ([#" pr_num "](" pr_url ") by @" pr_author ")"
+            }
+            { print }
+          ' CHANGELOG.md > CHANGELOG.tmp && mv CHANGELOG.tmp CHANGELOG.md
+
+      - name: Commit if changed
+        if: steps.pr.outputs.skip != 'true'
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git add CHANGELOG.md
+          git diff --cached --quiet || git commit -m "docs: add PR reference to changelog"
+          git push
