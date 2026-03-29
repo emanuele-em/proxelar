@@ -26,6 +26,14 @@ Intercept, inspect, and modify HTTP/HTTPS traffic with Lua scripting, a TUI, and
 
 ## Installation
 
+### Homebrew (macOS / Linux)
+
+```bash
+brew install proxelar
+```
+
+### Cargo
+
 ```bash
 cargo install proxelar
 ```
