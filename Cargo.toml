@@ -4,4 +4,4 @@ members = ["proxelar-cli", "proxyapi", "proxyapi_models"]
 default-members = ["proxelar-cli"]
 
 [workspace.package]
-rust-version = "1.88"
+rust-version = "1.94"
