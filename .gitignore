@@ -6,3 +6,4 @@
 *.key
 proxelar-ca.pem
 .local
+docs/book

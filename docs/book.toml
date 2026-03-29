@@ -1,0 +1,12 @@
+[book]
+title = "Proxelar Documentation"
+authors = ["Emanuele Micheletti"]
+language = "en"
+src = "src"
+
+[build]
+build-dir = "book"
+
+[output.html]
+git-repository-url = "https://github.com/emanuele-em/proxelar"
+edit-url-template = "https://github.com/emanuele-em/proxelar/edit/main/docs/{path}"
