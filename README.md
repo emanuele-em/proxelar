@@ -5,6 +5,7 @@
 Intercept, inspect, and modify HTTP/HTTPS traffic with Lua scripting, a TUI, and a web interface.</p>
 <p>
 <a href="https://crates.io/crates/proxelar"><img src="https://img.shields.io/crates/v/proxelar" alt="Crates.io"></a>
+<a href="https://formulae.brew.sh/formula/proxelar"><img src="https://img.shields.io/homebrew/v/proxelar" alt="Homebrew"></a>
 <a href="LICENSE-MIT"><img src="https://img.shields.io/crates/l/proxelar" alt="License: MIT"></a>
 <a href="https://github.com/emanuele-em/proxelar/actions/workflows/autofix.yml"><img src="https://github.com/emanuele-em/proxelar/actions/workflows/autofix.yml/badge.svg" alt="CI"></a>
 <a href="https://proxelar.micheletti.io"><img src="https://img.shields.io/badge/docs-proxelar.micheletti.io-blue" alt="Docs"></a>
