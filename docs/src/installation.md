@@ -1,5 +1,11 @@
 # Installation
 
+## Homebrew (macOS / Linux)
+
+```bash
+brew install proxelar
+```
+
 ## From crates.io
 
 ```bash
