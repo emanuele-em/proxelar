@@ -539,10 +539,7 @@ fn draw_help_modal(f: &mut Frame) {
                 ))
             } else {
                 Line::from(vec![
-                    Span::styled(
-                        format!("  {:<22}", key),
-                        Style::default().fg(Color::Cyan),
-                    ),
+                    Span::styled(format!("  {:<22}", key), Style::default().fg(Color::Cyan)),
                     Span::raw(desc.to_string()),
                 ])
             }
