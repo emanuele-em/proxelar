@@ -110,6 +110,32 @@ td {
 tr:hover { background: var(--highlight); cursor: pointer; }
 tr.selected { background: var(--highlight); }
 
+.td-with-action { white-space: nowrap; }
+
+.btn-row-replay {
+    opacity: 0;
+    margin-left: 12px;
+    padding: 4px 14px;
+    background: var(--surface);
+    color: var(--text);
+    border: 1px solid var(--border);
+    border-radius: 4px;
+    cursor: pointer;
+    font-size: 15px;
+    font-weight: 400;
+    transition: opacity 0.12s;
+    vertical-align: middle;
+    white-space: nowrap;
+}
+
+.btn-row-replay:hover {
+    background: var(--accent);
+    color: #fff;
+    border-color: var(--accent);
+}
+
+tr:hover .btn-row-replay { opacity: 1; }
+
 .method-get { color: var(--get); font-weight: 600; }
 .method-post { color: var(--post); font-weight: 600; }
 .method-put { color: var(--put); font-weight: 600; }

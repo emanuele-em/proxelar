@@ -164,6 +164,100 @@ impl CapturingHandler {
         self.captured_request.take()
     }
 
+    /// Run intercept logic for a replayed request and return it ready to forward.
+    ///
+    /// Unlike [`HttpHandler::handle_request`], this takes an already-captured
+    /// [`ProxiedRequest`] so no body collection is needed. Returns `None` if the
+    /// request was blocked or the intercept timed out.
+    pub(crate) async fn handle_replayed_request(
+        &mut self,
+        req: ProxiedRequest,
+    ) -> Option<Request<ProxyBody>> {
+        let id = next_id();
+        self.pending_id = Some(id);
+
+        let mut method = req.method().clone();
+        let mut uri = req.uri().clone();
+        let version = req.version();
+        let mut headers = req.headers().clone();
+        let mut body_bytes = req.body().clone();
+
+        self.captured_request = Some(ProxiedRequest::new(
+            method.clone(),
+            uri.clone(),
+            version,
+            headers.clone(),
+            body_bytes.clone(),
+            now_millis(),
+        ));
+
+        if let Some(ref cfg) = self.intercept {
+            if cfg.is_enabled() {
+                let snapshot = self.captured_request.clone().unwrap();
+                let rx = cfg.register(id);
+                if self
+                    .event_tx
+                    .try_send(ProxyEvent::RequestIntercepted {
+                        id,
+                        request: Box::new(snapshot),
+                    })
+                    .is_err()
+                {
+                    cfg.resolve(id, InterceptDecision::Forward);
+                    tracing::warn!("Event channel full, skipping intercept for replay id={id}");
+                } else {
+                    match tokio::time::timeout(std::time::Duration::from_secs(300), rx).await {
+                        Ok(Ok(InterceptDecision::Forward)) => {}
+                        Ok(Ok(InterceptDecision::Modified {
+                            method: m,
+                            uri: u,
+                            headers: h,
+                            body: b,
+                        })) => {
+                            if let Ok(m) = m.parse() {
+                                method = m;
+                            }
+                            if let Ok(u) = u.parse() {
+                                uri = u;
+                            }
+                            headers = h;
+                            body_bytes = b;
+                            self.captured_request = Some(ProxiedRequest::new(
+                                method.clone(),
+                                uri.clone(),
+                                version,
+                                headers.clone(),
+                                body_bytes.clone(),
+                                now_millis(),
+                            ));
+                        }
+                        Ok(Ok(InterceptDecision::Block { status, body })) => {
+                            let status_code = http::StatusCode::from_u16(status)
+                                .unwrap_or(http::StatusCode::BAD_GATEWAY);
+                            let (parts, _) = Response::<()>::builder()
+                                .status(status_code)
+                                .body(())
+                                .unwrap()
+                                .into_parts();
+                            collect_and_emit(self, parts, body);
+                            return None;
+                        }
+                        _ => {
+                            tracing::warn!("Intercept timed out for replay id={id}");
+                            return None;
+                        }
+                    }
+                }
+            }
+        }
+
+        let mut builder = Request::builder().method(method).uri(uri).version(version);
+        if let Some(h) = builder.headers_mut() {
+            *h = headers;
+        }
+        builder.body(body::full(body_bytes)).ok()
+    }
+
     pub(crate) fn send_event(&self, event: ProxyEvent) {
         match self.event_tx.try_send(event) {
             Ok(()) => {}

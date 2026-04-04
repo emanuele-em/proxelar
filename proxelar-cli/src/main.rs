@@ -24,6 +24,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .init();
 
     let (event_tx, event_rx) = tokio::sync::mpsc::channel(EVENT_CHANNEL_CAPACITY);
+    let (replay_tx, replay_rx) = tokio::sync::mpsc::channel(100);
     let cancel = CancellationToken::new();
     let intercept = InterceptConfig::new();
 
@@ -58,6 +59,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         intercept: Some(Arc::clone(&intercept)),
         #[cfg(feature = "scripting")]
         script_path: args.script,
+        replay_rx: Some(replay_rx),
     };
 
     let proxy = Proxy::new(proxy_config);
@@ -89,9 +91,18 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     match args.interface {
         Interface::Terminal => interface::terminal::run(event_rx, cancel).await,
-        Interface::Tui => interface::tui::run(event_rx, Arc::clone(&intercept), cancel).await,
+        Interface::Tui => {
+            interface::tui::run(event_rx, Arc::clone(&intercept), replay_tx, cancel).await
+        }
         Interface::Gui => {
-            interface::web::run(event_rx, Arc::clone(&intercept), args.gui_port, cancel).await
+            interface::web::run(
+                event_rx,
+                Arc::clone(&intercept),
+                replay_tx,
+                args.gui_port,
+                cancel,
+            )
+            .await
         }
     }
 

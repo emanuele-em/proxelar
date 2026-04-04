@@ -21,6 +21,7 @@ async fn test_reverse_proxy_starts_and_shuts_down() {
         intercept: None,
         #[cfg(feature = "scripting")]
         script_path: None,
+        replay_rx: None,
     };
 
     let proxy = Proxy::new(config);

@@ -6,6 +6,7 @@ use std::{future::Future, net::SocketAddr, path::PathBuf, sync::Arc};
 use hyper::Uri;
 use hyper_util::client::legacy::connect::HttpConnector;
 use hyper_util::rt::TokioExecutor;
+use proxyapi_models::ProxiedRequest;
 use tokio::net::TcpListener;
 use tokio::sync::mpsc;
 
@@ -46,6 +47,8 @@ pub struct ProxyConfig {
     /// Optional path to a Lua script for request/response hooks.
     #[cfg(feature = "scripting")]
     pub script_path: Option<PathBuf>,
+    /// Optional channel for receiving replay requests from the UI.
+    pub replay_rx: Option<mpsc::Receiver<ProxiedRequest>>,
 }
 
 /// Whether the proxy operates in forward (CONNECT tunneling) or reverse mode.
@@ -102,6 +105,8 @@ impl Proxy {
             hyper_util::client::legacy::Client::builder(TokioExecutor::new()).build(https),
         );
 
+        let mut replay_rx = self.config.replay_rx;
+
         tokio::pin!(shutdown);
 
         loop {
@@ -140,6 +145,17 @@ impl Proxy {
                         }
                     }
                 }
+                Some(req) = recv_replay(&mut replay_rx) => {
+                    let mut handler = CapturingHandler::new(self.config.event_tx.clone());
+                    if let Some(ref ic) = self.config.intercept {
+                        handler = handler.with_intercept(Arc::clone(ic));
+                    }
+                    #[cfg(feature = "scripting")]
+                    if let Some(ref engine) = script_engine {
+                        handler = handler.with_script_engine(Arc::clone(engine));
+                    }
+                    tokio::spawn(forward::handle_replay(req, handler, Arc::clone(&client)));
+                }
                 () = &mut shutdown => {
                     tracing::info!("Proxy shutting down");
                     break;
@@ -148,5 +164,16 @@ impl Proxy {
         }
 
         Ok(())
+    }
+}
+
+/// Receive the next replay request, or wait forever when no channel is present.
+///
+/// Used in the `select!` loop to make the replay arm a no-op when the UI
+/// hasn't provided a replay channel.
+async fn recv_replay(rx: &mut Option<mpsc::Receiver<ProxiedRequest>>) -> Option<ProxiedRequest> {
+    match rx {
+        Some(rx) => rx.recv().await,
+        None => std::future::pending().await,
     }
 }

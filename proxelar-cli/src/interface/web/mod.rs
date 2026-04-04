@@ -10,6 +10,7 @@ use axum::{
 use bytes::Bytes;
 use http::HeaderMap;
 use proxyapi::{InterceptConfig, InterceptDecision, ProxyEvent};
+use proxyapi_models::ProxiedRequest;
 use rand::Rng;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
@@ -26,6 +27,7 @@ struct WebState {
     token: String,
     gui_port: u16,
     intercept: Arc<InterceptConfig>,
+    replay_tx: mpsc::Sender<ProxiedRequest>,
 }
 
 fn generate_token() -> String {
@@ -49,6 +51,13 @@ enum ClientMessage {
         headers: HashMap<String, String>,
         body: String,
     },
+    /// Replay a previously captured request.
+    Replay {
+        method: String,
+        uri: String,
+        headers: HashMap<String, String>,
+        body: String,
+    },
 }
 
 /// Status broadcast to all connected browser clients when intercept state changes.
@@ -61,6 +70,7 @@ struct InterceptStatus {
 pub async fn run(
     mut event_rx: mpsc::Receiver<ProxyEvent>,
     intercept: Arc<InterceptConfig>,
+    replay_tx: mpsc::Sender<ProxiedRequest>,
     gui_port: u16,
     cancel: CancellationToken,
 ) {
@@ -71,6 +81,7 @@ pub async fn run(
         token,
         gui_port,
         intercept,
+        replay_tx,
     });
 
     // Background task: forward proxy events to broadcast channel
@@ -255,6 +266,36 @@ async fn handle_client_message(text: &str, state: &WebState) {
                     body: Bytes::from(body.into_bytes()),
                 },
             );
+        }
+        ClientMessage::Replay {
+            method,
+            uri,
+            headers,
+            body,
+        } => {
+            let mut header_map = HeaderMap::new();
+            for (k, v) in &headers {
+                if let (Ok(name), Ok(value)) = (
+                    http::header::HeaderName::from_bytes(k.as_bytes()),
+                    http::header::HeaderValue::from_str(v),
+                ) {
+                    header_map.append(name, value);
+                }
+            }
+            let method = method.parse().unwrap_or(http::Method::GET);
+            let uri = uri.parse().unwrap_or_else(|_| "/".parse().unwrap());
+            let now = chrono::Local::now().timestamp_millis();
+            let req = ProxiedRequest::new(
+                method,
+                uri,
+                http::Version::HTTP_11,
+                header_map,
+                Bytes::from(body.into_bytes()),
+                now,
+            );
+            if state.replay_tx.try_send(req).is_err() {
+                tracing::warn!("Replay channel full");
+            }
         }
     }
 }

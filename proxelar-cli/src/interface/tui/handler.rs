@@ -1,7 +1,9 @@
 use bytes::Bytes;
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use proxyapi::{InterceptConfig, InterceptDecision};
+use proxyapi_models::ProxiedRequest;
 use std::sync::Arc;
+use tokio::sync::mpsc;
 
 use super::state::{AppState, EditAction, EditSession};
 
@@ -10,6 +12,7 @@ pub fn handle_key_event(
     key: KeyEvent,
     state: &mut AppState,
     intercept: &Arc<InterceptConfig>,
+    replay_tx: &mpsc::Sender<ProxiedRequest>,
 ) -> bool {
     // Inline editor: intercept ALL keys only while actively typing.
     if let Some(ref mut session) = state.edit_session {
@@ -144,6 +147,14 @@ pub fn handle_key_event(
                 session.binary_body = binary_body;
                 state.edit_session = Some(session);
                 state.detail_open = true;
+            }
+        }
+
+        KeyCode::Char('r') => {
+            if let Some(req) = state.selected_request() {
+                if replay_tx.try_send(req.clone()).is_err() {
+                    tracing::warn!("Replay channel full, dropping request");
+                }
             }
         }
 

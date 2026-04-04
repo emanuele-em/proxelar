@@ -193,9 +193,9 @@ fn draw_status_bar(f: &mut Frame, state: &AppState, area: Rect, pending_count: u
             " f: forward  |  e: edit  |  d: drop  |  Esc: discard edits ".to_string()
         }
     } else if let Some(ref filter) = state.filter {
-        format!(" Filter: {filter}  |  i:intercept  f:fwd  d:drop  e:edit  q:quit ")
+        format!(" Filter: {filter}  |  i:intercept  f:fwd  d:drop  e:edit  r:replay  q:quit ")
     } else {
-        " q:quit  i:intercept  /:filter  j/k:nav  Enter:details  Tab:req/res  g/G:top/bot  c:clear "
+        " q:quit  i:intercept  r:replay  /:filter  j/k:nav  Enter:details  Tab:req/res  g/G:top/bot  c:clear "
             .to_string()
     };
     spans.push(Span::raw(hint));

@@ -10,6 +10,8 @@ use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite};
 use tokio::net::TcpStream;
 use tokio_rustls::TlsAcceptor;
 
+use proxyapi_models::ProxiedRequest;
+
 use crate::body::{self, ProxyBody};
 use crate::ca::{cert_server, CertificateAuthority, Ssl};
 use crate::handler::{collect_and_emit, collect_body, CapturingHandler};
@@ -345,4 +347,26 @@ fn normalize_request(mut req: Request<ProxyBody>) -> Request<ProxyBody> {
 
     *req.version_mut() = hyper::Version::HTTP_11;
     req
+}
+
+/// Send a previously captured request back through the proxy pipeline.
+///
+/// Applies intercept logic (if enabled) then forwards via the shared client,
+/// emitting a [`ProxyEvent::RequestComplete`] on completion.
+pub(crate) async fn handle_replay(
+    req: ProxiedRequest,
+    mut handler: CapturingHandler,
+    client: Arc<Client>,
+) {
+    let Some(fwd_req) = handler.handle_replayed_request(req).await else {
+        return;
+    };
+    match client.request(normalize_request(fwd_req)).await {
+        Ok(res) => {
+            let (parts, body) = res.into_parts();
+            let body_bytes = collect_body(body).await;
+            collect_and_emit(&mut handler, parts, body_bytes);
+        }
+        Err(e) => tracing::warn!("Replay request failed: {e}"),
+    }
 }

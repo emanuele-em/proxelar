@@ -381,6 +381,23 @@ impl AppState {
         }
     }
 
+    /// Returns a reference to the request of the currently selected entry (Complete or Pending).
+    pub fn selected_request(&self) -> Option<&ProxiedRequest> {
+        let filter = self.filter.as_deref();
+        let filtered: Vec<&FlowEntry> = self
+            .entries
+            .iter()
+            .filter(|e| matches_filter(e, filter))
+            .collect();
+        let idx = self.table_state.selected()?;
+        match filtered.get(idx) {
+            Some(FlowEntry::Complete { request, .. } | FlowEntry::Pending { request, .. }) => {
+                Some(request.as_ref())
+            }
+            _ => None,
+        }
+    }
+
     /// Returns a reference to the request of the currently selected pending entry.
     pub fn selected_pending_request(&self) -> Option<(u64, &ProxiedRequest)> {
         let filter = self.filter.as_deref();

@@ -275,7 +275,21 @@
                     '<td class="' + getStatusClass(r.response.status) + '">' + r.response.status + '</td>' +
                     '<td>' + escapeHtml(uri.host) + '</td>' +
                     '<td>' + escapeHtml(uri.path) + '</td>' +
-                    '<td>' + formatSize(bodyBytes) + '</td>';
+                    '<td class="td-with-action">' + formatSize(bodyBytes) +
+                        '<button class="btn-row-replay" title="Replay">&#8635; Replay</button>' +
+                    '</td>';
+                tr.querySelector('.btn-row-replay').onclick = (function(row) {
+                    return function(e) {
+                        e.stopPropagation();
+                        sendWs({
+                            type: 'Replay',
+                            method: row.request.method || 'GET',
+                            uri: row.request.uri || '',
+                            headers: row.request.headers || {},
+                            body: bodyToString(row.request.body),
+                        });
+                    };
+                })(r);
                 tr.onclick = (function(idx, row) {
                     return function() {
                         selectedIdx = idx;
