@@ -7,6 +7,8 @@
 
 ## [Unreleased]
 
+## [0.4.0] - 2026-04-04
+
 ### Intercept mode
 
 - Pause any HTTP/HTTPS request mid-flight and decide what to do before it reaches the server
