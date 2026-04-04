@@ -18,6 +18,7 @@ async fn test_reverse_proxy_starts_and_shuts_down() {
         },
         event_tx,
         ca_dir: ca_dir.path().to_path_buf(),
+        intercept: None,
         #[cfg(feature = "scripting")]
         script_path: None,
     };

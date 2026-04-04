@@ -20,6 +20,9 @@
             </select>
             <input type="text" id="search" placeholder="Filter by URL...">
             <button id="clear-btn">Clear</button>
+            <button id="intercept-btn" title="Toggle intercept mode (pause requests for editing)">
+                &#9646;&#9646; Intercept: <span id="intercept-label">OFF</span>
+            </button>
             <span id="status" class="status disconnected">Disconnected</span>
         </div>
     </header>
@@ -40,6 +43,7 @@
         </table>
     </main>
 
+    <!-- Detail panel: shown when a completed request row is clicked -->
     <div id="detail-panel" class="detail-panel hidden">
         <div class="detail-header">
             <div class="tabs">
@@ -49,6 +53,43 @@
             <button id="close-detail">&times;</button>
         </div>
         <div id="detail-content" class="detail-content"></div>
+    </div>
+
+    <!-- Intercept editor panel: shown when a pending request row is clicked -->
+    <div id="intercept-panel" class="intercept-panel hidden">
+        <div class="intercept-header">
+            <span id="intercept-title" class="intercept-title">&#9646;&#9646; Intercepted Request</span>
+            <button id="close-intercept" title="Close (request stays pending)">&times;</button>
+        </div>
+        <div class="intercept-body">
+            <div class="intercept-row">
+                <label>Method</label>
+                <select id="edit-method">
+                    <option>GET</option>
+                    <option>POST</option>
+                    <option>PUT</option>
+                    <option>DELETE</option>
+                    <option>PATCH</option>
+                    <option>HEAD</option>
+                    <option>OPTIONS</option>
+                </select>
+                <label>URI</label>
+                <input type="text" id="edit-uri" placeholder="https://example.com/path">
+            </div>
+            <div class="intercept-section-label">Headers <button id="add-header-btn" class="btn-small">+ Add</button></div>
+            <table id="headers-table" class="headers-table">
+                <tbody id="headers-body"></tbody>
+            </table>
+            <div class="intercept-section-label">Body</div>
+            <textarea id="edit-body" class="edit-body" placeholder="Request body..."></textarea>
+        </div>
+        <div class="intercept-footer">
+            <span class="intercept-hint">Ctrl+Enter = Forward &nbsp;·&nbsp; Esc = Close without action</span>
+            <div class="intercept-actions">
+                <button id="drop-btn" class="btn-danger">Drop (504)</button>
+                <button id="forward-btn" class="btn-primary">Forward</button>
+            </div>
+        </div>
     </div>
 
     <script src="/app.js"></script>

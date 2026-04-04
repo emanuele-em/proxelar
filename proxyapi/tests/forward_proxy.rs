@@ -17,6 +17,7 @@ async fn test_forward_proxy_starts_and_shuts_down() {
         mode: ProxyMode::Forward,
         event_tx,
         ca_dir: ca_dir.path().to_path_buf(),
+        intercept: None,
         #[cfg(feature = "scripting")]
         script_path: None,
     };

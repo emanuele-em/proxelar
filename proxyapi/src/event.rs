@@ -18,6 +18,18 @@ pub enum ProxyEvent {
         /// The captured response.
         response: Box<ProxiedResponse>,
     },
+    /// A request is held pending a UI decision (intercept mode).
+    ///
+    /// The proxy handler is paused until the UI calls
+    /// [`InterceptConfig::resolve`](crate::intercept::InterceptConfig::resolve).
+    /// The `id` matches the eventual [`RequestComplete`](Self::RequestComplete)
+    /// event for the same flow.
+    RequestIntercepted {
+        /// Same ID that will appear in the `RequestComplete` event for this flow.
+        id: u64,
+        /// Snapshot of the captured request.
+        request: Box<ProxiedRequest>,
+    },
     /// A non-fatal error occurred during proxying.
     Error {
         /// Human-readable error description.

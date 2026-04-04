@@ -1,4 +1,3 @@
-use proxyapi::ProxyEvent;
 use ratatui::{
     layout::{Constraint, Direction, Layout, Rect},
     style::{Color, Modifier, Style},
@@ -7,21 +6,21 @@ use ratatui::{
     Frame,
 };
 
-use super::state::{matches_filter, AppState, DetailTab};
+use super::state::EditSession;
+
+use super::state::{matches_filter, AppState, DetailTab, FlowEntry};
 use crate::interface::format_size;
 
 pub fn draw(f: &mut Frame, state: &mut AppState) {
-    // Use direct field access so the borrow checker can split the borrows:
-    // `state.requests` + `state.filter` are borrowed immutably while
-    // `state.table_state` remains available for mutable access later.
     let filter = state.filter.as_deref();
-    let filtered: Vec<(usize, &ProxyEvent)> = state
-        .requests
+    let filtered: Vec<(usize, &FlowEntry)> = state
+        .entries
         .iter()
         .enumerate()
-        .filter(|(_, event)| matches_filter(event, filter))
+        .filter(|(_, entry)| matches_filter(entry, filter))
         .collect();
     let req_count = filtered.len();
+    let pending_count = state.pending_count();
 
     let chunks = if state.detail_open {
         Layout::default()
@@ -61,8 +60,8 @@ pub fn draw(f: &mut Frame, state: &mut AppState) {
 
     let rows: Vec<Row> = filtered
         .iter()
-        .map(|(_idx, event)| match event {
-            ProxyEvent::RequestComplete {
+        .map(|(_idx, entry)| match entry {
+            FlowEntry::Complete {
                 id,
                 request,
                 response,
@@ -74,22 +73,8 @@ pub fn draw(f: &mut Frame, state: &mut AppState) {
                 let path = uri.path();
                 let size = format_size(response.body().len());
 
-                let method_color = match method {
-                    "GET" => Color::Green,
-                    "POST" => Color::Yellow,
-                    "PUT" => Color::Blue,
-                    "DELETE" => Color::Red,
-                    "PATCH" => Color::Magenta,
-                    _ => Color::White,
-                };
-
-                let status_color = match status {
-                    200..=299 => Color::Green,
-                    300..=399 => Color::Cyan,
-                    400..=499 => Color::Yellow,
-                    500..=599 => Color::Red,
-                    _ => Color::White,
-                };
+                let method_color = method_color(method);
+                let status_color = status_color(status);
 
                 Row::new(vec![
                     Cell::from(id.to_string()),
@@ -100,7 +85,28 @@ pub fn draw(f: &mut Frame, state: &mut AppState) {
                     Cell::from(size),
                 ])
             }
-            ProxyEvent::Error { message } => Row::new(vec![
+            FlowEntry::Pending { id, request } => {
+                let method = request.method().as_str();
+                let uri = request.uri();
+                let host = uri.host().unwrap_or("-");
+                let path = uri.path();
+                let id_str = format!("\u{23f8}{id}"); // ⏸ prefix
+
+                Row::new(vec![
+                    Cell::from(id_str).style(Style::default().fg(Color::Yellow)),
+                    Cell::from(method).style(
+                        Style::default()
+                            .fg(Color::Yellow)
+                            .add_modifier(Modifier::BOLD),
+                    ),
+                    Cell::from("\u{00b7}\u{00b7}\u{00b7}")
+                        .style(Style::default().fg(Color::Yellow)), // ···
+                    Cell::from(host).style(Style::default().fg(Color::Yellow)),
+                    Cell::from(path).style(Style::default().fg(Color::Yellow)),
+                    Cell::from("-").style(Style::default().fg(Color::Yellow)),
+                ])
+            }
+            FlowEntry::Error { message } => Row::new(vec![
                 Cell::from(_idx.to_string()),
                 Cell::from("ERR").style(Style::default().fg(Color::Red)),
                 Cell::from("-"),
@@ -114,7 +120,7 @@ pub fn draw(f: &mut Frame, state: &mut AppState) {
     let table = Table::new(
         rows,
         [
-            Constraint::Length(5),
+            Constraint::Length(6),
             Constraint::Length(7),
             Constraint::Length(6),
             Constraint::Percentage(30),
@@ -134,7 +140,11 @@ pub fn draw(f: &mut Frame, state: &mut AppState) {
 
     // Detail panel
     if state.detail_open && chunks.len() > 2 {
-        draw_detail(f, state, chunks[1], &filtered);
+        if let Some(ref mut session) = state.edit_session {
+            draw_editor(f, session, chunks[1]);
+        } else {
+            draw_detail(f, state, chunks[1], &filtered);
+        }
     }
 
     // Status bar
@@ -144,27 +154,63 @@ pub fn draw(f: &mut Frame, state: &mut AppState) {
         chunks[1]
     };
 
-    let status_text = if state.filter_mode {
-        format!(" Filter: {}_ ", state.filter_input)
-    } else if let Some(ref filter) = state.filter {
-        format!(
-            " q:quit  /:filter  j/k:nav  Enter:details  Tab:req/res  c:clear | Filter: {filter} "
-        )
-    } else {
-        " q:quit  /:filter  j/k:nav  Enter:details  Tab:req/res  g/G:top/bottom  c:clear ".into()
-    };
-
-    let status_bar = Paragraph::new(status_text.as_str())
-        .style(Style::default().bg(Color::DarkGray).fg(Color::White));
-    f.render_widget(status_bar, status_chunk);
+    draw_status_bar(f, state, status_chunk, pending_count);
 }
 
-fn draw_detail(f: &mut Frame, state: &AppState, area: Rect, filtered: &[(usize, &ProxyEvent)]) {
+fn draw_status_bar(f: &mut Frame, state: &AppState, area: Rect, pending_count: usize) {
+    if state.filter_mode {
+        let text = format!(" Filter: {}_ ", state.filter_input);
+        let bar = Paragraph::new(text.as_str())
+            .style(Style::default().bg(Color::DarkGray).fg(Color::White));
+        f.render_widget(bar, area);
+        return;
+    }
+
+    // Build status bar spans
+    let mut spans: Vec<Span> = Vec::new();
+
+    if state.intercept_enabled {
+        spans.push(Span::styled(
+            " INTERCEPT ",
+            Style::default()
+                .bg(Color::Red)
+                .fg(Color::White)
+                .add_modifier(Modifier::BOLD),
+        ));
+        if pending_count > 0 {
+            spans.push(Span::styled(
+                format!(" \u{00b7} {pending_count} pending "),
+                Style::default().fg(Color::Yellow),
+            ));
+        }
+        spans.push(Span::raw("  "));
+    }
+
+    let hint = if let Some(ref s) = state.edit_session {
+        if s.typing {
+            " Esc: done editing ".to_string()
+        } else {
+            " f: forward  |  e: edit  |  d: drop  |  Esc: discard edits ".to_string()
+        }
+    } else if let Some(ref filter) = state.filter {
+        format!(" Filter: {filter}  |  i:intercept  f:fwd  d:drop  e:edit  q:quit ")
+    } else {
+        " q:quit  i:intercept  /:filter  j/k:nav  Enter:details  Tab:req/res  g/G:top/bot  c:clear "
+            .to_string()
+    };
+    spans.push(Span::raw(hint));
+
+    let line = Line::from(spans);
+    let bar = Paragraph::new(line).style(Style::default().bg(Color::DarkGray).fg(Color::White));
+    f.render_widget(bar, area);
+}
+
+fn draw_detail(f: &mut Frame, state: &AppState, area: Rect, filtered: &[(usize, &FlowEntry)]) {
     let selected = state.table_state.selected().unwrap_or(0);
 
-    if let Some((_, event)) = filtered.get(selected) {
-        match event {
-            ProxyEvent::RequestComplete {
+    if let Some((_, entry)) = filtered.get(selected) {
+        match entry {
+            FlowEntry::Complete {
                 request, response, ..
             } => {
                 let tab_title = match state.detail_tab {
@@ -173,77 +219,8 @@ fn draw_detail(f: &mut Frame, state: &AppState, area: Rect, filtered: &[(usize, 
                 };
 
                 let content = match state.detail_tab {
-                    DetailTab::Request => {
-                        let mut lines = vec![
-                            Line::from(vec![
-                                Span::styled(
-                                    request.method().as_str(),
-                                    Style::default()
-                                        .fg(Color::Green)
-                                        .add_modifier(Modifier::BOLD),
-                                ),
-                                Span::raw(" "),
-                                Span::raw(request.uri().to_string()),
-                                Span::raw(" "),
-                                Span::raw(format!("{:?}", request.version())),
-                            ]),
-                            Line::from(""),
-                        ];
-
-                        for (name, value) in request.headers() {
-                            lines.push(Line::from(vec![
-                                Span::styled(name.as_str(), Style::default().fg(Color::Cyan)),
-                                Span::raw(": "),
-                                Span::raw(String::from_utf8_lossy(value.as_bytes())),
-                            ]));
-                        }
-
-                        if !request.body().is_empty() {
-                            lines.push(Line::from(""));
-                            lines.push(Line::from(String::from_utf8_lossy(request.body())));
-                        }
-
-                        lines
-                    }
-                    DetailTab::Response => {
-                        let status = response.status();
-                        let status_color = match status.as_u16() {
-                            200..=299 => Color::Green,
-                            300..=399 => Color::Cyan,
-                            400..=499 => Color::Yellow,
-                            500..=599 => Color::Red,
-                            _ => Color::White,
-                        };
-
-                        let mut lines = vec![
-                            Line::from(vec![
-                                Span::styled(
-                                    status.to_string(),
-                                    Style::default()
-                                        .fg(status_color)
-                                        .add_modifier(Modifier::BOLD),
-                                ),
-                                Span::raw(" "),
-                                Span::raw(format!("{:?}", response.version())),
-                            ]),
-                            Line::from(""),
-                        ];
-
-                        for (name, value) in response.headers() {
-                            lines.push(Line::from(vec![
-                                Span::styled(name.as_str(), Style::default().fg(Color::Cyan)),
-                                Span::raw(": "),
-                                Span::raw(String::from_utf8_lossy(value.as_bytes())),
-                            ]));
-                        }
-
-                        if !response.body().is_empty() {
-                            lines.push(Line::from(""));
-                            lines.push(Line::from(String::from_utf8_lossy(response.body())));
-                        }
-
-                        lines
-                    }
+                    DetailTab::Request => build_request_lines(request),
+                    DetailTab::Response => build_response_lines(response),
                 };
 
                 let detail = Paragraph::new(content)
@@ -252,12 +229,231 @@ fn draw_detail(f: &mut Frame, state: &AppState, area: Rect, filtered: &[(usize, 
 
                 f.render_widget(detail, area);
             }
-            ProxyEvent::Error { message } => {
+            FlowEntry::Pending { request, .. } => {
+                draw_intercept_pane(f, area, request);
+            }
+            FlowEntry::Error { message } => {
                 let detail = Paragraph::new(message.as_str())
                     .block(Block::default().borders(Borders::ALL).title(" Error "))
                     .wrap(Wrap { trim: false });
                 f.render_widget(detail, area);
             }
         }
+    }
+}
+
+/// Render the inline request editor.
+///
+/// Lines are displayed verbatim; the cursor is shown as a reversed-style
+/// block on the character under the cursor (or a space if at end-of-line).
+fn draw_editor(f: &mut Frame, session: &mut EditSession, area: Rect) {
+    // Reserve 1 line for the action hint at the bottom.
+    let chunks = Layout::default()
+        .direction(Direction::Vertical)
+        .constraints([Constraint::Min(3), Constraint::Length(1)])
+        .split(area);
+
+    let inner_height = chunks[0].height.saturating_sub(2) as usize; // subtract borders
+    session.scroll_into_view(inner_height.max(1));
+
+    let mut lines: Vec<Line<'static>> = Vec::new();
+    for (row_idx, line_str) in session
+        .lines
+        .iter()
+        .enumerate()
+        .skip(session.scroll)
+        .take(inner_height + 1)
+    {
+        if row_idx == session.cursor_row {
+            // Build a line with a cursor block at cursor_col.
+            let chars: Vec<char> = line_str.chars().collect();
+            let before: String = chars[..session.cursor_col.min(chars.len())].iter().collect();
+            let cursor_char: String = chars
+                .get(session.cursor_col)
+                .map(|c| c.to_string())
+                .unwrap_or_else(|| " ".to_string());
+            let after: String = if session.cursor_col + 1 < chars.len() {
+                chars[session.cursor_col + 1..].iter().collect()
+            } else {
+                String::new()
+            };
+
+            lines.push(Line::from(vec![
+                Span::raw(before),
+                Span::styled(
+                    cursor_char,
+                    Style::default()
+                        .bg(Color::White)
+                        .fg(Color::Black)
+                        .add_modifier(Modifier::BOLD),
+                ),
+                Span::raw(after),
+            ]));
+        } else {
+            lines.push(Line::from(line_str.clone()));
+        }
+    }
+
+    let (title, hint_text, border_color) = if session.parse_error {
+        (
+            " \u{270e} Editing Request — parse error: check request line ",
+            "  fix the request line (METHOD URI HTTP/1.x), then Esc  ",
+            Color::Red,
+        )
+    } else if session.typing {
+        let t = if session.binary_body {
+            " \u{270e} Editing Request (\u{26a0} binary body) — Esc when done "
+        } else {
+            " \u{270e} Editing Request — Esc when done "
+        };
+        (
+            t,
+            "  arrows/Home/End: move  Enter: newline  Backspace/Del: delete  Esc: done editing  ",
+            Color::Cyan,
+        )
+    } else {
+        (
+            " \u{270e} Request ready ",
+            "  f: forward  e: edit  d: drop  Esc: discard edits  ",
+            Color::Yellow,
+        )
+    };
+
+    let editor = Paragraph::new(lines)
+        .block(
+            Block::default()
+                .borders(Borders::ALL)
+                .title(title)
+                .border_style(Style::default().fg(border_color)),
+        )
+        .wrap(Wrap { trim: false });
+    f.render_widget(editor, chunks[0]);
+
+    let hint = Paragraph::new(hint_text)
+        .style(Style::default().bg(Color::DarkGray).fg(Color::White));
+    f.render_widget(hint, chunks[1]);
+}
+
+fn draw_intercept_pane(f: &mut Frame, area: Rect, request: &proxyapi_models::ProxiedRequest) {
+    // Split the pane: request content on top, action hint at bottom
+    let chunks = Layout::default()
+        .direction(Direction::Vertical)
+        .constraints([Constraint::Min(3), Constraint::Length(1)])
+        .split(area);
+
+    let mut lines = build_request_lines(request);
+
+    // Add a blank line before the hint so it doesn't crowd the body
+    lines.push(Line::from(""));
+
+    let content = Paragraph::new(lines)
+        .block(
+            Block::default()
+                .borders(Borders::ALL)
+                .title(" \u{23f8} Intercepted Request ")
+                .border_style(Style::default().fg(Color::Yellow)),
+        )
+        .wrap(Wrap { trim: false });
+    f.render_widget(content, chunks[0]);
+
+    let action_bar = Paragraph::new("  [f] Forward    [d] Drop (504)    [e] Edit  ")
+        .style(
+            Style::default()
+                .bg(Color::Yellow)
+                .fg(Color::Black)
+                .add_modifier(Modifier::BOLD),
+        );
+    f.render_widget(action_bar, chunks[1]);
+}
+
+fn build_request_lines(request: &proxyapi_models::ProxiedRequest) -> Vec<Line<'static>> {
+    let mut lines = vec![
+        Line::from(vec![
+            Span::styled(
+                request.method().as_str().to_owned(),
+                Style::default()
+                    .fg(Color::Green)
+                    .add_modifier(Modifier::BOLD),
+            ),
+            Span::raw(" "),
+            Span::raw(request.uri().to_string()),
+            Span::raw(" "),
+            Span::raw(format!("{:?}", request.version())),
+        ]),
+        Line::from(""),
+    ];
+
+    for (name, value) in request.headers() {
+        lines.push(Line::from(vec![
+            Span::styled(name.as_str().to_owned(), Style::default().fg(Color::Cyan)),
+            Span::raw(": "),
+            Span::raw(String::from_utf8_lossy(value.as_bytes()).into_owned()),
+        ]));
+    }
+
+    if !request.body().is_empty() {
+        lines.push(Line::from(""));
+        lines.push(Line::from(
+            String::from_utf8_lossy(request.body()).into_owned(),
+        ));
+    }
+
+    lines
+}
+
+fn build_response_lines(response: &proxyapi_models::ProxiedResponse) -> Vec<Line<'static>> {
+    let status = response.status();
+    let status_color = status_color(status.as_u16());
+
+    let mut lines = vec![
+        Line::from(vec![
+            Span::styled(
+                status.to_string(),
+                Style::default()
+                    .fg(status_color)
+                    .add_modifier(Modifier::BOLD),
+            ),
+            Span::raw(" "),
+            Span::raw(format!("{:?}", response.version())),
+        ]),
+        Line::from(""),
+    ];
+
+    for (name, value) in response.headers() {
+        lines.push(Line::from(vec![
+            Span::styled(name.as_str().to_owned(), Style::default().fg(Color::Cyan)),
+            Span::raw(": "),
+            Span::raw(String::from_utf8_lossy(value.as_bytes()).into_owned()),
+        ]));
+    }
+
+    if !response.body().is_empty() {
+        lines.push(Line::from(""));
+        lines.push(Line::from(
+            String::from_utf8_lossy(response.body()).into_owned(),
+        ));
+    }
+
+    lines
+}
+
+fn method_color(method: &str) -> Color {
+    match method {
+        "GET" => Color::Green,
+        "POST" => Color::Yellow,
+        "PUT" => Color::Blue,
+        "DELETE" => Color::Red,
+        "PATCH" => Color::Magenta,
+        _ => Color::White,
+    }
+}
+
+fn status_color(status: u16) -> Color {
+    match status {
+        200..=299 => Color::Green,
+        300..=399 => Color::Cyan,
+        400..=499 => Color::Yellow,
+        500..=599 => Color::Red,
+        _ => Color::White,
     }
 }

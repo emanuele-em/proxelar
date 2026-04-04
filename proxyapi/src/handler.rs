@@ -3,13 +3,12 @@ use bytes::Bytes;
 use http_body_util::{BodyExt, Limited};
 use hyper::{Request, Response};
 use proxyapi_models::{ProxiedRequest, ProxiedResponse};
-use tokio::sync::mpsc;
-
-#[cfg(feature = "scripting")]
 use std::sync::Arc;
+use tokio::sync::mpsc;
 
 use crate::body::{self, ProxyBody};
 use crate::event::{next_id, ProxyEvent};
+use crate::intercept::{InterceptConfig, InterceptDecision};
 use crate::{HttpContext, HttpHandler, RequestOrResponse};
 
 /// Maximum body size the proxy will collect (100 MB).
@@ -75,8 +74,12 @@ pub fn collect_and_emit(
     );
 
     if let Some(request) = handler.take_captured_request() {
+        // Use the ID assigned at the start of handle_request (intercept flow)
+        // so that RequestIntercepted and RequestComplete share the same ID.
+        // Fall back to next_id() for the normal (non-intercept) path.
+        let id = handler.pending_id.take().unwrap_or_else(next_id);
         let event = ProxyEvent::RequestComplete {
-            id: next_id(),
+            id,
             request: Box::new(request),
             response: Box::new(proxied_response),
         };
@@ -109,6 +112,11 @@ pub async fn collect_body(body: hyper::body::Incoming) -> Bytes {
 pub struct CapturingHandler {
     event_tx: mpsc::Sender<ProxyEvent>,
     captured_request: Option<ProxiedRequest>,
+    /// ID assigned at the start of `handle_request`. Carried through to
+    /// `collect_and_emit` so that `RequestIntercepted` and `RequestComplete`
+    /// events share the same ID and the UI can correlate them.
+    pending_id: Option<u64>,
+    intercept: Option<Arc<InterceptConfig>>,
     #[cfg(feature = "scripting")]
     script_engine: Option<Arc<crate::scripting::ScriptEngine>>,
 }
@@ -118,7 +126,8 @@ impl std::fmt::Debug for CapturingHandler {
         f.debug_struct("CapturingHandler")
             .field("event_tx", &self.event_tx)
             .field("captured_request", &self.captured_request)
-            .finish()
+            .field("pending_id", &self.pending_id)
+            .finish_non_exhaustive()
     }
 }
 
@@ -129,9 +138,18 @@ impl CapturingHandler {
         Self {
             event_tx,
             captured_request: None,
+            pending_id: None,
+            intercept: None,
             #[cfg(feature = "scripting")]
             script_engine: None,
         }
+    }
+
+    /// Attach an intercept controller for interactive request/response editing.
+    #[must_use]
+    pub fn with_intercept(mut self, cfg: Arc<InterceptConfig>) -> Self {
+        self.intercept = Some(cfg);
+        self
     }
 
     /// Attach a Lua script engine for request/response transformation.
@@ -166,9 +184,12 @@ impl HttpHandler for CapturingHandler {
         _ctx: &HttpContext,
         req: Request<hyper::body::Incoming>,
     ) -> RequestOrResponse {
-        #[allow(unused_mut)]
+        // Assign a stable ID at request start so that RequestIntercepted and
+        // RequestComplete events for the same flow share the same ID.
+        let id = next_id();
+        self.pending_id = Some(id);
+
         let (mut parts, incoming) = req.into_parts();
-        #[allow(unused_mut)]
         let mut body_bytes = Limited::new(incoming, MAX_BODY_SIZE)
             .collect()
             .await
@@ -233,6 +254,87 @@ impl HttpHandler for CapturingHandler {
                 Ok(crate::scripting::ScriptRequestAction::PassThrough) => {}
                 Err(e) => {
                     tracing::warn!("Lua on_request error (passing through): {e}");
+                }
+            }
+        }
+
+        // Intercept mode: pause the request and wait for a UI decision.
+        if let Some(ref cfg) = self.intercept {
+            if cfg.is_enabled() {
+                let snapshot = ProxiedRequest::new(
+                    parts.method.clone(),
+                    parts.uri.clone(),
+                    parts.version,
+                    parts.headers.clone(),
+                    body_bytes.clone(),
+                    now_millis(),
+                );
+                // Register before sending the event so the UI can always resolve.
+                let rx = cfg.register(id);
+                let event = ProxyEvent::RequestIntercepted {
+                    id,
+                    request: Box::new(snapshot.clone()),
+                };
+                // Non-blocking send: if the channel is full, skip interception
+                // and fall through to normal forwarding so the request isn't lost.
+                if self.event_tx.try_send(event).is_err() {
+                    cfg.resolve(id, InterceptDecision::Forward);
+                    tracing::warn!("Event channel full, skipping intercept for id={id}");
+                } else {
+                    self.captured_request = Some(snapshot);
+
+                    match tokio::time::timeout(std::time::Duration::from_secs(300), rx).await {
+                        Ok(Ok(InterceptDecision::Forward)) => {
+                            // Pass through unchanged — fall to the return below.
+                        }
+                        Ok(Ok(InterceptDecision::Modified {
+                            method,
+                            uri,
+                            headers,
+                            body,
+                        })) => {
+                            if let Ok(m) = method.parse() {
+                                parts.method = m;
+                            }
+                            if let Ok(u) = uri.parse() {
+                                parts.uri = u;
+                            }
+                            parts.headers = headers;
+                            body_bytes = body;
+                            // Update the captured snapshot to reflect the edits.
+                            self.captured_request = Some(ProxiedRequest::new(
+                                parts.method.clone(),
+                                parts.uri.clone(),
+                                parts.version,
+                                parts.headers.clone(),
+                                body_bytes.clone(),
+                                now_millis(),
+                            ));
+                        }
+                        Ok(Ok(InterceptDecision::Block { status, body })) => {
+                            // Short-circuit: captured_request is already set above.
+                            let status_code = http::StatusCode::from_u16(status)
+                                .unwrap_or(http::StatusCode::BAD_GATEWAY);
+                            let response = Response::builder()
+                                .status(status_code)
+                                .body(body::full(body))
+                                .unwrap_or_else(|_| Response::new(body::empty()));
+                            return RequestOrResponse::Response(response);
+                        }
+                        _ => {
+                            // Timeout or sender dropped (intercept turned off):
+                            // return 504 so the client gets a clear error.
+                            tracing::warn!("Intercept timed out for id={id}, returning 504");
+                            let response = Response::builder()
+                                .status(http::StatusCode::GATEWAY_TIMEOUT)
+                                .body(body::empty())
+                                .unwrap_or_else(|_| Response::new(body::empty()));
+                            return RequestOrResponse::Response(response);
+                        }
+                    }
+
+                    let req = Request::from_parts(parts, body::full(body_bytes));
+                    return RequestOrResponse::Request(req);
                 }
             }
         }

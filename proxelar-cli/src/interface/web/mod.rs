@@ -7,8 +7,11 @@ use axum::{
     routing::get,
     Router,
 };
-use proxyapi::ProxyEvent;
+use bytes::Bytes;
+use http::HeaderMap;
+use proxyapi::{InterceptConfig, InterceptDecision, ProxyEvent};
 use rand::Rng;
+use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::sync::Arc;
 use tokio::sync::{broadcast, mpsc};
@@ -22,6 +25,7 @@ struct WebState {
     broadcast_tx: broadcast::Sender<String>,
     token: String,
     gui_port: u16,
+    intercept: Arc<InterceptConfig>,
 }
 
 fn generate_token() -> String {
@@ -29,8 +33,34 @@ fn generate_token() -> String {
     bytes.iter().map(|b| format!("{b:02x}")).collect()
 }
 
+/// A message sent from the browser to the proxy.
+#[derive(Deserialize)]
+#[serde(tag = "type")]
+enum ClientMessage {
+    /// Enable or disable intercept mode.
+    SetIntercept { enabled: bool },
+    /// Drop a pending request (returns 504 to the client).
+    Drop { id: u64 },
+    /// Forward a pending request (with any edits the user made).
+    Modified {
+        id: u64,
+        method: String,
+        uri: String,
+        headers: HashMap<String, String>,
+        body: String,
+    },
+}
+
+/// Status broadcast to all connected browser clients when intercept state changes.
+#[derive(Serialize)]
+struct InterceptStatus {
+    enabled: bool,
+    pending_count: usize,
+}
+
 pub async fn run(
     mut event_rx: mpsc::Receiver<ProxyEvent>,
+    intercept: Arc<InterceptConfig>,
     gui_port: u16,
     cancel: CancellationToken,
 ) {
@@ -40,6 +70,7 @@ pub async fn run(
         broadcast_tx: broadcast_tx.clone(),
         token,
         gui_port,
+        intercept,
     });
 
     // Background task: forward proxy events to broadcast channel
@@ -134,9 +165,96 @@ async fn ws_handler(
 async fn handle_socket(mut socket: WebSocket, state: Arc<WebState>) {
     let mut rx = state.broadcast_tx.subscribe();
 
-    while let Ok(msg) = rx.recv().await {
-        if socket.send(Message::Text(msg.into())).await.is_err() {
-            break;
+    loop {
+        tokio::select! {
+            // Proxy events → browser
+            result = rx.recv() => {
+                match result {
+                    Ok(msg) => {
+                        if socket.send(Message::Text(msg.into())).await.is_err() {
+                            break;
+                        }
+                    }
+                    Err(broadcast::error::RecvError::Closed) => break,
+                    Err(broadcast::error::RecvError::Lagged(n)) => {
+                        tracing::warn!("WebSocket broadcast lagged by {n} messages");
+                    }
+                }
+            }
+            // Browser → proxy commands
+            result = socket.recv() => {
+                match result {
+                    Some(Ok(Message::Text(text))) => {
+                        handle_client_message(&text, &state).await;
+                    }
+                    Some(Ok(Message::Close(_))) | None => break,
+                    Some(Err(e)) => {
+                        tracing::debug!("WebSocket receive error: {e}");
+                        break;
+                    }
+                    _ => {} // Ping/Pong/Binary ignored
+                }
+            }
+        }
+    }
+}
+
+async fn handle_client_message(text: &str, state: &WebState) {
+    let msg: ClientMessage = match serde_json::from_str(text) {
+        Ok(m) => m,
+        Err(e) => {
+            tracing::warn!("Invalid client message: {e}");
+            return;
+        }
+    };
+
+    match msg {
+        ClientMessage::SetIntercept { enabled } => {
+            state.intercept.set_enabled(enabled);
+            // Broadcast updated intercept status to all connected clients
+            let status = InterceptStatus {
+                enabled,
+                pending_count: state.intercept.pending_count(),
+            };
+            if let Ok(json) = serde_json::to_string(&serde_json::json!({"InterceptStatus": status}))
+            {
+                let _ = state.broadcast_tx.send(json);
+            }
+        }
+        ClientMessage::Drop { id } => {
+            state.intercept.resolve(
+                id,
+                InterceptDecision::Block {
+                    status: 504,
+                    body: Bytes::from_static(b"Blocked by Proxelar intercept"),
+                },
+            );
+        }
+        ClientMessage::Modified {
+            id,
+            method,
+            uri,
+            headers,
+            body,
+        } => {
+            let mut header_map = HeaderMap::new();
+            for (k, v) in &headers {
+                if let (Ok(name), Ok(value)) = (
+                    http::header::HeaderName::from_bytes(k.as_bytes()),
+                    http::header::HeaderValue::from_str(v),
+                ) {
+                    header_map.append(name, value);
+                }
+            }
+            state.intercept.resolve(
+                id,
+                InterceptDecision::Modified {
+                    method,
+                    uri,
+                    headers: header_map,
+                    body: Bytes::from(body.into_bytes()),
+                },
+            );
         }
     }
 }

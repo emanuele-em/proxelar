@@ -51,6 +51,10 @@ pub async fn run(mut event_rx: mpsc::Receiver<ProxyEvent>, cancel: CancellationT
 
                 println!("[{now}] #{id} {method_colored} {status_colored} {uri} ({size})");
             }
+            ProxyEvent::RequestIntercepted { .. } => {
+                // Terminal mode does not support interactive intercept;
+                // intercept is disabled when running in terminal mode.
+            }
             ProxyEvent::Error { message } => {
                 eprintln!(
                     "[{}] {}",

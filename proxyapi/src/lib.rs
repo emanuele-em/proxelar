@@ -10,6 +10,7 @@ pub mod ca;
 pub mod error;
 pub mod event;
 pub(crate) mod handler;
+pub mod intercept;
 pub mod proxy;
 mod rewind;
 #[cfg(feature = "scripting")]
@@ -22,6 +23,7 @@ use std::net::SocketAddr;
 pub use error::Error;
 pub use event::ProxyEvent;
 pub use handler::CapturingHandler;
+pub use intercept::{InterceptConfig, InterceptDecision};
 pub use proxy::{Proxy, ProxyConfig, ProxyMode};
 
 /// Returned by [`HttpHandler::handle_request`] to either forward or short-circuit.

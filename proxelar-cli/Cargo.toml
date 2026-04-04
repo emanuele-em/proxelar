@@ -14,6 +14,7 @@ scripting = ["proxyapi/scripting"]
 
 [dependencies]
 proxyapi = { version = "0.3.0", path = "../proxyapi" }
+bytes = "1.9"
 http = "1.2"
 proxyapi_models = { version = "0.3.0", path = "../proxyapi_models" }
 clap = { version = "4.6", features = ["derive"] }

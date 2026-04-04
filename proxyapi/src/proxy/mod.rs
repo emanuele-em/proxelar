@@ -14,6 +14,7 @@ use crate::ca::Ssl;
 use crate::error::Error;
 use crate::event::ProxyEvent;
 use crate::handler::CapturingHandler;
+use crate::intercept::InterceptConfig;
 #[cfg(feature = "scripting")]
 use crate::scripting::ScriptEngine;
 
@@ -40,6 +41,8 @@ pub struct ProxyConfig {
     pub event_tx: mpsc::Sender<ProxyEvent>,
     /// Directory for CA certificate and key files.
     pub ca_dir: PathBuf,
+    /// Optional intercept controller for interactive request/response editing.
+    pub intercept: Option<Arc<InterceptConfig>>,
     /// Optional path to a Lua script for request/response hooks.
     #[cfg(feature = "scripting")]
     pub script_path: Option<PathBuf>,
@@ -111,8 +114,10 @@ impl Proxy {
                             continue;
                         }
                     };
-                    #[allow(unused_mut)]
                     let mut handler = CapturingHandler::new(self.config.event_tx.clone());
+                    if let Some(ref ic) = self.config.intercept {
+                        handler = handler.with_intercept(Arc::clone(ic));
+                    }
                     #[cfg(feature = "scripting")]
                     if let Some(ref engine) = script_engine {
                         handler = handler.with_script_engine(Arc::clone(engine));

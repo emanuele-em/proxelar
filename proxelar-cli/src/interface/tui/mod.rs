@@ -7,9 +7,10 @@ use crossterm::{
     execute,
     terminal::{disable_raw_mode, enable_raw_mode, EnterAlternateScreen, LeaveAlternateScreen},
 };
-use proxyapi::ProxyEvent;
+use proxyapi::{InterceptConfig, ProxyEvent};
 use ratatui::prelude::*;
 use std::io;
+use std::sync::Arc;
 use tokio::sync::mpsc;
 use tokio_util::sync::CancellationToken;
 
@@ -28,14 +29,19 @@ impl Drop for RawModeGuard {
     }
 }
 
-pub async fn run(event_rx: mpsc::Receiver<ProxyEvent>, cancel: CancellationToken) {
-    if let Err(e) = run_inner(event_rx, cancel).await {
+pub async fn run(
+    event_rx: mpsc::Receiver<ProxyEvent>,
+    intercept: Arc<InterceptConfig>,
+    cancel: CancellationToken,
+) {
+    if let Err(e) = run_inner(event_rx, intercept, cancel).await {
         eprintln!("TUI error: {e}");
     }
 }
 
 async fn run_inner(
     event_rx: mpsc::Receiver<ProxyEvent>,
+    intercept: Arc<InterceptConfig>,
     cancel: CancellationToken,
 ) -> Result<(), Box<dyn std::error::Error>> {
     enable_raw_mode()?;
@@ -61,7 +67,7 @@ async fn run_inner(
 
         match event {
             AppEvent::Input(key_event) => {
-                if handle_key_event(key_event, &mut state) {
+                if handle_key_event(key_event, &mut state, &intercept) {
                     break;
                 }
             }

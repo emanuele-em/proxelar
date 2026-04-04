@@ -4,8 +4,9 @@ mod interface;
 use clap::Parser;
 use cli::{Args, Interface, Mode};
 use http::Uri;
-use proxyapi::{Proxy, ProxyConfig, ProxyMode};
+use proxyapi::{InterceptConfig, Proxy, ProxyConfig, ProxyMode};
 use std::net::SocketAddr;
+use std::sync::Arc;
 use tokio_util::sync::CancellationToken;
 
 /// Capacity of the event channel between the proxy core and the UI.
@@ -24,6 +25,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     let (event_tx, event_rx) = tokio::sync::mpsc::channel(EVENT_CHANNEL_CAPACITY);
     let cancel = CancellationToken::new();
+    let intercept = InterceptConfig::new();
 
     let ca_dir = args.ca_dir.unwrap_or_else(|| {
         dirs::home_dir()
@@ -53,6 +55,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         mode: proxy_mode,
         event_tx,
         ca_dir,
+        intercept: Some(Arc::clone(&intercept)),
         #[cfg(feature = "scripting")]
         script_path: args.script,
     };
@@ -86,8 +89,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     match args.interface {
         Interface::Terminal => interface::terminal::run(event_rx, cancel).await,
-        Interface::Tui => interface::tui::run(event_rx, cancel).await,
-        Interface::Gui => interface::web::run(event_rx, args.gui_port, cancel).await,
+        Interface::Tui => interface::tui::run(event_rx, Arc::clone(&intercept), cancel).await,
+        Interface::Gui => {
+            interface::web::run(event_rx, Arc::clone(&intercept), args.gui_port, cancel).await
+        }
     }
 
     Ok(())
