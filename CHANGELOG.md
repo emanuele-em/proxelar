@@ -7,6 +7,21 @@
 
 ## [Unreleased]
 
+### Intercept mode
+
+- Pause any HTTP/HTTPS request mid-flight and decide what to do before it reaches the server
+- **TUI**: press `i` to toggle intercept; pending requests appear as `⏸` rows; `f` to forward, `d` to drop (504), `e` to edit inline
+- **Web GUI**: intercept toggle button in the toolbar; click a pending row to open the editor panel with method, URI, headers, and body fields; Forward / Drop buttons
+- Inline request editor in TUI — no external `$EDITOR` required; full cursor navigation, line editing, binary body warning
+- Two-step edit flow: edit freely → `Esc` to stage → `f` to forward (with or without changes)
+- Parse error feedback: editor stays open with a red border when the request line is malformed
+- Toggling intercept off automatically forwards all pending requests so clients never hang
+- `InterceptConfig` and `InterceptDecision` types exported from `proxyapi` for programmatic use
+- Stable ID correlation between `RequestIntercepted` and `RequestComplete` events
+- XSS fix in web GUI header editor (DOM construction instead of `innerHTML`)
+- Multi-value header preservation (`append` instead of `insert`) in both TUI and web editors
+- Documentation page: [Intercept & Modify Traffic](https://proxelar.micheletti.io/intercept.html)
+
 ## [0.3.0] - 2026-03-29
 
 - Lua scripting system with `on_request` and `on_response` hooks via `--script` flag

@@ -13,6 +13,10 @@
 - [Forward Proxy](./proxy-modes/forward.md)
 - [Reverse Proxy](./proxy-modes/reverse.md)
 
+# Intercept
+
+- [Intercept & Modify Traffic](./intercept.md)
+
 # Lua Scripting
 
 - [Overview](./scripting/overview.md)
