@@ -58,6 +58,18 @@ brew install proxelar
 cargo install proxelar
 ```
 
+### Docker / Podman
+
+```bash
+# Web GUI
+docker run --rm -it -v ~/.proxelar:/root/.proxelar -p 8080:8080 -p 127.0.0.1:8081:8081 ghcr.io/emanuele-em/proxelar --interface gui --addr 0.0.0.0
+
+# Terminal
+docker run --rm -it -v ~/.proxelar:/root/.proxelar -p 8080:8080 ghcr.io/emanuele-em/proxelar --interface terminal --addr 0.0.0.0
+```
+
+The `-v ~/.proxelar:/root/.proxelar` mount reuses your existing trusted CA certificate so you won't get browser warnings.
+
 ---
 
 ## Quick Start

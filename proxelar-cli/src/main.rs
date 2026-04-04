@@ -99,6 +99,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 event_rx,
                 Arc::clone(&intercept),
                 replay_tx,
+                args.addr,
                 args.gui_port,
                 cancel,
             )

@@ -71,6 +71,7 @@ pub async fn run(
     mut event_rx: mpsc::Receiver<ProxyEvent>,
     intercept: Arc<InterceptConfig>,
     replay_tx: mpsc::Sender<ProxiedRequest>,
+    gui_addr: std::net::IpAddr,
     gui_port: u16,
     cancel: CancellationToken,
 ) {
@@ -107,7 +108,7 @@ pub async fn run(
         .route("/ws", get(ws_handler))
         .with_state(state);
 
-    let addr = format!("127.0.0.1:{gui_port}");
+    let addr = format!("{gui_addr}:{gui_port}");
 
     let listener = match tokio::net::TcpListener::bind(&addr).await {
         Ok(l) => l,
