@@ -1,8 +1,9 @@
 <div align="center">
-<img src="assets/logo.png" width="100"><br>
+<img src="assets/logo.png" width="80"><br><br>
 <h1>Proxelar</h1>
 <p><strong>A Man-in-the-Middle proxy written in Rust.</strong><br>
 Intercept, inspect, and modify HTTP/HTTPS traffic with Lua scripting, a TUI, and a web interface.</p>
+
 <p>
 <a href="https://crates.io/crates/proxelar"><img src="https://img.shields.io/crates/v/proxelar" alt="Crates.io"></a>
 <a href="https://formulae.brew.sh/formula/proxelar"><img src="https://img.shields.io/homebrew/v/proxelar" alt="Homebrew"></a>
@@ -10,20 +11,38 @@ Intercept, inspect, and modify HTTP/HTTPS traffic with Lua scripting, a TUI, and
 <a href="https://github.com/emanuele-em/proxelar/actions/workflows/autofix.yml"><img src="https://github.com/emanuele-em/proxelar/actions/workflows/autofix.yml/badge.svg" alt="CI"></a>
 <a href="https://proxelar.micheletti.io"><img src="https://img.shields.io/badge/docs-proxelar.micheletti.io-blue" alt="Docs"></a>
 </p>
-<table><tr>
-<td><img height="500" alt="TUI" src="https://github.com/user-attachments/assets/f02b81f1-49f2-41b2-b2c7-70bd01ff1bb7"></td>
-<td><img height="500" alt="Web GUI" src="https://github.com/user-attachments/assets/dc1e16ad-3b7a-4ff2-8f02-b40036ba9c01"></td>
-</tr></table>
+
+<img src="assets/screenshots/tui.gif" alt="TUI demo" width="800"><br><br>
+<img src="assets/screenshots/gui.gif" alt="Web GUI demo" width="800">
+
 </div>
+
+---
+
+## What is Proxelar?
+
+Proxelar sits between your application and the internet, giving you full visibility into every HTTP/HTTPS request — and the power to transform it on the fly with Lua.
+
+```
+Your App  ──►  Proxelar :8080  ──►  Internet
+                    │
+              Inspect · Modify · Mock
+```
+
+Useful for debugging APIs, reverse engineering third-party services, testing mobile apps, injecting headers, mocking responses, or automating any request/response transform without touching your source code.
+
+---
 
 ## Features
 
 - **Lua scripting** — write `on_request` / `on_response` hooks to modify, block, or mock traffic at runtime
 - **HTTPS interception** — automatic CA generation and per-host certificate minting
 - **Forward & reverse proxy** — CONNECT tunneling or upstream URI rewriting
-- **Three interfaces** — terminal, interactive TUI (ratatui), web GUI (axum + WebSocket)
+- **Three interfaces** — terminal (stdout), interactive TUI (ratatui), web GUI (axum + WebSocket)
 - **Request filtering** — search and inspect request/response pairs in detail
-- **Easy CA install** — visit `http://proxel.ar` through the proxy to download the certificate
+- **Easy CA install** — visit `http://proxel.ar` through the proxy to download and install the root cert
+
+---
 
 ## Installation
 
@@ -39,27 +58,44 @@ brew install proxelar
 cargo install proxelar
 ```
 
+---
+
 ## Quick Start
 
+**1. Start the proxy**
 ```bash
-# Start the proxy (forward mode, interactive TUI)
 proxelar
-
-# Install the CA certificate — visit http://proxel.ar through the proxy
-# or manually install ~/.proxelar/proxelar-ca.pem
-
-# Configure your system proxy to 127.0.0.1:8080
 ```
+
+**2. Install the CA certificate**
+
+Visit `http://proxel.ar` while routing traffic through the proxy — it serves the cert with install instructions.  
+Or install it manually: `~/.proxelar/proxelar-ca.pem`
+
+**3. Configure your system proxy**
+
+Set HTTP and HTTPS proxy to `127.0.0.1:8080` in your OS, browser, or tool of choice.
+
+Traffic will start appearing in the TUI immediately.
+
+---
+
+## Interfaces
+
+```bash
+proxelar              # interactive TUI (default)
+proxelar -i terminal  # plain terminal output
+proxelar -i gui       # web GUI at http://localhost:8081
+```
+
+---
 
 ## Usage
 
 ```bash
-proxelar                                          # interactive TUI (default)
-proxelar -i terminal                              # terminal output
-proxelar -i gui                                   # web GUI at localhost:8081
-proxelar -m reverse --target http://localhost:3000 # reverse proxy
-proxelar -b 0.0.0.0 -p 9090                       # custom bind address and port
-proxelar --script examples/scripts/block_domain.lua # run with a Lua script
+proxelar -m reverse --target http://localhost:3000   # reverse proxy
+proxelar -b 0.0.0.0 -p 9090                         # custom bind/port
+proxelar --script examples/scripts/block_domain.lua  # with a Lua script
 ```
 
 <details>
@@ -93,6 +129,8 @@ proxelar --script examples/scripts/block_domain.lua # run with a Lua script
 | `q` / `Ctrl+C` | Quit |
 
 </details>
+
+---
 
 ## Scripting
 
@@ -159,20 +197,24 @@ end
 
 </details>
 
-See [`examples/scripts/`](examples/scripts/) for more examples including header injection, cookie stripping, HTML rewriting, request body modification, and traffic logging. Full scripting documentation is available at [proxelar.micheletti.io](https://proxelar.micheletti.io).
+More examples in [`examples/scripts/`](examples/scripts/) — header injection, cookie stripping, HTML rewriting, request body modification, traffic logging, and more. Full scripting API reference at [proxelar.micheletti.io](https://proxelar.micheletti.io/scripting/api-reference.html).
+
+---
 
 ## Documentation
 
-Full documentation is available at **[proxelar.micheletti.io](https://proxelar.micheletti.io)**, covering:
+Full documentation at **[proxelar.micheletti.io](https://proxelar.micheletti.io)**:
 
 - [Getting started](https://proxelar.micheletti.io/quick-start.html)
 - [Forward & reverse proxy modes](https://proxelar.micheletti.io/proxy-modes/forward.html)
 - [Lua scripting API reference](https://proxelar.micheletti.io/scripting/api-reference.html)
 - [CA certificate installation](https://proxelar.micheletti.io/ca-certificate.html)
 
+---
+
 ## Contributing
 
-Contributions are welcome! Feel free to open an issue or submit a pull request.
+Contributions are welcome. Open an issue or submit a pull request.
 
 ## License
 
