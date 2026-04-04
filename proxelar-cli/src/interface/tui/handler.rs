@@ -93,7 +93,15 @@ pub fn handle_key_event(
                 match parse_raw_http_request(&text) {
                     Ok((method, uri, headers, body)) => {
                         state.edit_session = None;
-                        intercept.resolve(id, InterceptDecision::Modified { method, uri, headers, body });
+                        intercept.resolve(
+                            id,
+                            InterceptDecision::Modified {
+                                method,
+                                uri,
+                                headers,
+                                body,
+                            },
+                        );
                     }
                     Err(_) => {
                         // Keep the session open so the user can fix the text.

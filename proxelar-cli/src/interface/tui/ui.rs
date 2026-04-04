@@ -267,7 +267,9 @@ fn draw_editor(f: &mut Frame, session: &mut EditSession, area: Rect) {
         if row_idx == session.cursor_row {
             // Build a line with a cursor block at cursor_col.
             let chars: Vec<char> = line_str.chars().collect();
-            let before: String = chars[..session.cursor_col.min(chars.len())].iter().collect();
+            let before: String = chars[..session.cursor_col.min(chars.len())]
+                .iter()
+                .collect();
             let cursor_char: String = chars
                 .get(session.cursor_col)
                 .map(|c| c.to_string())
@@ -329,8 +331,8 @@ fn draw_editor(f: &mut Frame, session: &mut EditSession, area: Rect) {
         .wrap(Wrap { trim: false });
     f.render_widget(editor, chunks[0]);
 
-    let hint = Paragraph::new(hint_text)
-        .style(Style::default().bg(Color::DarkGray).fg(Color::White));
+    let hint =
+        Paragraph::new(hint_text).style(Style::default().bg(Color::DarkGray).fg(Color::White));
     f.render_widget(hint, chunks[1]);
 }
 
@@ -356,13 +358,12 @@ fn draw_intercept_pane(f: &mut Frame, area: Rect, request: &proxyapi_models::Pro
         .wrap(Wrap { trim: false });
     f.render_widget(content, chunks[0]);
 
-    let action_bar = Paragraph::new("  [f] Forward    [d] Drop (504)    [e] Edit  ")
-        .style(
-            Style::default()
-                .bg(Color::Yellow)
-                .fg(Color::Black)
-                .add_modifier(Modifier::BOLD),
-        );
+    let action_bar = Paragraph::new("  [f] Forward    [d] Drop (504)    [e] Edit  ").style(
+        Style::default()
+            .bg(Color::Yellow)
+            .fg(Color::Black)
+            .add_modifier(Modifier::BOLD),
+    );
     f.render_widget(action_bar, chunks[1]);
 }
 
