@@ -13,7 +13,7 @@ default = []
 scripting = ["mlua"]
 
 [dependencies]
-mlua = { version = "0.10", features = ["lua54", "vendored", "send"], optional = true }
+mlua = { version = "0.11", features = ["lua54", "vendored", "send"], optional = true }
 hyper = { version = "1.9", features = ["http1", "server", "client"] }
 hyper-util = { version = "0.1", features = ["tokio", "server-auto", "client-legacy", "http1"] }
 http = "1.2"
