@@ -25,7 +25,7 @@ rustls-pki-types = "1.11"
 hyper-rustls = { version = "0.27", features = ["http1", "logging", "tls12", "ring", "webpki-tokio"] }
 openssl = { version = "0.10.76", features = ["vendored"] }
 moka = { version = "0.12", features = ["future"] }
-tokio = { version = "1.50", features = ["rt", "net", "io-util", "macros", "sync", "time"] }
+tokio = { version = "1.51", features = ["rt", "net", "io-util", "macros", "sync", "time"] }
 async-trait = "0.1"
 bstr = "1.11"
 chrono = "0.4"
@@ -36,7 +36,7 @@ proxyapi_models = { version = "0.4.0", path = "../proxyapi_models" }
 
 [dev-dependencies]
 tokio-test = "0.4"
-tokio = { version = "1.50", features = ["full"] }
+tokio = { version = "1.51", features = ["full"] }
 reqwest = { version = "0.12", features = ["rustls-tls"] }
 rustls = { version = "0.23", features = ["ring"] }
 tempfile = "3"
