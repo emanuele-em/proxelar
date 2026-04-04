@@ -14,6 +14,14 @@ pub fn handle_key_event(
     intercept: &Arc<InterceptConfig>,
     replay_tx: &mpsc::Sender<ProxiedRequest>,
 ) -> bool {
+    // Help overlay: consume all keys; ? or Esc closes it.
+    if state.show_help {
+        if matches!(key.code, KeyCode::Char('?') | KeyCode::Esc) {
+            state.show_help = false;
+        }
+        return false;
+    }
+
     // Inline editor: intercept ALL keys only while actively typing.
     if let Some(ref mut session) = state.edit_session {
         if session.typing {
@@ -149,6 +157,8 @@ pub fn handle_key_event(
                 state.detail_open = true;
             }
         }
+
+        KeyCode::Char('?') => state.show_help = true,
 
         KeyCode::Char('r') => {
             if let Some(req) = state.selected_request() {

@@ -20,6 +20,47 @@
     const forwardBtn = document.getElementById('forward-btn');
     const dropBtn = document.getElementById('drop-btn');
 
+    const helpBtn = document.getElementById('help-btn');
+    const helpModal = document.getElementById('help-modal');
+    const helpBackdrop = document.getElementById('help-backdrop');
+    const closeHelpBtn = document.getElementById('close-help');
+
+    function openHelp() {
+        helpModal.classList.remove('hidden');
+        helpBackdrop.classList.remove('hidden');
+    }
+
+    function closeHelp() {
+        helpModal.classList.add('hidden');
+        helpBackdrop.classList.add('hidden');
+    }
+
+    helpBtn.onclick = function() {
+        if (helpModal.classList.contains('hidden')) {
+            openHelp();
+        } else {
+            closeHelp();
+        }
+    };
+
+    closeHelpBtn.onclick = closeHelp;
+    helpBackdrop.onclick = closeHelp;
+
+    document.addEventListener('keydown', function(e) {
+        if (e.target.tagName === 'INPUT' || e.target.tagName === 'TEXTAREA' || e.target.tagName === 'SELECT') return;
+        if (e.key === '?') {
+            e.preventDefault();
+            if (helpModal.classList.contains('hidden')) {
+                openHelp();
+            } else {
+                closeHelp();
+            }
+        }
+        if (e.key === 'Escape') {
+            closeHelp();
+        }
+    });
+
     const MAX_REQUESTS = 10000;
 
     // completed flows: array of { id, request, response }

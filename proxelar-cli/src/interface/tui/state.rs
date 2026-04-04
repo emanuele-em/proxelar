@@ -278,6 +278,8 @@ pub struct AppState {
     pub intercept_enabled: bool,
     /// Active inline edit session (set when user presses `e` on a pending row).
     pub edit_session: Option<EditSession>,
+    /// Whether the help overlay is visible.
+    pub show_help: bool,
 }
 
 /// Returns `true` if `entry` matches the given filter string (case-insensitive).
@@ -309,6 +311,7 @@ impl AppState {
             filter_mode: false,
             intercept_enabled: false,
             edit_session: None,
+            show_help: false,
         }
     }
 

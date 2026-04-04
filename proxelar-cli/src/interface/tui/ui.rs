@@ -2,7 +2,7 @@ use ratatui::{
     layout::{Constraint, Direction, Layout, Rect},
     style::{Color, Modifier, Style},
     text::{Line, Span},
-    widgets::{Block, Borders, Cell, Paragraph, Row, Table, Wrap},
+    widgets::{Block, Borders, Cell, Clear, Paragraph, Row, Table, Wrap},
     Frame,
 };
 
@@ -155,6 +155,10 @@ pub fn draw(f: &mut Frame, state: &mut AppState) {
     };
 
     draw_status_bar(f, state, status_chunk, pending_count);
+
+    if state.show_help {
+        draw_help_modal(f);
+    }
 }
 
 fn draw_status_bar(f: &mut Frame, state: &AppState, area: Rect, pending_count: usize) {
@@ -195,7 +199,7 @@ fn draw_status_bar(f: &mut Frame, state: &AppState, area: Rect, pending_count: u
     } else if let Some(ref filter) = state.filter {
         format!(" Filter: {filter}  |  i:intercept  f:fwd  d:drop  e:edit  r:replay  q:quit ")
     } else {
-        " q:quit  i:intercept  r:replay  /:filter  j/k:nav  Enter:details  Tab:req/res  g/G:top/bot  c:clear "
+        " q:quit  i:intercept  r:replay  /:filter  j/k:nav  Enter:details  Tab:req/res  g/G:top/bot  c:clear  ?:help "
             .to_string()
     };
     spans.push(Span::raw(hint));
@@ -457,4 +461,102 @@ fn status_color(status: u16) -> Color {
         500..=599 => Color::Red,
         _ => Color::White,
     }
+}
+
+fn centered_rect(percent_x: u16, percent_y: u16, r: Rect) -> Rect {
+    let vert = Layout::default()
+        .direction(Direction::Vertical)
+        .constraints([
+            Constraint::Percentage((100 - percent_y) / 2),
+            Constraint::Percentage(percent_y),
+            Constraint::Percentage((100 - percent_y) / 2),
+        ])
+        .split(r);
+    Layout::default()
+        .direction(Direction::Horizontal)
+        .constraints([
+            Constraint::Percentage((100 - percent_x) / 2),
+            Constraint::Percentage(percent_x),
+            Constraint::Percentage((100 - percent_x) / 2),
+        ])
+        .split(vert[1])[1]
+}
+
+fn draw_help_modal(f: &mut Frame) {
+    let area = centered_rect(62, 85, f.area());
+    f.render_widget(Clear, area);
+
+    // Each entry: (key, description). Empty description = section header.
+    let entries: &[(&str, &str)] = &[
+        ("--- Navigation ---", ""),
+        ("j / ↓", "Select next row"),
+        ("k / ↑", "Select previous row"),
+        ("g", "Jump to first row"),
+        ("G", "Jump to last row"),
+        ("", ""),
+        ("--- Actions ---", ""),
+        ("Enter", "Toggle detail panel"),
+        ("Tab", "Switch Request / Response tab"),
+        ("r", "Replay selected request"),
+        ("c", "Clear all entries"),
+        ("q / Q  Ctrl+C", "Quit"),
+        ("", ""),
+        ("--- Filter ---", ""),
+        ("/", "Enter filter mode"),
+        ("Enter", "Apply filter"),
+        ("Esc", "Cancel filter / close detail"),
+        ("", ""),
+        ("--- Intercept ---", ""),
+        ("i", "Toggle intercept ON / OFF"),
+        ("f", "Forward intercepted request"),
+        ("d", "Drop request (returns 504)"),
+        ("e", "Edit intercepted request"),
+        ("", ""),
+        ("--- Request Editor ---", ""),
+        ("↑ ↓ ← →", "Move cursor"),
+        ("Home / End", "Jump to line start / end"),
+        ("Enter", "Insert newline"),
+        ("Backspace / Del", "Delete character"),
+        ("Esc", "Finish editing (stage edits)"),
+        ("f", "Forward edited request"),
+        ("Esc (staged)", "Discard edits and close"),
+        ("", ""),
+        ("? / Esc", "Close this help"),
+    ];
+
+    let lines: Vec<Line<'static>> = entries
+        .iter()
+        .map(|(key, desc)| {
+            if desc.is_empty() && key.is_empty() {
+                Line::from("")
+            } else if desc.is_empty() {
+                // Section header
+                Line::from(Span::styled(
+                    key.to_string(),
+                    Style::default()
+                        .fg(Color::Yellow)
+                        .add_modifier(Modifier::BOLD),
+                ))
+            } else {
+                Line::from(vec![
+                    Span::styled(
+                        format!("  {:<22}", key),
+                        Style::default().fg(Color::Cyan),
+                    ),
+                    Span::raw(desc.to_string()),
+                ])
+            }
+        })
+        .collect();
+
+    let help = Paragraph::new(lines)
+        .block(
+            Block::default()
+                .borders(Borders::ALL)
+                .title(" Keybindings — ? or Esc to close ")
+                .border_style(Style::default().fg(Color::Cyan)),
+        )
+        .wrap(Wrap { trim: false });
+
+    f.render_widget(help, area);
 }

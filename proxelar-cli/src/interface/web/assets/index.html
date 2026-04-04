@@ -23,6 +23,7 @@
             <button id="intercept-btn" title="Toggle intercept mode (pause requests for editing)">
                 &#9646;&#9646; Intercept: <span id="intercept-label">OFF</span>
             </button>
+            <button id="help-btn" title="Keyboard shortcuts and help (?)">?</button>
             <span id="status" class="status disconnected">Disconnected</span>
         </div>
     </header>
@@ -88,6 +89,54 @@
             <div class="intercept-actions">
                 <button id="drop-btn" class="btn-danger">Drop (504)</button>
                 <button id="forward-btn" class="btn-primary">Forward</button>
+            </div>
+        </div>
+    </div>
+
+    <!-- Help modal -->
+    <div id="help-backdrop" class="help-backdrop hidden"></div>
+    <div id="help-modal" class="help-modal hidden">
+        <div class="help-header">
+            <span class="help-title">Keyboard Shortcuts &amp; Actions</span>
+            <button id="close-help">&times;</button>
+        </div>
+        <div class="help-body">
+            <div class="help-section">
+                <div class="help-section-title">Navigation</div>
+                <div class="help-row"><kbd>j</kbd> / <kbd>↓</kbd><span>Select next row</span></div>
+                <div class="help-row"><kbd>k</kbd> / <kbd>↑</kbd><span>Select previous row</span></div>
+                <div class="help-row"><kbd>g</kbd><span>Jump to first row</span></div>
+                <div class="help-row"><kbd>G</kbd><span>Jump to last row</span></div>
+            </div>
+            <div class="help-section">
+                <div class="help-section-title">Table Actions</div>
+                <div class="help-row"><kbd>Click row</kbd><span>Open request / response detail</span></div>
+                <div class="help-row"><kbd>&#8635; Replay</kbd><span>Re-send the selected request</span></div>
+                <div class="help-row"><kbd>Clear</kbd><span>Remove all captured requests</span></div>
+            </div>
+            <div class="help-section">
+                <div class="help-section-title">Filtering</div>
+                <div class="help-row"><kbd>Method dropdown</kbd><span>Filter by HTTP method</span></div>
+                <div class="help-row"><kbd>Search box</kbd><span>Filter rows by URL</span></div>
+            </div>
+            <div class="help-section">
+                <div class="help-section-title">Intercept</div>
+                <div class="help-row"><kbd>&#9646;&#9646; Intercept</kbd><span>Toggle intercept mode ON / OFF</span></div>
+                <div class="help-row"><kbd>Click pending row</kbd><span>Open intercept editor</span></div>
+                <div class="help-row"><kbd>Forward</kbd><span>Send the (optionally modified) request</span></div>
+                <div class="help-row"><kbd>Drop</kbd><span>Block the request (returns 504)</span></div>
+                <div class="help-row"><kbd>Ctrl+Enter</kbd><span>Forward from within the editor</span></div>
+                <div class="help-row"><kbd>Esc</kbd><span>Close intercept editor (request stays pending)</span></div>
+            </div>
+            <div class="help-section">
+                <div class="help-section-title">Detail Panel</div>
+                <div class="help-row"><kbd>Request / Response tabs</kbd><span>Switch between request and response view</span></div>
+                <div class="help-row"><kbd>&times;</kbd><span>Close the detail panel</span></div>
+            </div>
+            <div class="help-section">
+                <div class="help-section-title">Global</div>
+                <div class="help-row"><kbd>?</kbd><span>Toggle this help</span></div>
+                <div class="help-row"><kbd>Esc</kbd><span>Close any open panel</span></div>
             </div>
         </div>
     </div>
