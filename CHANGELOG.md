@@ -7,6 +7,13 @@
 
 ## [Unreleased]
 
+## [0.4.1] - 2026-04-05
+
+- Docker/Podman support — official `Dockerfile` and `compose.yml` for containerized deployments
+- `?` help menu in TUI and web GUI listing all keyboard shortcuts
+- Request replay from TUI (`r` key) and web GUI button — resend any captured request instantly
+- Dependency updates: tokio 1.51, mlua 0.11.6, hyper 1.9
+
 ## [0.4.0] - 2026-04-04
 
 ### Intercept mode
