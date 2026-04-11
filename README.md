@@ -218,6 +218,8 @@ More examples in [`examples/scripts/`](examples/scripts/) — header injection, 
 
 ## Documentation
 
+Latest release: **[Proxelar 0.4.2 — WebSocket Inspection and Smarter Filtering](https://micheletti.io/proxelar-042/)**
+
 Full documentation at **[proxelar.micheletti.io](https://proxelar.micheletti.io)**:
 
 - [Getting started](https://proxelar.micheletti.io/quick-start.html)

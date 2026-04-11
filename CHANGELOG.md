@@ -13,6 +13,8 @@
 - Column-scoped filter in TUI — use `method:GET`, `status:404`, `host:example`, `path:/api`, `size:1.5KB` to narrow the table to a single column; plain text falls back to the existing all-fields search
 - TUI filter status bar no longer shows intercept-only shortcuts (`f`, `e`) when a filter is active but intercept is off
 
+Full release notes: [micheletti.io/proxelar-042](https://micheletti.io/proxelar-042/)
+
 ## [0.4.1] - 2026-04-05
 
 - Docker/Podman support — official `Dockerfile` and `compose.yml` for containerized deployments
