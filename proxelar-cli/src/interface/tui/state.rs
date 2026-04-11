@@ -26,7 +26,9 @@ pub enum FlowEntry {
         id: u64,
         request: Box<ProxiedRequest>,
     },
-    Error { message: String },
+    Error {
+        message: String,
+    },
     WebSocket {
         id: u64,
         request: Box<ProxiedRequest>,
@@ -319,10 +321,10 @@ pub(crate) fn matches_filter(entry: &FlowEntry, filter: Option<&str>) -> bool {
     let val = value_lower.as_str();
 
     match entry {
-        FlowEntry::Complete { request, response, .. } => match col {
-            Some(FilterColumn::Status) => {
-                response.status().as_u16().to_string().contains(val)
-            }
+        FlowEntry::Complete {
+            request, response, ..
+        } => match col {
+            Some(FilterColumn::Status) => response.status().as_u16().to_string().contains(val),
             Some(FilterColumn::Size) => crate::interface::format_size(response.body().len())
                 .to_ascii_lowercase()
                 .contains(val),
@@ -333,10 +335,10 @@ pub(crate) fn matches_filter(entry: &FlowEntry, filter: Option<&str>) -> bool {
             Some(col) => request_matches_column(request, col, val),
             None => request_matches_any(request, val),
         },
-        FlowEntry::Error { message } => {
-            col.is_none() && message.to_ascii_lowercase().contains(val)
-        }
-        FlowEntry::WebSocket { request, closed, .. } => match col {
+        FlowEntry::Error { message } => col.is_none() && message.to_ascii_lowercase().contains(val),
+        FlowEntry::WebSocket {
+            request, closed, ..
+        } => match col {
             Some(FilterColumn::Method) => "get".contains(val),
             Some(FilterColumn::Status) => {
                 // mirrors the UI: WS✓ for closed, WS⇄ for live
@@ -400,7 +402,11 @@ impl AppState {
             ProxyEvent::Error { message } => {
                 self.entries.push_back(FlowEntry::Error { message });
             }
-            ProxyEvent::WebSocketConnected { id, request, response } => {
+            ProxyEvent::WebSocketConnected {
+                id,
+                request,
+                response,
+            } => {
                 self.entries.push_back(FlowEntry::WebSocket {
                     id,
                     request,

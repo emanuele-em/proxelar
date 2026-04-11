@@ -7,6 +7,8 @@
 
 ## [Unreleased]
 
+## [0.4.2] - 2026-04-11
+
 - WebSocket inspection — connections appear as `WS⇄` / `WS✓` rows in the TUI and web GUI; click or select to browse individual frames with direction, opcode, size, and payload preview
 - Column-scoped filter in TUI — use `method:GET`, `status:404`, `host:example`, `path:/api`, `size:1.5KB` to narrow the table to a single column; plain text falls back to the existing all-fields search
 - TUI filter status bar no longer shows intercept-only shortcuts (`f`, `e`) when a filter is active but intercept is off

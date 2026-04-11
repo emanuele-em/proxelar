@@ -1,6 +1,6 @@
 [package]
 name = "proxyapi"
-version = "0.4.1"
+version = "0.4.2"
 edition = "2021"
 rust-version.workspace = true
 authors = ["Emanuele Micheletti <micheletti.emanuele@hotmail.com>"]
@@ -34,7 +34,7 @@ tracing = "0.1"
 serde = { version = "1.0", features = ["derive"] }
 tokio-tungstenite = { version = "0.26", default-features = false }
 futures-util = { version = "0.3", default-features = false, features = ["sink"] }
-proxyapi_models = { version = "0.4.1", path = "../proxyapi_models" }
+proxyapi_models = { version = "0.4.2", path = "../proxyapi_models" }
 
 [dev-dependencies]
 tokio-test = "0.4"

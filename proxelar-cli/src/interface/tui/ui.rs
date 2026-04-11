@@ -303,7 +303,9 @@ fn draw_detail(f: &mut Frame, state: &AppState, area: Rect, filtered: &[(usize, 
                 };
 
                 let (content, para_scroll) = match state.detail_tab {
-                    DetailTab::Request => (build_request_lines(request), state.detail_scroll as u16),
+                    DetailTab::Request => {
+                        (build_request_lines(request), state.detail_scroll as u16)
+                    }
                     DetailTab::Response => (
                         build_frames_lines(frames, *closed, effective_scroll, state.frames_follow),
                         0, // frames already skipped inside build_frames_lines

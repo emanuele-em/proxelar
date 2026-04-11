@@ -52,9 +52,7 @@ pub enum ProxyEvent {
         frame: Box<WsFrame>,
     },
     /// The WebSocket connection closed (either side closed, or an error occurred).
-    WebSocketClosed {
-        conn_id: u64,
-    },
+    WebSocketClosed { conn_id: u64 },
 }
 
 pub(crate) fn next_id() -> u64 {

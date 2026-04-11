@@ -115,7 +115,13 @@ impl WsFrame {
         payload: Bytes,
         truncated: bool,
     ) -> Self {
-        Self { direction, opcode, time, payload, truncated }
+        Self {
+            direction,
+            opcode,
+            time,
+            payload,
+            truncated,
+        }
     }
 }
 
