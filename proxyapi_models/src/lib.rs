@@ -74,6 +74,51 @@ impl ProxiedRequest {
     }
 }
 
+/// Direction of a WebSocket frame relative to the proxy.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum WsDirection {
+    /// Frame sent by the client to the server.
+    ClientToServer,
+    /// Frame sent by the server to the client.
+    ServerToClient,
+}
+
+/// WebSocket frame opcode (RFC 6455).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum WsOpcode {
+    Continuation,
+    Text,
+    Binary,
+    Close,
+    Ping,
+    Pong,
+}
+
+/// A single captured WebSocket frame.
+///
+/// `payload` is the unmasked application data, capped at 100 MB (consistent
+/// with `MAX_BODY_SIZE`). `time` is milliseconds since the Unix epoch.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct WsFrame {
+    pub direction: WsDirection,
+    pub opcode: WsOpcode,
+    pub time: i64,
+    pub payload: Bytes,
+    pub truncated: bool,
+}
+
+impl WsFrame {
+    pub fn new(
+        direction: WsDirection,
+        opcode: WsOpcode,
+        time: i64,
+        payload: Bytes,
+        truncated: bool,
+    ) -> Self {
+        Self { direction, opcode, time, payload, truncated }
+    }
+}
+
 /// A captured HTTP response.
 ///
 /// The `time` field stores the capture timestamp as milliseconds since the Unix epoch.

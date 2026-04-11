@@ -62,6 +62,12 @@ pub async fn run(mut event_rx: mpsc::Receiver<ProxyEvent>, cancel: CancellationT
                     message.as_str().with(Color::Red)
                 );
             }
+            ProxyEvent::WebSocketConnected { id, request, .. } => {
+                let now = chrono::Local::now().format("%H:%M:%S");
+                let uri = request.uri().to_string();
+                println!("[{now}] #{id} {} WS\u{21c4} {uri}", "GET".with(Color::Green));
+            }
+            ProxyEvent::WebSocketFrame { .. } | ProxyEvent::WebSocketClosed { .. } => {}
         }
     }
 }

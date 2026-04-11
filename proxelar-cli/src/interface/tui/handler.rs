@@ -70,6 +70,28 @@ pub fn handle_key_event(
         return false;
     }
 
+    // Detail panel focus: j/k scroll content, Tab switches tab, Enter/Esc return to table.
+    if state.detail_focused {
+        match key.code {
+            KeyCode::Char('j') | KeyCode::Down => {
+                state.frames_follow = false;
+                state.detail_scroll = state.detail_scroll.saturating_add(1);
+            }
+            KeyCode::Char('k') | KeyCode::Up => {
+                state.frames_follow = false;
+                state.detail_scroll = state.detail_scroll.saturating_sub(1);
+            }
+            KeyCode::Tab => state.toggle_tab(),
+            KeyCode::Enter | KeyCode::Esc => {
+                state.detail_focused = false;
+            }
+            KeyCode::Char('q' | 'Q') => return true,
+            KeyCode::Char('c') if key.modifiers.contains(KeyModifiers::CONTROL) => return true,
+            _ => {}
+        }
+        return false;
+    }
+
     match key.code {
         KeyCode::Char('q' | 'Q') => return true,
         KeyCode::Char('c') if key.modifiers.contains(KeyModifiers::CONTROL) => return true,
@@ -77,7 +99,14 @@ pub fn handle_key_event(
         KeyCode::Char('k') | KeyCode::Up => state.select_prev(),
         KeyCode::Char('g') => state.select_first(),
         KeyCode::Char('G') => state.select_last(),
-        KeyCode::Enter => state.toggle_detail(),
+        KeyCode::Enter => {
+            if state.detail_open {
+                // Second Enter focuses the detail panel for scrolling.
+                state.detail_focused = true;
+            } else {
+                state.detail_open = true;
+            }
+        }
         KeyCode::Tab => state.toggle_tab(),
         KeyCode::Char('/') => {
             state.filter_mode = true;
@@ -86,6 +115,7 @@ pub fn handle_key_event(
         KeyCode::Esc => {
             if state.detail_open {
                 state.detail_open = false;
+                state.detail_focused = false;
             } else {
                 state.filter = None;
             }

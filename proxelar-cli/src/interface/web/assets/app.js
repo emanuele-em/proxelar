@@ -74,6 +74,11 @@
     let currentInterceptId = null;
     let ws = null;
 
+    // WebSocket inspection state
+    // Map<conn_id, { request, response, frames: [], closed }>
+    let wsFlows = new Map();
+    let selectedWsConnId = null;
+
     // ─── WebSocket ───────────────────────────────────────────────────────────
 
     function connect() {
@@ -115,6 +120,30 @@
                 } else if (event.InterceptStatus) {
                     interceptEnabled = event.InterceptStatus.enabled;
                     updateInterceptBtn();
+                } else if (event.WebSocketConnected) {
+                    const r = event.WebSocketConnected;
+                    wsFlows.set(r.id, { request: r.request, response: r.response, frames: [], closed: false });
+                    renderTable();
+                } else if (event.WebSocketFrame) {
+                    const r = event.WebSocketFrame;
+                    const flow = wsFlows.get(r.conn_id);
+                    if (flow) {
+                        flow.frames.push(r.frame);
+                        if (flow.frames.length > 10000) { flow.frames.shift(); }
+                        // Incremental append if this connection is selected and Frames tab is active
+                        if (selectedWsConnId === r.conn_id && activeTab === 'frames') {
+                            appendWsFrame(r.frame);
+                        }
+                    }
+                } else if (event.WebSocketClosed) {
+                    const flow = wsFlows.get(event.WebSocketClosed.conn_id);
+                    if (flow) {
+                        flow.closed = true;
+                        if (selectedWsConnId === event.WebSocketClosed.conn_id) {
+                            updateWsClosedBadge();
+                        }
+                        renderTable();
+                    }
                 }
             } catch(err) {
                 console.error('Parse error:', err);
@@ -279,7 +308,17 @@
             rows.push({ pending: false, id: r.id, request: r.request, response: r.response });
         });
 
+        wsFlows.forEach(function(flow, id) {
+            rows.push({ ws: true, id: id, request: flow.request, wsFlow: flow });
+        });
+
         return rows.filter(function(r) {
+            if (r.ws) {
+                // WS flows are always GET; skip method filter mismatch only if non-GET selected
+                if (method && method !== 'GET') return false;
+                if (search && !r.request.uri.toLowerCase().includes(search)) return false;
+                return true;
+            }
             if (method && r.request.method !== method) return false;
             if (search && !r.request.uri.toLowerCase().includes(search)) return false;
             return true;
@@ -293,7 +332,29 @@
         filtered.forEach(function(r, i) {
             const tr = document.createElement('tr');
 
-            if (r.pending) {
+            if (r.ws) {
+                const flow = r.wsFlow;
+                const uri = parseUri(r.request.uri || '');
+                const statusStr = flow.closed
+                    ? '<span class="status-ws-closed">WS \u2713</span>'
+                    : '<span class="status-ws-live">WS \u21c4</span>';
+                if (selectedWsConnId === r.id) tr.className = 'selected';
+                tr.innerHTML =
+                    '<td>' + r.id + '</td>' +
+                    '<td class="method-get">GET</td>' +
+                    '<td>' + statusStr + '</td>' +
+                    '<td>' + escapeHtml(uri.host) + '</td>' +
+                    '<td>' + escapeHtml(uri.path) + '</td>' +
+                    '<td class="status-ws-live">' + flow.frames.length + ' fr</td>';
+                tr.onclick = (function(connId, flowRef) {
+                    return function() {
+                        selectedIdx = null;
+                        selectedWsConnId = connId;
+                        openWsDetail(flowRef);
+                        renderTable();
+                    };
+                })(r.id, flow);
+            } else if (r.pending) {
                 tr.className = 'pending';
                 const uri = parseUri(r.request.uri || '');
                 tr.innerHTML =
@@ -334,6 +395,7 @@
                 tr.onclick = (function(idx, row) {
                     return function() {
                         selectedIdx = idx;
+                        selectedWsConnId = null;
                         showDetail(row);
                         renderTable();
                     };
@@ -376,6 +438,85 @@
             }
         }
         detailContent.textContent = content;
+    }
+
+    // ─── WebSocket detail ────────────────────────────────────────────────────
+
+    function openWsDetail(flow) {
+        // Show the Frames tab, hide the Response tab (not meaningful for WS)
+        document.getElementById('frames-tab').classList.remove('hidden');
+        document.querySelector('[data-tab="response"]').classList.add('hidden');
+
+        // Activate Frames tab
+        tabs.forEach(function(t) { t.classList.remove('active'); });
+        document.getElementById('frames-tab').classList.add('active');
+        activeTab = 'frames';
+
+        detailPanel.classList.remove('hidden');
+        interceptPanel.classList.add('hidden');
+        renderWsFrameList(flow);
+    }
+
+    function renderWsFrameList(flow) {
+        let html = '';
+        if (flow.closed) {
+            html += '<div class="ws-status-badge ws-closed-badge">Connection closed</div>';
+        } else {
+            html += '<div class="ws-status-badge ws-live-badge">Connection live</div>';
+        }
+        flow.frames.forEach(function(frame) {
+            html += buildWsFrameRow(frame);
+        });
+        detailContent.innerHTML = html;
+        // Auto-scroll to bottom
+        detailContent.scrollTop = detailContent.scrollHeight;
+    }
+
+    function appendWsFrame(frame) {
+        const atBottom = detailContent.scrollTop + detailContent.clientHeight >= detailContent.scrollHeight - 10;
+        const div = document.createElement('div');
+        div.innerHTML = buildWsFrameRow(frame);
+        // buildWsFrameRow returns a single <div> string; append its first child
+        while (div.firstChild) {
+            detailContent.appendChild(div.firstChild);
+        }
+        if (atBottom) {
+            detailContent.scrollTop = detailContent.scrollHeight;
+        }
+    }
+
+    function updateWsClosedBadge() {
+        const badge = detailContent.querySelector('.ws-status-badge');
+        if (badge) {
+            badge.className = 'ws-status-badge ws-closed-badge';
+            badge.textContent = 'Connection closed';
+        }
+    }
+
+    function buildWsFrameRow(frame) {
+        const isClient = frame.direction === 'ClientToServer';
+        const dirSym = isClient ? '\u2191' : '\u2193'; // ↑ ↓
+        const dirClass = isClient ? 'ws-frame-row client' : 'ws-frame-row server';
+        const opcode = frame.opcode || 'Unknown';
+        const payloadBytes = Array.isArray(frame.payload) ? frame.payload.length : 0;
+        const truncated = frame.truncated ? ' <span class="ws-truncated">[trunc]</span>' : '';
+        let preview = '';
+        if (frame.opcode === 'Text') {
+            const text = Array.isArray(frame.payload)
+                ? new TextDecoder().decode(new Uint8Array(frame.payload))
+                : '';
+            preview = escapeHtml(text.slice(0, 200));
+        } else if (Array.isArray(frame.payload)) {
+            preview = frame.payload.slice(0, 32).map(function(b) {
+                return b.toString(16).padStart(2, '0');
+            }).join(' ');
+        }
+        return '<div class="' + dirClass + '">' +
+            '<span class="ws-dir">' + dirSym + '</span>' +
+            '<span class="ws-op">' + escapeHtml(opcode.toLowerCase().slice(0, 4)) + '</span>' +
+            '<span class="ws-size">' + payloadBytes + 'B' + truncated + '</span>' +
+            '<span class="ws-payload">' + preview + '</span>' +
+            '</div>';
     }
 
     // ─── Helpers ─────────────────────────────────────────────────────────────
@@ -451,9 +592,14 @@
             tabs.forEach(function(t) { t.classList.remove('active'); });
             tab.classList.add('active');
             activeTab = tab.dataset.tab;
-            const filtered = getFiltered().filter(function(r) { return !r.pending; });
-            if (selectedIdx !== null && filtered[selectedIdx]) {
-                renderDetail(filtered[selectedIdx]);
+            if (activeTab === 'frames' && selectedWsConnId !== null) {
+                const flow = wsFlows.get(selectedWsConnId);
+                if (flow) renderWsFrameList(flow);
+            } else {
+                const filtered = getFiltered().filter(function(r) { return !r.pending && !r.ws; });
+                if (selectedIdx !== null && filtered[selectedIdx]) {
+                    renderDetail(filtered[selectedIdx]);
+                }
             }
         };
     });
@@ -461,16 +607,25 @@
     document.getElementById('close-detail').onclick = function() {
         detailPanel.classList.add('hidden');
         selectedIdx = null;
+        selectedWsConnId = null;
+        // Restore standard Request/Response tabs
+        document.getElementById('frames-tab').classList.add('hidden');
+        document.querySelector('[data-tab="response"]').classList.remove('hidden');
         renderTable();
     };
 
     clearBtn.onclick = function() {
         requests = [];
         pendingRequests.clear();
+        wsFlows.clear();
         selectedIdx = null;
+        selectedWsConnId = null;
         currentInterceptId = null;
         detailPanel.classList.add('hidden');
         interceptPanel.classList.add('hidden');
+        // Restore standard tabs
+        document.getElementById('frames-tab').classList.add('hidden');
+        document.querySelector('[data-tab="response"]').classList.remove('hidden');
         updateInterceptBtn();
         renderTable();
     };

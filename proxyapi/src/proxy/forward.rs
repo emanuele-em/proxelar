@@ -2,19 +2,23 @@ use std::net::SocketAddr;
 use std::sync::Arc;
 
 use bytes::Bytes;
+use futures_util::{SinkExt, StreamExt};
 use http::uri::{Authority, Scheme};
 use hyper::service::service_fn;
 use hyper::{Method, Request, Response, Uri};
 use hyper_util::rt::TokioIo;
 use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite};
 use tokio::net::TcpStream;
+use tokio::sync::mpsc;
 use tokio_rustls::TlsAcceptor;
+use tokio_tungstenite::{tungstenite::Message, WebSocketStream};
 
-use proxyapi_models::ProxiedRequest;
+use proxyapi_models::{ProxiedRequest, ProxiedResponse, WsDirection, WsFrame, WsOpcode};
 
 use crate::body::{self, ProxyBody};
 use crate::ca::{cert_server, CertificateAuthority, Ssl};
-use crate::handler::{collect_and_emit, collect_body, CapturingHandler};
+use crate::event::ProxyEvent;
+use crate::handler::{collect_and_emit, collect_body, now_millis, CapturingHandler};
 use crate::rewind::Rewind;
 use crate::{HttpContext, HttpHandler, RequestOrResponse};
 
@@ -26,6 +30,23 @@ const HTTP_GET_PREFIX: &[u8; 4] = b"GET ";
 const TLS_RECORD_HANDSHAKE: u8 = 0x16;
 /// TLS major version byte (SSLv3 / TLS 1.x).
 const TLS_VERSION_MAJOR: u8 = 0x03;
+/// Maximum payload size captured per WebSocket frame (100 MB, matches MAX_BODY_SIZE).
+const MAX_WS_FRAME_PAYLOAD: usize = 100 * 1024 * 1024;
+
+/// Returns true when the request carries WebSocket upgrade tokens.
+fn is_websocket_upgrade<B>(req: &Request<B>) -> bool {
+    req.headers()
+        .get(hyper::header::UPGRADE)
+        .and_then(|v| v.to_str().ok())
+        .map(|v| v.eq_ignore_ascii_case("websocket"))
+        .unwrap_or(false)
+        && req
+            .headers()
+            .get(hyper::header::CONNECTION)
+            .and_then(|v| v.to_str().ok())
+            .map(|v| v.to_ascii_lowercase().contains("upgrade"))
+            .unwrap_or(false)
+}
 
 pub async fn handle_connection(
     stream: TcpStream,
@@ -37,7 +58,7 @@ pub async fn handle_connection(
 ) {
     let io = TokioIo::new(stream);
 
-    let service = service_fn(move |req: Request<hyper::body::Incoming>| {
+    let service = service_fn(move |mut req: Request<hyper::body::Incoming>| {
         let mut handler = handler.clone();
         let ca = Arc::clone(&ca);
         let client = Arc::clone(&client);
@@ -62,16 +83,63 @@ pub async fn handle_connection(
                 return process_connect(req, handler, ca, client, remote_addr, listen_addr);
             }
 
+            // Extract WebSocket upgrade future BEFORE handle_request consumes req.
+            let is_ws = is_websocket_upgrade(&req);
+            let client_on_upgrade = if is_ws {
+                Some(hyper::upgrade::on(&mut req))
+            } else {
+                None
+            };
+
             let req = match handler.handle_request(&ctx, req).await {
                 RequestOrResponse::Request(req) => req,
                 RequestOrResponse::Response(res) => return Ok(res),
             };
 
             match client.request(normalize_request(req)).await {
-                Ok(res) => {
-                    let (parts, body) = res.into_parts();
-                    let body_bytes = collect_body(body).await;
-                    Ok(collect_and_emit(&mut handler, parts, body_bytes))
+                Ok(mut res) => {
+                    if is_ws && res.status() == hyper::StatusCode::SWITCHING_PROTOCOLS {
+                        let server_on_upgrade = hyper::upgrade::on(&mut res);
+                        let (parts, _body) = res.into_parts();
+
+                        let ws_response = ProxiedResponse::new(
+                            parts.status,
+                            parts.version,
+                            parts.headers.clone(),
+                            Bytes::new(),
+                            now_millis(),
+                        );
+
+                        let conn_id = handler
+                            .take_pending_id()
+                            .unwrap_or_else(crate::event::next_id);
+                        if let Some(captured_req) = handler.take_captured_request() {
+                            handler.send_event(ProxyEvent::WebSocketConnected {
+                                id: conn_id,
+                                request: Box::new(captured_req),
+                                response: Box::new(ws_response),
+                            });
+                        }
+
+                        if let Some(client_fut) = client_on_upgrade {
+                            let event_tx = handler.event_tx_clone();
+                            tokio::spawn(async move {
+                                pump_websocket_frames(
+                                    conn_id,
+                                    client_fut,
+                                    server_on_upgrade,
+                                    event_tx,
+                                )
+                                .await;
+                            });
+                        }
+
+                        Ok(Response::from_parts(parts, body::empty()))
+                    } else {
+                        let (parts, body) = res.into_parts();
+                        let body_bytes = collect_body(body).await;
+                        Ok(collect_and_emit(&mut handler, parts, body_bytes))
+                    }
                 }
                 Err(e) => {
                     tracing::error!("Client request error: {e}");
@@ -292,16 +360,63 @@ where
                 return Ok::<_, hyper::Error>(resp);
             }
 
+            // Extract WebSocket upgrade future BEFORE handle_request consumes req.
+            let is_ws = is_websocket_upgrade(&req);
+            let client_on_upgrade = if is_ws {
+                Some(hyper::upgrade::on(&mut req))
+            } else {
+                None
+            };
+
             let req = match handler.handle_request(&ctx, req).await {
                 RequestOrResponse::Request(req) => req,
                 RequestOrResponse::Response(res) => return Ok(res),
             };
 
             match client.request(normalize_request(req)).await {
-                Ok(res) => {
-                    let (parts, body) = res.into_parts();
-                    let body_bytes = collect_body(body).await;
-                    Ok(collect_and_emit(&mut handler, parts, body_bytes))
+                Ok(mut res) => {
+                    if is_ws && res.status() == hyper::StatusCode::SWITCHING_PROTOCOLS {
+                        let server_on_upgrade = hyper::upgrade::on(&mut res);
+                        let (parts, _body) = res.into_parts();
+
+                        let ws_response = ProxiedResponse::new(
+                            parts.status,
+                            parts.version,
+                            parts.headers.clone(),
+                            Bytes::new(),
+                            now_millis(),
+                        );
+
+                        let conn_id = handler
+                            .take_pending_id()
+                            .unwrap_or_else(crate::event::next_id);
+                        if let Some(captured_req) = handler.take_captured_request() {
+                            handler.send_event(ProxyEvent::WebSocketConnected {
+                                id: conn_id,
+                                request: Box::new(captured_req),
+                                response: Box::new(ws_response),
+                            });
+                        }
+
+                        if let Some(client_fut) = client_on_upgrade {
+                            let event_tx = handler.event_tx_clone();
+                            tokio::spawn(async move {
+                                pump_websocket_frames(
+                                    conn_id,
+                                    client_fut,
+                                    server_on_upgrade,
+                                    event_tx,
+                                )
+                                .await;
+                            });
+                        }
+
+                        Ok(Response::from_parts(parts, body::empty()))
+                    } else {
+                        let (parts, body) = res.into_parts();
+                        let body_bytes = collect_body(body).await;
+                        Ok(collect_and_emit(&mut handler, parts, body_bytes))
+                    }
                 }
                 Err(e) => {
                     tracing::error!("Client request error: {e}");
@@ -347,6 +462,96 @@ fn normalize_request(mut req: Request<ProxyBody>) -> Request<ProxyBody> {
 
     *req.version_mut() = hyper::Version::HTTP_11;
     req
+}
+
+/// Await both WebSocket upgrade futures, wrap the raw streams in tungstenite
+/// frame parsers, then relay frames between client and server while emitting
+/// [`ProxyEvent::WebSocketFrame`] events for each one.
+///
+/// Terminates when either side closes the connection or an error occurs,
+/// then emits [`ProxyEvent::WebSocketClosed`].
+async fn pump_websocket_frames(
+    conn_id: u64,
+    client_on_upgrade: hyper::upgrade::OnUpgrade,
+    server_on_upgrade: hyper::upgrade::OnUpgrade,
+    event_tx: mpsc::Sender<ProxyEvent>,
+) {
+    let (client_upgraded, server_upgraded) =
+        match tokio::try_join!(client_on_upgrade, server_on_upgrade) {
+            Ok(pair) => pair,
+            Err(e) => {
+                tracing::warn!("WebSocket upgrade failed for conn_id={conn_id}: {e}");
+                return;
+            }
+        };
+
+    // Proxy acts as server toward the client (expects masked frames, sends unmasked).
+    // Proxy acts as client toward the server (sends masked frames, receives unmasked).
+    let mut client_ws = WebSocketStream::from_raw_socket(
+        TokioIo::new(client_upgraded),
+        tokio_tungstenite::tungstenite::protocol::Role::Server,
+        None,
+    )
+    .await;
+    let mut server_ws = WebSocketStream::from_raw_socket(
+        TokioIo::new(server_upgraded),
+        tokio_tungstenite::tungstenite::protocol::Role::Client,
+        None,
+    )
+    .await;
+
+    loop {
+        tokio::select! {
+            msg = client_ws.next() => match msg {
+                Some(Ok(frame)) => {
+                    emit_ws_frame(&event_tx, conn_id, &frame, WsDirection::ClientToServer);
+                    if server_ws.send(frame).await.is_err() { break; }
+                }
+                Some(Err(e)) => {
+                    tracing::debug!("WS client error conn_id={conn_id}: {e}");
+                    break;
+                }
+                None => break,
+            },
+            msg = server_ws.next() => match msg {
+                Some(Ok(frame)) => {
+                    emit_ws_frame(&event_tx, conn_id, &frame, WsDirection::ServerToClient);
+                    if client_ws.send(frame).await.is_err() { break; }
+                }
+                Some(Err(e)) => {
+                    tracing::debug!("WS server error conn_id={conn_id}: {e}");
+                    break;
+                }
+                None => break,
+            },
+        }
+    }
+
+    let _ = event_tx.try_send(ProxyEvent::WebSocketClosed { conn_id });
+}
+
+/// Convert a tungstenite [`Message`] into a [`WsFrame`] event and send it.
+fn emit_ws_frame(
+    tx: &mpsc::Sender<ProxyEvent>,
+    conn_id: u64,
+    msg: &Message,
+    direction: WsDirection,
+) {
+    let time = now_millis();
+    let (opcode, raw): (WsOpcode, &[u8]) = match msg {
+        Message::Text(s) => (WsOpcode::Text, s.as_bytes()),
+        Message::Binary(b) => (WsOpcode::Binary, b.as_ref()),
+        Message::Ping(b) => (WsOpcode::Ping, b.as_ref()),
+        Message::Pong(b) => (WsOpcode::Pong, b.as_ref()),
+        Message::Close(_) => (WsOpcode::Close, b""),
+        Message::Frame(_) => (WsOpcode::Continuation, b""),
+    };
+    let truncated = raw.len() > MAX_WS_FRAME_PAYLOAD;
+    let payload = Bytes::copy_from_slice(&raw[..raw.len().min(MAX_WS_FRAME_PAYLOAD)]);
+    let _ = tx.try_send(ProxyEvent::WebSocketFrame {
+        conn_id,
+        frame: Box::new(WsFrame::new(direction, opcode, time, payload, truncated)),
+    });
 }
 
 /// Send a previously captured request back through the proxy pipeline.

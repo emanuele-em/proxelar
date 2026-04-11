@@ -1,4 +1,4 @@
-use proxyapi_models::{ProxiedRequest, ProxiedResponse};
+use proxyapi_models::{ProxiedRequest, ProxiedResponse, WsFrame};
 use serde::{Deserialize, Serialize};
 use std::sync::atomic::{AtomicU64, Ordering};
 
@@ -34,6 +34,26 @@ pub enum ProxyEvent {
     Error {
         /// Human-readable error description.
         message: String,
+    },
+    /// A WebSocket upgrade completed (101 Switching Protocols received).
+    ///
+    /// The `id` is shared with all subsequent [`WebSocketFrame`](Self::WebSocketFrame)
+    /// and [`WebSocketClosed`](Self::WebSocketClosed) events for this connection.
+    WebSocketConnected {
+        id: u64,
+        request: Box<ProxiedRequest>,
+        /// The 101 response — contains `Sec-WebSocket-Accept`, negotiated subprotocol, etc.
+        response: Box<ProxiedResponse>,
+    },
+    /// A single WebSocket frame was captured (either direction).
+    WebSocketFrame {
+        /// Matches the `id` of the [`WebSocketConnected`](Self::WebSocketConnected) event.
+        conn_id: u64,
+        frame: Box<WsFrame>,
+    },
+    /// The WebSocket connection closed (either side closed, or an error occurred).
+    WebSocketClosed {
+        conn_id: u64,
     },
 }
 

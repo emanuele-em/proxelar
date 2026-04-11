@@ -17,7 +17,7 @@ use crate::{HttpContext, HttpHandler, RequestOrResponse};
 /// captured event. The proxied traffic itself is unaffected.
 const MAX_BODY_SIZE: usize = 100 * 1024 * 1024;
 
-fn now_millis() -> i64 {
+pub(crate) fn now_millis() -> i64 {
     chrono::Local::now().timestamp_millis()
 }
 
@@ -162,6 +162,17 @@ impl CapturingHandler {
 
     pub(crate) fn take_captured_request(&mut self) -> Option<ProxiedRequest> {
         self.captured_request.take()
+    }
+
+    /// Take the pending flow ID so the WS path can claim it before
+    /// `collect_and_emit` would use it.
+    pub(crate) fn take_pending_id(&mut self) -> Option<u64> {
+        self.pending_id.take()
+    }
+
+    /// Clone the event sender for use in long-lived spawned tasks (e.g. WS frame pump).
+    pub(crate) fn event_tx_clone(&self) -> mpsc::Sender<ProxyEvent> {
+        self.event_tx.clone()
     }
 
     /// Run intercept logic for a replayed request and return it ready to forward.
