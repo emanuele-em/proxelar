@@ -39,7 +39,8 @@ Useful for debugging APIs, reverse engineering third-party services, testing mob
 - **HTTPS interception** — automatic CA generation and per-host certificate minting
 - **Forward & reverse proxy** — CONNECT tunneling or upstream URI rewriting
 - **Three interfaces** — terminal (stdout), interactive TUI (ratatui), web GUI (axum + WebSocket)
-- **Request filtering** — search and inspect request/response pairs in detail
+- **WebSocket inspection** — connections captured alongside HTTP traffic; browse frames by direction, opcode, and payload
+- **Column-scoped filtering** — `status:404`, `method:POST`, `host:github`, `path:/api`, `size:1KB` or plain text search
 - **Easy CA install** — visit `http://proxel.ar` through the proxy to download and install the root cert
 
 ---
@@ -132,12 +133,14 @@ proxelar --script examples/scripts/block_domain.lua  # with a Lua script
 | Key | Action |
 |-----|--------|
 | `j` / `k` / arrows | Navigate |
-| `Enter` | Toggle detail panel |
-| `Tab` | Switch Request / Response |
-| `/` | Filter |
+| `Enter` | Open detail panel; press again to focus and scroll |
+| `Tab` | Switch Request / Response / Frames tabs |
+| `/` | Filter (plain text or `column:value`) |
+| `r` | Replay selected request |
 | `Esc` | Close panel / clear filter |
 | `g` / `G` | Top / bottom |
 | `c` | Clear requests |
+| `?` | Keybinding help |
 | `q` / `Ctrl+C` | Quit |
 
 </details>
