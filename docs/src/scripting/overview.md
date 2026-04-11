@@ -31,29 +31,21 @@ Both functions are optional. If a function is not defined, traffic passes throug
 
 ## Request hook
 
-`on_request` receives a request table and can:
+`on_request` receives a request table and can return one of three things:
 
-1. **Modify and forward** — change headers, URL, method, or body, then return the request table
-2. **Short-circuit** — return a response table (with `status`, `headers`, `body`) to respond immediately without contacting the upstream server
-3. **Pass through** — return `nil` (or nothing) to forward the request unchanged
+- **The request table** — forward it (modified or not)
+- **A response table** (with a `status` field) — short-circuit and return that response directly, without contacting the upstream server
+- **`nil`** (or no return) — pass through unchanged
 
 ```lua
--- Modify and forward
 function on_request(request)
-    request.headers["X-Custom"] = "value"
-    return request
-end
-
--- Short-circuit with a response
-function on_request(request)
+    -- Pass through logging only
     if string.find(request.url, "blocked%.com") then
-        return { status = 403, headers = {}, body = "Blocked" }
+        return { status = 403, headers = {}, body = "Blocked" }  -- short-circuit
     end
-end
 
--- Pass through (implicit nil return)
-function on_request(request)
-    print(request.method .. " " .. request.url)
+    request.headers["X-Custom"] = "value"
+    return request  -- forward modified request
 end
 ```
 
