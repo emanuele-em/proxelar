@@ -1,3 +1,6 @@
+use std::collections::VecDeque;
+
+use proxyapi_models::{WsDirection, WsFrame, WsOpcode};
 use ratatui::{
     layout::{Constraint, Direction, Layout, Rect},
     style::{Color, Modifier, Style},
@@ -114,6 +117,29 @@ pub fn draw(f: &mut Frame, state: &mut AppState) {
                 Cell::from("-"),
                 Cell::from("-"),
             ]),
+            FlowEntry::WebSocket {
+                id,
+                request,
+                frames,
+                closed,
+                ..
+            } => {
+                let uri = request.uri();
+                let host = uri.host().unwrap_or("-");
+                let path = uri.path();
+                // WS✓ (closed) or WS⇄ (live)
+                let status_str = if *closed { "WS\u{2713}" } else { "WS\u{21c4}" };
+                let frame_count = format!("{}fr", frames.len());
+
+                Row::new(vec![
+                    Cell::from(id.to_string()),
+                    Cell::from("GET").style(Style::default().fg(Color::Green)),
+                    Cell::from(status_str).style(Style::default().fg(Color::Cyan)),
+                    Cell::from(host),
+                    Cell::from(path),
+                    Cell::from(frame_count).style(Style::default().fg(Color::Cyan)),
+                ])
+            }
         })
         .collect();
 
@@ -196,10 +222,12 @@ fn draw_status_bar(f: &mut Frame, state: &AppState, area: Rect, pending_count: u
         } else {
             " f: forward  |  e: edit  |  d: drop  |  Esc: discard edits ".to_string()
         }
+    } else if state.detail_focused {
+        " j/k: scroll  Tab: switch tab  Enter/Esc: back to table ".to_string()
     } else if let Some(ref filter) = state.filter {
-        format!(" Filter: {filter}  |  i:intercept  f:fwd  d:drop  e:edit  r:replay  q:quit ")
+        format!(" Filter: {filter}  |  q:quit  i:intercept  r:replay  /:filter  j/k:nav  Enter:open/focus  Tab:req/res  g/G:top/bot  c:clear  ?:help ")
     } else {
-        " q:quit  i:intercept  r:replay  /:filter  j/k:nav  Enter:details  Tab:req/res  g/G:top/bot  c:clear  ?:help "
+        " q:quit  i:intercept  r:replay  /:filter  j/k:nav  Enter:open/focus  Tab:req/res  g/G:top/bot  c:clear  ?:help "
             .to_string()
     };
     spans.push(Span::raw(hint));
@@ -211,6 +239,12 @@ fn draw_status_bar(f: &mut Frame, state: &AppState, area: Rect, pending_count: u
 
 fn draw_detail(f: &mut Frame, state: &AppState, area: Rect, filtered: &[(usize, &FlowEntry)]) {
     let selected = state.table_state.selected().unwrap_or(0);
+    let focused = state.detail_focused;
+    let border_style = if focused {
+        Style::default().fg(Color::Cyan)
+    } else {
+        Style::default()
+    };
 
     if let Some((_, entry)) = filtered.get(selected) {
         match entry {
@@ -228,7 +262,13 @@ fn draw_detail(f: &mut Frame, state: &AppState, area: Rect, filtered: &[(usize, 
                 };
 
                 let detail = Paragraph::new(content)
-                    .block(Block::default().borders(Borders::ALL).title(tab_title))
+                    .block(
+                        Block::default()
+                            .borders(Borders::ALL)
+                            .title(tab_title)
+                            .border_style(border_style),
+                    )
+                    .scroll((state.detail_scroll as u16, 0))
                     .wrap(Wrap { trim: false });
 
                 f.render_widget(detail, area);
@@ -239,6 +279,45 @@ fn draw_detail(f: &mut Frame, state: &AppState, area: Rect, filtered: &[(usize, 
             FlowEntry::Error { message } => {
                 let detail = Paragraph::new(message.as_str())
                     .block(Block::default().borders(Borders::ALL).title(" Error "))
+                    .wrap(Wrap { trim: false });
+                f.render_widget(detail, area);
+            }
+            FlowEntry::WebSocket {
+                request,
+                frames,
+                closed,
+                ..
+            } => {
+                // "Response" tab slot is repurposed as "Frames" for WebSocket entries.
+                let tab_title = match state.detail_tab {
+                    DetailTab::Request => " [Request] Frames ",
+                    DetailTab::Response => " Request [Frames] ",
+                };
+
+                // In follow mode, pin scroll to the tail of the frame list.
+                let visible_height = area.height.saturating_sub(2) as usize;
+                let effective_scroll = if state.frames_follow {
+                    frames.len().saturating_sub(visible_height)
+                } else {
+                    state.detail_scroll
+                };
+
+                let (content, para_scroll) = match state.detail_tab {
+                    DetailTab::Request => (build_request_lines(request), state.detail_scroll as u16),
+                    DetailTab::Response => (
+                        build_frames_lines(frames, *closed, effective_scroll, state.frames_follow),
+                        0, // frames already skipped inside build_frames_lines
+                    ),
+                };
+
+                let detail = Paragraph::new(content)
+                    .block(
+                        Block::default()
+                            .borders(Borders::ALL)
+                            .title(tab_title)
+                            .border_style(border_style),
+                    )
+                    .scroll((para_scroll, 0))
                     .wrap(Wrap { trim: false });
                 f.render_widget(detail, area);
             }
@@ -442,6 +521,76 @@ fn build_response_lines(response: &proxyapi_models::ProxiedResponse) -> Vec<Line
     lines
 }
 
+fn build_frames_lines(
+    frames: &VecDeque<WsFrame>,
+    closed: bool,
+    scroll: usize,
+    follow: bool,
+) -> Vec<Line<'static>> {
+    if frames.is_empty() {
+        return vec![Line::from(if closed {
+            "No frames captured (connection closed)"
+        } else {
+            "Waiting for frames..."
+        })];
+    }
+
+    let mut lines: Vec<Line<'static>> = frames
+        .iter()
+        .skip(scroll)
+        .map(|f| {
+            let (dir_sym, dir_color) = match f.direction {
+                WsDirection::ClientToServer => ("\u{2191}", Color::Yellow), // ↑
+                WsDirection::ServerToClient => ("\u{2193}", Color::Cyan),   // ↓
+            };
+            let op = match f.opcode {
+                WsOpcode::Text => "txt ",
+                WsOpcode::Binary => "bin ",
+                WsOpcode::Ping => "ping",
+                WsOpcode::Pong => "pong",
+                WsOpcode::Close => "clse",
+                WsOpcode::Continuation => "cont",
+            };
+            let payload_preview: String = if f.opcode == WsOpcode::Text {
+                String::from_utf8_lossy(&f.payload)
+                    .chars()
+                    .take(120)
+                    .collect()
+            } else {
+                f.payload
+                    .iter()
+                    .take(32)
+                    .map(|b| format!("{b:02x}"))
+                    .collect::<Vec<_>>()
+                    .join(" ")
+            };
+            let truncated = if f.truncated { " [trunc]" } else { "" };
+
+            Line::from(vec![
+                Span::styled(dir_sym, Style::default().fg(dir_color)),
+                Span::raw(" "),
+                Span::styled(op, Style::default().fg(Color::DarkGray)),
+                Span::raw(format!(" {}B{} ", f.payload.len(), truncated)),
+                Span::raw(payload_preview),
+            ])
+        })
+        .collect();
+
+    if closed {
+        lines.push(Line::from(""));
+        lines.push(Line::from(Span::styled(
+            "\u{2500}\u{2500} Connection closed \u{2500}\u{2500}",
+            Style::default().fg(Color::Red),
+        )));
+    } else if follow {
+        lines.push(Line::from(Span::styled(
+            "[FOLLOW]",
+            Style::default().fg(Color::DarkGray),
+        )));
+    }
+    lines
+}
+
 fn method_color(method: &str) -> Color {
     match method {
         "GET" => Color::Green,
@@ -495,8 +644,10 @@ fn draw_help_modal(f: &mut Frame) {
         ("G", "Jump to last row"),
         ("", ""),
         ("--- Actions ---", ""),
-        ("Enter", "Toggle detail panel"),
-        ("Tab", "Switch Request / Response tab"),
+        ("Enter", "Open detail panel / focus it"),
+        ("Enter / Esc (focused)", "Return focus to table"),
+        ("j / k (focused)", "Scroll detail content"),
+        ("Tab", "Switch Request / Response (or Frames) tab"),
         ("r", "Replay selected request"),
         ("c", "Clear all entries"),
         ("q / Q  Ctrl+C", "Quit"),
@@ -505,6 +656,9 @@ fn draw_help_modal(f: &mut Frame) {
         ("/", "Enter filter mode"),
         ("Enter", "Apply filter"),
         ("Esc", "Cancel filter / close detail"),
+        ("column:value", "Filter by column (e.g. status:200)"),
+        ("method / status / host", "Recognised column names"),
+        ("path / size", "Recognised column names (cont.)"),
         ("", ""),
         ("--- Intercept ---", ""),
         ("i", "Toggle intercept ON / OFF"),
