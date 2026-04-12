@@ -335,17 +335,26 @@
             if (r.ws) {
                 const flow = r.wsFlow;
                 const uri = parseUri(r.request.uri || '');
+                const proto = getProto(r.request.uri || '', true);
+                const resp = flow.response;
                 const statusStr = flow.closed
-                    ? '<span class="status-ws-closed">WS \u2713</span>'
-                    : '<span class="status-ws-live">WS \u21c4</span>';
+                    ? '<span class="status-ws-closed">101 \u2713</span>'
+                    : '<span class="status-ws-live">101 \u21c4</span>';
+                const ct = getContentType(resp ? resp.headers : null);
+                const frameSuffix = flow.closed ? ' \u2713' : ' \u21c4';
+                const frameStr = flow.frames.length + 'fr' + frameSuffix;
+                const duration = formatDuration(r.request.time, resp ? resp.time : null);
                 if (selectedWsConnId === r.id) tr.className = 'selected';
                 tr.innerHTML =
-                    '<td>' + r.id + '</td>' +
+                    '<td>' + formatTime(r.request.time) + '</td>' +
+                    '<td class="' + getProtoClass(proto) + '">' + proto + '</td>' +
                     '<td class="method-get">GET</td>' +
-                    '<td>' + statusStr + '</td>' +
                     '<td>' + escapeHtml(uri.host) + '</td>' +
                     '<td>' + escapeHtml(uri.path) + '</td>' +
-                    '<td class="status-ws-live">' + flow.frames.length + ' fr</td>';
+                    '<td>' + statusStr + '</td>' +
+                    '<td>' + escapeHtml(ct) + '</td>' +
+                    '<td>' + frameStr + '</td>' +
+                    '<td>' + duration + '</td>';
                 tr.onclick = (function(connId, flowRef) {
                     return function() {
                         selectedIdx = null;
@@ -357,12 +366,16 @@
             } else if (r.pending) {
                 tr.className = 'pending';
                 const uri = parseUri(r.request.uri || '');
+                const proto = getProto(r.request.uri || '', false);
                 tr.innerHTML =
-                    '<td>\u23f8 ' + r.id + '</td>' +
+                    '<td>' + formatTime(r.request.time) + '</td>' +
+                    '<td class="' + getProtoClass(proto) + '">' + proto + '</td>' +
                     '<td class="' + getMethodClass(r.request.method) + '">' + escapeHtml(r.request.method) + '</td>' +
-                    '<td class="status-pending">\u00b7\u00b7\u00b7</td>' +
                     '<td>' + escapeHtml(uri.host) + '</td>' +
                     '<td>' + escapeHtml(uri.path) + '</td>' +
+                    '<td class="status-pending">\u00b7\u00b7\u00b7</td>' +
+                    '<td>-</td>' +
+                    '<td>-</td>' +
                     '<td>-</td>';
                 tr.onclick = function() {
                     openInterceptEditor(r.id, r.request);
@@ -370,16 +383,22 @@
             } else {
                 if (i === selectedIdx) tr.className = 'selected';
                 const uri = parseUri(r.request.uri || '');
+                const proto = getProto(r.request.uri || '', false);
                 const bodyBytes = bodySize(r.response.body);
+                const ct = getContentType(r.response.headers);
+                const duration = formatDuration(r.request.time, r.response.time);
                 tr.innerHTML =
-                    '<td>' + r.id + '</td>' +
+                    '<td>' + formatTime(r.request.time) + '</td>' +
+                    '<td class="' + getProtoClass(proto) + '">' + proto + '</td>' +
                     '<td class="' + getMethodClass(r.request.method) + '">' + escapeHtml(r.request.method) + '</td>' +
-                    '<td class="' + getStatusClass(r.response.status) + '">' + r.response.status + '</td>' +
                     '<td>' + escapeHtml(uri.host) + '</td>' +
                     '<td>' + escapeHtml(uri.path) + '</td>' +
+                    '<td class="' + getStatusClass(r.response.status) + '">' + r.response.status + '</td>' +
+                    '<td>' + escapeHtml(ct) + '</td>' +
                     '<td class="td-with-action">' + formatSize(bodyBytes) +
                         '<button class="btn-row-replay" title="Replay">&#8635; Replay</button>' +
-                    '</td>';
+                    '</td>' +
+                    '<td>' + duration + '</td>';
                 tr.querySelector('.btn-row-replay').onclick = (function(row) {
                     return function(e) {
                         e.stopPropagation();
@@ -525,6 +544,45 @@
         if (bytes < 1024) return bytes + 'B';
         if (bytes < 1024 * 1024) return (bytes / 1024).toFixed(1) + 'KB';
         return (bytes / (1024 * 1024)).toFixed(1) + 'MB';
+    }
+
+    function formatTime(ms) {
+        if (!ms) return '-';
+        const d = new Date(ms);
+        const hh = String(d.getHours()).padStart(2, '0');
+        const mm = String(d.getMinutes()).padStart(2, '0');
+        const ss = String(d.getSeconds()).padStart(2, '0');
+        return hh + ':' + mm + ':' + ss;
+    }
+
+    function formatDuration(requestTime, responseTime) {
+        if (!requestTime || !responseTime) return '-';
+        const ms = responseTime - requestTime;
+        if (ms < 0) return '-';
+        if (ms >= 1000) return (ms / 1000).toFixed(1) + 's';
+        return ms + 'ms';
+    }
+
+    function getProto(uriStr, isWs) {
+        try {
+            const url = new URL(uriStr);
+            const tls = (url.protocol === 'https:' || url.protocol === 'wss:');
+            if (isWs) return tls ? 'WSS' : 'WS';
+            return tls ? 'HTTPS' : 'HTTP';
+        } catch(e) {
+            return isWs ? 'WSS' : 'HTTPS';
+        }
+    }
+
+    function getProtoClass(proto) {
+        return 'proto-' + proto.toLowerCase();
+    }
+
+    function getContentType(headers) {
+        if (!headers) return '[no content]';
+        const ct = headers['content-type'];
+        if (!ct) return '[no content]';
+        return ct.split(';')[0].trim();
     }
 
     function getMethodClass(method) {

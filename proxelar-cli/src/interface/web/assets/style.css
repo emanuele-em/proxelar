@@ -136,6 +136,11 @@ tr.selected { background: var(--highlight); }
 
 tr:hover .btn-row-replay { opacity: 1; }
 
+.proto-https { color: var(--get); font-weight: 700; }
+.proto-http  { color: var(--post); font-weight: 600; }
+.proto-wss   { color: var(--status-3xx); font-weight: 700; }
+.proto-ws    { color: var(--patch); font-weight: 600; }
+
 .method-get { color: var(--get); font-weight: 600; }
 .method-post { color: var(--post); font-weight: 600; }
 .method-put { color: var(--put); font-weight: 600; }

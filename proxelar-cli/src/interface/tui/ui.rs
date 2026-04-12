@@ -1,5 +1,7 @@
 use std::collections::VecDeque;
 
+use chrono::{Local, TimeZone};
+use http::{HeaderMap, Uri};
 use proxyapi_models::{WsDirection, WsFrame, WsOpcode};
 use ratatui::{
     layout::{Constraint, Direction, Layout, Rect},
@@ -48,12 +50,15 @@ pub fn draw(f: &mut Frame, state: &mut AppState) {
 
     // Request table
     let header = Row::new(vec![
-        Cell::from("#"),
+        Cell::from("Time"),
+        Cell::from("Proto"),
         Cell::from("Method"),
-        Cell::from("Status"),
         Cell::from("Host"),
         Cell::from("Path"),
+        Cell::from("Status"),
+        Cell::from("Type"),
         Cell::from("Size"),
+        Cell::from("Duration"),
     ])
     .style(
         Style::default()
@@ -65,79 +70,97 @@ pub fn draw(f: &mut Frame, state: &mut AppState) {
         .iter()
         .map(|(_idx, entry)| match entry {
             FlowEntry::Complete {
-                id,
                 request,
                 response,
+                ..
             } => {
                 let method = request.method().as_str();
                 let status = response.status().as_u16();
                 let uri = request.uri();
                 let host = uri.host().unwrap_or("-");
-                let path = uri.path();
+                let path = path_and_query(uri);
                 let size = format_size(response.body().len());
-
-                let method_color = method_color(method);
-                let status_color = status_color(status);
+                let time_str = format_time(request.time());
+                let proto = proto_from_uri(uri, false);
+                let content_type = abbrev_content_type(response.headers());
+                let duration = format_duration(response.time() - request.time());
 
                 Row::new(vec![
-                    Cell::from(id.to_string()),
-                    Cell::from(method).style(Style::default().fg(method_color)),
-                    Cell::from(status.to_string()).style(Style::default().fg(status_color)),
+                    Cell::from(time_str),
+                    Cell::from(proto).style(Style::default().fg(proto_color(proto))),
+                    Cell::from(method).style(Style::default().fg(method_color(method))),
                     Cell::from(host),
                     Cell::from(path),
+                    Cell::from(status.to_string()).style(Style::default().fg(status_color(status))),
+                    Cell::from(content_type),
                     Cell::from(size),
+                    Cell::from(duration),
                 ])
             }
-            FlowEntry::Pending { id, request } => {
+            FlowEntry::Pending { request, .. } => {
                 let method = request.method().as_str();
                 let uri = request.uri();
                 let host = uri.host().unwrap_or("-");
-                let path = uri.path();
-                let id_str = format!("\u{23f8}{id}"); // ⏸ prefix
+                let path = path_and_query(uri);
+                let time_str = format_time(request.time());
+                let proto = proto_from_uri(uri, false);
 
                 Row::new(vec![
-                    Cell::from(id_str).style(Style::default().fg(Color::Yellow)),
+                    Cell::from(time_str).style(Style::default().fg(Color::Yellow)),
+                    Cell::from(proto).style(Style::default().fg(Color::Yellow)),
                     Cell::from(method).style(
                         Style::default()
                             .fg(Color::Yellow)
                             .add_modifier(Modifier::BOLD),
                     ),
-                    Cell::from("\u{00b7}\u{00b7}\u{00b7}")
-                        .style(Style::default().fg(Color::Yellow)), // ···
                     Cell::from(host).style(Style::default().fg(Color::Yellow)),
                     Cell::from(path).style(Style::default().fg(Color::Yellow)),
+                    Cell::from("\u{00b7}\u{00b7}\u{00b7}")
+                        .style(Style::default().fg(Color::Yellow)),
+                    Cell::from("-").style(Style::default().fg(Color::Yellow)),
+                    Cell::from("-").style(Style::default().fg(Color::Yellow)),
                     Cell::from("-").style(Style::default().fg(Color::Yellow)),
                 ])
             }
             FlowEntry::Error { message } => Row::new(vec![
-                Cell::from(_idx.to_string()),
-                Cell::from("ERR").style(Style::default().fg(Color::Red)),
                 Cell::from("-"),
+                Cell::from("-"),
+                Cell::from("ERR").style(Style::default().fg(Color::Red)),
                 Cell::from(message.as_str()),
+                Cell::from("-"),
+                Cell::from("-"),
+                Cell::from("-"),
                 Cell::from("-"),
                 Cell::from("-"),
             ]),
             FlowEntry::WebSocket {
-                id,
                 request,
+                _response: ws_response,
                 frames,
                 closed,
                 ..
             } => {
                 let uri = request.uri();
                 let host = uri.host().unwrap_or("-");
-                let path = uri.path();
-                // WS✓ (closed) or WS⇄ (live)
-                let status_str = if *closed { "WS\u{2713}" } else { "WS\u{21c4}" };
-                let frame_count = format!("{}fr", frames.len());
+                let path = path_and_query(uri);
+                let time_str = format_time(request.time());
+                let proto = proto_from_uri(uri, true);
+                let status = ws_response.status().as_u16();
+                let content_type = abbrev_content_type(ws_response.headers());
+                let ws_suffix = if *closed { "\u{2713}" } else { "\u{21c4}" };
+                let frame_str = format!("{}fr{ws_suffix}", frames.len());
+                let duration = format_duration(ws_response.time() - request.time());
 
                 Row::new(vec![
-                    Cell::from(id.to_string()),
+                    Cell::from(time_str),
+                    Cell::from(proto).style(Style::default().fg(proto_color(proto))),
                     Cell::from("GET").style(Style::default().fg(Color::Green)),
-                    Cell::from(status_str).style(Style::default().fg(Color::Cyan)),
                     Cell::from(host),
                     Cell::from(path),
-                    Cell::from(frame_count).style(Style::default().fg(Color::Cyan)),
+                    Cell::from(status.to_string()).style(Style::default().fg(status_color(status))),
+                    Cell::from(content_type),
+                    Cell::from(frame_str).style(Style::default().fg(Color::Cyan)),
+                    Cell::from(duration),
                 ])
             }
         })
@@ -146,11 +169,14 @@ pub fn draw(f: &mut Frame, state: &mut AppState) {
     let table = Table::new(
         rows,
         [
-            Constraint::Length(6),
+            Constraint::Length(8),
+            Constraint::Length(5),
             Constraint::Length(7),
-            Constraint::Length(6),
+            Constraint::Percentage(18),
             Constraint::Percentage(30),
-            Constraint::Percentage(40),
+            Constraint::Length(6),
+            Constraint::Percentage(18),
+            Constraint::Length(7),
             Constraint::Length(8),
         ],
     )
@@ -591,6 +617,59 @@ fn build_frames_lines(
         )));
     }
     lines
+}
+
+fn format_time(millis: i64) -> String {
+    Local
+        .timestamp_millis_opt(millis)
+        .single()
+        .map(|dt| dt.format("%H:%M:%S").to_string())
+        .unwrap_or_else(|| "-".to_string())
+}
+
+fn path_and_query(uri: &Uri) -> String {
+    uri.path_and_query()
+        .map(|pq| pq.as_str().to_owned())
+        .unwrap_or_else(|| uri.path().to_owned())
+}
+
+fn proto_from_uri(uri: &Uri, is_ws: bool) -> &'static str {
+    let tls = matches!(uri.scheme_str(), Some("https") | Some("wss"));
+    match (is_ws, tls) {
+        (true, true) => "WSS",
+        (true, false) => "WS",
+        (false, true) => "HTTPS",
+        (false, false) => "HTTP",
+    }
+}
+
+fn abbrev_content_type(headers: &HeaderMap) -> String {
+    headers
+        .get(http::header::CONTENT_TYPE)
+        .and_then(|v| v.to_str().ok())
+        .map(|s| s.split(';').next().unwrap_or(s).trim().to_owned())
+        .unwrap_or_else(|| "[no content]".to_owned())
+}
+
+fn format_duration(ms: i64) -> String {
+    if ms < 0 {
+        return "-".to_string();
+    }
+    if ms >= 1000 {
+        format!("{:.1}s", ms as f64 / 1000.0)
+    } else {
+        format!("{ms}ms")
+    }
+}
+
+fn proto_color(proto: &str) -> Color {
+    match proto {
+        "HTTPS" => Color::Green,
+        "WSS" => Color::Cyan,
+        "HTTP" => Color::White,
+        "WS" => Color::Yellow,
+        _ => Color::White,
+    }
 }
 
 fn method_color(method: &str) -> Color {
