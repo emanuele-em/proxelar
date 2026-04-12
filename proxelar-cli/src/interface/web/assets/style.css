@@ -142,22 +142,66 @@ tr.selected { background: var(--highlight); }
 
 tr:hover .btn-row-replay { opacity: 1; }
 
-.proto-https { color: var(--get); font-weight: 700; }
-.proto-http  { color: var(--post); font-weight: 600; }
-.proto-wss   { color: var(--status-3xx); font-weight: 700; }
-.proto-ws    { color: var(--patch); font-weight: 600; }
+/* ── Protocol column ─────────────────────────────────────────────────── */
 
-.method-get { color: var(--get); font-weight: 600; }
-.method-post { color: var(--post); font-weight: 600; }
-.method-put { color: var(--put); font-weight: 600; }
-.method-delete { color: var(--delete); font-weight: 600; }
-.method-patch { color: var(--patch); font-weight: 600; }
+[data-proto="https"] { color: #69db7c; font-weight: 700; }
+[data-proto="http"]  { color: #fcc419; font-weight: 600; }
+[data-proto="wss"]   { color: #66d9e8; font-weight: 700; }
+[data-proto="ws"]    { color: #e599f7; font-weight: 600; }
 
-.status-2xx { color: var(--status-2xx); }
-.status-3xx { color: var(--status-3xx); }
-.status-4xx { color: var(--status-4xx); }
-.status-5xx { color: var(--status-5xx); }
-.status-pending { color: #f59e0b; font-weight: 600; }
+/* ── Method column ───────────────────────────────────────────────────── */
+
+[data-method="get"]     { color: #69db7c; font-weight: 700; }
+[data-method="post"]    { color: #fcc419; font-weight: 700; }
+[data-method="put"]     { color: #74c0fc; font-weight: 700; }
+[data-method="delete"]  { color: #ff6b6b; font-weight: 700; }
+[data-method="patch"]   { color: #e599f7; font-weight: 700; }
+[data-method="head"],
+[data-method="options"] { color: #868e96; }
+
+/* ── Status column ───────────────────────────────────────────────────── */
+
+[data-status="1xx"]     { color: #868e96; }
+[data-status="2xx"]     { color: #69db7c; }
+[data-status="3xx"]     { color: #66d9e8; }
+[data-status="4xx"]     { color: #fcc419; }
+[data-status="5xx"]     { color: #ff4444; font-weight: 700; }
+[data-status="pending"] { color: #f59e0b; font-weight: 600; }
+
+/* ── Type (content-type) column ──────────────────────────────────────── */
+
+[data-type="json"]  { color: #66d9e8; }
+[data-type="html"]  { color: #ffd43b; }
+[data-type="js"]    { color: #74c0fc; }
+[data-type="css"]   { color: #e599f7; }
+[data-type="text"]  { color: #868e96; }
+[data-type="image"] { color: #cc5de8; }
+[data-type="xml"]   { color: #63e6be; }
+[data-type="none"]  { color: #495057; }
+
+/* ── Size column ─────────────────────────────────────────────────────── */
+
+[data-size="zero"]   { color: #495057; }
+[data-size="tiny"]   { color: #868e96; }
+[data-size="small"]  { color: #ced4da; }
+[data-size="medium"] { color: #ffd43b; }
+[data-size="large"]  { color: #fcc419; }
+[data-size="huge"]   { color: #ff6b6b; }
+
+/* ── Duration column ─────────────────────────────────────────────────── */
+
+[data-dur="fast"]  { color: #69db7c; }
+[data-dur="ok"]    { color: #a9e34b; }
+[data-dur="slow"]  { color: #ffd43b; }
+[data-dur="vslow"] { color: #ff922b; }
+[data-dur="dead"]  { color: #ff4444; font-weight: 700; }
+[data-dur="none"]  { color: #495057; }
+
+/* ── Column width hints ──────────────────────────────────────────────── */
+
+.col-time { white-space: nowrap; }
+.col-path { max-width: 280px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.col-type { max-width: 180px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 
 /* ── Intercept toggle button ─────────────────────────────────────────── */
 

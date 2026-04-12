@@ -374,26 +374,24 @@
             if (r.ws) {
                 const flow = r.wsFlow;
                 const uri = parseUri(r.request.uri || '');
-                const proto = getProto(r.request.uri || '', true);
+                const proto = getProto(r.request.uri || '', true).toLowerCase();
                 const resp = flow.response;
-                const statusStr = flow.closed
-                    ? '<span class="status-ws-closed">101 \u2713</span>'
-                    : '<span class="status-ws-live">101 \u21c4</span>';
+                const status = resp ? resp.status : 101;
                 const ct = getContentType(resp ? resp.headers : null);
                 const frameSuffix = flow.closed ? ' \u2713' : ' \u21c4';
                 const frameStr = flow.frames.length + 'fr' + frameSuffix;
                 const duration = formatDuration(r.request.time, resp ? resp.time : null);
                 if (selectedWsConnId === r.id) tr.className = 'selected';
                 tr.innerHTML =
-                    '<td>' + formatTime(r.request.time) + '</td>' +
-                    '<td class="' + getProtoClass(proto) + '">' + proto + '</td>' +
-                    '<td class="method-get">GET</td>' +
+                    '<td class="col-time">' + formatTime(r.request.time) + '</td>' +
+                    '<td data-proto="' + proto + '">' + proto.toUpperCase() + '</td>' +
+                    '<td data-method="get">GET</td>' +
                     '<td>' + escapeHtml(uri.host) + '</td>' +
-                    '<td>' + escapeHtml(uri.path) + '</td>' +
-                    '<td>' + statusStr + '</td>' +
-                    '<td>' + escapeHtml(ct) + '</td>' +
-                    '<td>' + frameStr + '</td>' +
-                    '<td>' + duration + '</td>';
+                    '<td class="col-path">' + escapeHtml(uri.path) + '</td>' +
+                    '<td data-status="' + statusCategory(status) + '">' + status + '</td>' +
+                    '<td class="col-type" data-type="' + typeCategory(ct) + '">' + escapeHtml(ct) + '</td>' +
+                    '<td data-proto="' + proto + '">' + frameStr + '</td>' +
+                    '<td data-dur="' + durationCategory(r.request.time, resp ? resp.time : null) + '">' + duration + '</td>';
                 tr.onclick = (function(connId, flowRef) {
                     return function() {
                         selectedIdx = null;
@@ -405,39 +403,41 @@
             } else if (r.pending) {
                 tr.className = 'pending';
                 const uri = parseUri(r.request.uri || '');
-                const proto = getProto(r.request.uri || '', false);
+                const proto = getProto(r.request.uri || '', false).toLowerCase();
+                const method = (r.request.method || '').toLowerCase();
                 tr.innerHTML =
-                    '<td>' + formatTime(r.request.time) + '</td>' +
-                    '<td class="' + getProtoClass(proto) + '">' + proto + '</td>' +
-                    '<td class="' + getMethodClass(r.request.method) + '">' + escapeHtml(r.request.method) + '</td>' +
+                    '<td class="col-time">' + formatTime(r.request.time) + '</td>' +
+                    '<td data-proto="' + proto + '">' + proto.toUpperCase() + '</td>' +
+                    '<td data-method="' + method + '">' + escapeHtml(r.request.method) + '</td>' +
                     '<td>' + escapeHtml(uri.host) + '</td>' +
-                    '<td>' + escapeHtml(uri.path) + '</td>' +
-                    '<td class="status-pending">\u00b7\u00b7\u00b7</td>' +
-                    '<td>-</td>' +
-                    '<td>-</td>' +
-                    '<td>-</td>';
+                    '<td class="col-path">' + escapeHtml(uri.path) + '</td>' +
+                    '<td data-status="pending">\u00b7\u00b7\u00b7</td>' +
+                    '<td data-type="none">-</td>' +
+                    '<td data-size="zero">-</td>' +
+                    '<td data-dur="none">-</td>';
                 tr.onclick = function() {
                     openInterceptEditor(r.id, r.request);
                 };
             } else {
                 if (i === selectedIdx) tr.className = 'selected';
                 const uri = parseUri(r.request.uri || '');
-                const proto = getProto(r.request.uri || '', false);
+                const proto = getProto(r.request.uri || '', false).toLowerCase();
+                const method = (r.request.method || '').toLowerCase();
                 const bodyBytes = bodySize(r.response.body);
                 const ct = getContentType(r.response.headers);
                 const duration = formatDuration(r.request.time, r.response.time);
                 tr.innerHTML =
-                    '<td>' + formatTime(r.request.time) + '</td>' +
-                    '<td class="' + getProtoClass(proto) + '">' + proto + '</td>' +
-                    '<td class="' + getMethodClass(r.request.method) + '">' + escapeHtml(r.request.method) + '</td>' +
+                    '<td class="col-time">' + formatTime(r.request.time) + '</td>' +
+                    '<td data-proto="' + proto + '">' + proto.toUpperCase() + '</td>' +
+                    '<td data-method="' + method + '">' + escapeHtml(r.request.method) + '</td>' +
                     '<td>' + escapeHtml(uri.host) + '</td>' +
-                    '<td>' + escapeHtml(uri.path) + '</td>' +
-                    '<td class="' + getStatusClass(r.response.status) + '">' + r.response.status + '</td>' +
-                    '<td>' + escapeHtml(ct) + '</td>' +
-                    '<td class="td-with-action">' + formatSize(bodyBytes) +
+                    '<td class="col-path">' + escapeHtml(uri.path) + '</td>' +
+                    '<td data-status="' + statusCategory(r.response.status) + '">' + r.response.status + '</td>' +
+                    '<td class="col-type" data-type="' + typeCategory(ct) + '">' + escapeHtml(ct) + '</td>' +
+                    '<td class="td-with-action" data-size="' + sizeCategory(bodyBytes) + '">' + formatSize(bodyBytes) +
                         '<button class="btn-row-replay" title="Replay">&#8635; Replay</button>' +
                     '</td>' +
-                    '<td>' + duration + '</td>';
+                    '<td data-dur="' + durationCategory(r.request.time, r.response.time) + '">' + duration + '</td>';
                 tr.querySelector('.btn-row-replay').onclick = (function(row) {
                     return function(e) {
                         e.stopPropagation();
@@ -624,16 +624,53 @@
         return ct.split(';')[0].trim();
     }
 
-    function getMethodClass(method) {
-        return 'method-' + (method || '').toLowerCase();
+    // ── Semantic category helpers ─────────────────────────────────────────
+    // Return plain tokens used as data-* attribute values; CSS rules live in
+    // attribute selectors — no dynamic class strings built here.
+
+    function statusCategory(status) {
+        if (status < 200) return '1xx';
+        if (status < 300) return '2xx';
+        if (status < 400) return '3xx';
+        if (status < 500) return '4xx';
+        if (status < 600) return '5xx';
+        return 'other';
     }
 
-    function getStatusClass(status) {
-        if (status >= 200 && status < 300) return 'status-2xx';
-        if (status >= 300 && status < 400) return 'status-3xx';
-        if (status >= 400 && status < 500) return 'status-4xx';
-        if (status >= 500) return 'status-5xx';
-        return '';
+    function typeCategory(ct) {
+        if (!ct || ct === '[no content]') return 'none';
+        const base = ct.split(';')[0].trim();
+        if (base.includes('json'))                                      return 'json';
+        if (base.startsWith('text/html'))                               return 'html';
+        if (base.includes('javascript') || base.includes('ecmascript')) return 'js';
+        if (base.startsWith('text/css'))                                return 'css';
+        if (base.startsWith('text/'))                                   return 'text';
+        if (base.startsWith('image/'))                                  return 'image';
+        if (base.startsWith('font/'))                                   return 'font';
+        if (base.includes('xml'))                                       return 'xml';
+        if (base.startsWith('multipart/'))                              return 'multi';
+        if (base.startsWith('application/octet-stream'))                return 'bin';
+        return 'other';
+    }
+
+    function sizeCategory(bytes) {
+        if (bytes === 0)         return 'zero';
+        if (bytes < 1024)        return 'tiny';
+        if (bytes < 10 * 1024)   return 'small';
+        if (bytes < 100 * 1024)  return 'medium';
+        if (bytes < 1024 * 1024) return 'large';
+        return 'huge';
+    }
+
+    function durationCategory(requestTime, responseTime) {
+        if (!requestTime || !responseTime) return 'none';
+        const ms = responseTime - requestTime;
+        if (ms < 0)    return 'none';
+        if (ms < 100)  return 'fast';
+        if (ms < 300)  return 'ok';
+        if (ms < 700)  return 'slow';
+        if (ms < 2000) return 'vslow';
+        return 'dead';
     }
 
     function parseUri(uriStr) {

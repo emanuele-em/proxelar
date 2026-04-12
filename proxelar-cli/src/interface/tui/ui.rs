@@ -79,11 +79,13 @@ pub fn draw(f: &mut Frame, state: &mut AppState) {
                 let uri = request.uri();
                 let host = uri.host().unwrap_or("-");
                 let path = path_and_query(uri);
-                let size = format_size(response.body().len());
+                let body_len = response.body().len();
+                let size = format_size(body_len);
                 let time_str = format_time(request.time());
                 let proto = proto_from_uri(uri, false);
                 let content_type = abbrev_content_type(response.headers());
-                let duration = format_duration(response.time() - request.time());
+                let dur_ms = response.time() - request.time();
+                let duration = format_duration(dur_ms);
 
                 Row::new(vec![
                     Cell::from(time_str),
@@ -91,10 +93,11 @@ pub fn draw(f: &mut Frame, state: &mut AppState) {
                     Cell::from(method).style(Style::default().fg(method_color(method))),
                     Cell::from(host),
                     Cell::from(path),
-                    Cell::from(status.to_string()).style(Style::default().fg(status_color(status))),
-                    Cell::from(content_type),
-                    Cell::from(size),
-                    Cell::from(duration),
+                    Cell::from(status.to_string()).style(status_style(status)),
+                    Cell::from(content_type.clone())
+                        .style(Style::default().fg(content_type_color(&content_type))),
+                    Cell::from(size).style(Style::default().fg(size_color(body_len))),
+                    Cell::from(duration).style(Style::default().fg(duration_color(dur_ms))),
                 ])
             }
             FlowEntry::Pending { request, .. } => {
@@ -149,18 +152,20 @@ pub fn draw(f: &mut Frame, state: &mut AppState) {
                 let content_type = abbrev_content_type(ws_response.headers());
                 let ws_suffix = if *closed { "\u{2713}" } else { "\u{21c4}" };
                 let frame_str = format!("{}fr{ws_suffix}", frames.len());
-                let duration = format_duration(ws_response.time() - request.time());
+                let dur_ms = ws_response.time() - request.time();
+                let duration = format_duration(dur_ms);
 
                 Row::new(vec![
                     Cell::from(time_str),
                     Cell::from(proto).style(Style::default().fg(proto_color(proto))),
-                    Cell::from("GET").style(Style::default().fg(Color::Green)),
+                    Cell::from("GET").style(Style::default().fg(method_color("GET"))),
                     Cell::from(host),
                     Cell::from(path),
-                    Cell::from(status.to_string()).style(Style::default().fg(status_color(status))),
-                    Cell::from(content_type),
-                    Cell::from(frame_str).style(Style::default().fg(Color::Cyan)),
-                    Cell::from(duration),
+                    Cell::from(status.to_string()).style(status_style(status)),
+                    Cell::from(content_type.clone())
+                        .style(Style::default().fg(content_type_color(&content_type))),
+                    Cell::from(frame_str).style(Style::default().fg(Color::LightCyan)),
+                    Cell::from(duration).style(Style::default().fg(duration_color(dur_ms))),
                 ])
             }
         })
@@ -515,15 +520,12 @@ fn build_request_lines(request: &proxyapi_models::ProxiedRequest) -> Vec<Line<'s
 
 fn build_response_lines(response: &proxyapi_models::ProxiedResponse) -> Vec<Line<'static>> {
     let status = response.status();
-    let status_color = status_color(status.as_u16());
 
     let mut lines = vec![
         Line::from(vec![
             Span::styled(
                 status.to_string(),
-                Style::default()
-                    .fg(status_color)
-                    .add_modifier(Modifier::BOLD),
+                status_style(status.as_u16()).add_modifier(Modifier::BOLD),
             ),
             Span::raw(" "),
             Span::raw(format!("{:?}", response.version())),
@@ -664,32 +666,78 @@ fn format_duration(ms: i64) -> String {
 
 fn proto_color(proto: &str) -> Color {
     match proto {
-        "HTTPS" => Color::Green,
-        "WSS" => Color::Cyan,
-        "HTTP" => Color::White,
-        "WS" => Color::Yellow,
+        "HTTPS" => Color::LightGreen,
+        "WSS" => Color::LightCyan,
+        "HTTP" => Color::Yellow,
+        "WS" => Color::LightMagenta,
         _ => Color::White,
     }
 }
 
 fn method_color(method: &str) -> Color {
     match method {
-        "GET" => Color::Green,
+        "GET" => Color::LightGreen,
         "POST" => Color::Yellow,
-        "PUT" => Color::Blue,
-        "DELETE" => Color::Red,
-        "PATCH" => Color::Magenta,
+        "PUT" => Color::LightBlue,
+        "DELETE" => Color::LightRed,
+        "PATCH" => Color::LightMagenta,
+        "HEAD" | "OPTIONS" => Color::Gray,
         _ => Color::White,
     }
 }
 
-fn status_color(status: u16) -> Color {
+fn status_style(status: u16) -> Style {
     match status {
-        200..=299 => Color::Green,
-        300..=399 => Color::Cyan,
-        400..=499 => Color::Yellow,
-        500..=599 => Color::Red,
+        100..=199 => Style::default().fg(Color::Gray),
+        200..=299 => Style::default().fg(Color::LightGreen),
+        300..=399 => Style::default().fg(Color::LightBlue),
+        400..=499 => Style::default().fg(Color::LightRed),
+        500..=599 => Style::default()
+            .fg(Color::Red)
+            .add_modifier(Modifier::BOLD),
+        _ => Style::default().fg(Color::White),
+    }
+}
+
+fn content_type_color(ct: &str) -> Color {
+    if ct == "[no content]" {
+        return Color::DarkGray;
+    }
+    let base = ct.split(';').next().unwrap_or(ct).trim();
+    match base {
+        t if t.contains("json") => Color::LightCyan,
+        t if t.starts_with("text/html") => Color::LightYellow,
+        t if t.contains("javascript") || t.contains("ecmascript") => Color::LightBlue,
+        t if t.starts_with("text/css") => Color::LightMagenta,
+        t if t.starts_with("text/") => Color::Gray,
+        t if t.starts_with("image/") => Color::Magenta,
+        t if t.starts_with("font/") => Color::Blue,
+        t if t.contains("xml") => Color::Cyan,
+        t if t.starts_with("multipart/") => Color::Yellow,
+        t if t.starts_with("application/octet-stream") => Color::DarkGray,
         _ => Color::White,
+    }
+}
+
+fn size_color(bytes: usize) -> Color {
+    match bytes {
+        0 => Color::DarkGray,
+        1..=1_023 => Color::Gray,
+        1_024..=10_239 => Color::White,
+        10_240..=102_399 => Color::LightYellow,
+        102_400..=1_048_575 => Color::Yellow,
+        _ => Color::LightRed,
+    }
+}
+
+fn duration_color(ms: i64) -> Color {
+    match ms {
+        ms if ms < 0 => Color::DarkGray,
+        0..=99 => Color::LightGreen,
+        100..=299 => Color::Green,
+        300..=699 => Color::Yellow,
+        700..=1_999 => Color::LightRed,
+        _ => Color::Red,
     }
 }
 
