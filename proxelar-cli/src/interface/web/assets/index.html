@@ -10,15 +10,7 @@
     <header>
         <h1>Proxelar</h1>
         <div class="controls">
-            <select id="method-filter">
-                <option value="">All Methods</option>
-                <option value="GET">GET</option>
-                <option value="POST">POST</option>
-                <option value="PUT">PUT</option>
-                <option value="DELETE">DELETE</option>
-                <option value="PATCH">PATCH</option>
-            </select>
-            <input type="text" id="search" placeholder="Filter by URL...">
+            <input type="text" id="search" placeholder="Filter — e.g. status:200  method:POST  proto:https  host:example.com  type:json  duration:slow">
             <button id="clear-btn">Clear</button>
             <button id="intercept-btn" title="Toggle intercept mode (pause requests for editing)">
                 &#9646;&#9646; Intercept: <span id="intercept-label">OFF</span>
@@ -120,8 +112,10 @@
             </div>
             <div class="help-section">
                 <div class="help-section-title">Filtering</div>
-                <div class="help-row"><kbd>Method dropdown</kbd><span>Filter by HTTP method</span></div>
-                <div class="help-row"><kbd>Search box</kbd><span>Filter rows by URL</span></div>
+                <div class="help-row"><kbd>Search box</kbd><span>Free-text search (URI + method)</span></div>
+                <div class="help-row"><kbd>column:value</kbd><span>Scope to a column (e.g. status:404)</span></div>
+                <div class="help-row"><kbd>time proto method host</kbd><span>Available column names</span></div>
+                <div class="help-row"><kbd>path status type size duration</kbd><span>More column names</span></div>
             </div>
             <div class="help-section">
                 <div class="help-section-title">Intercept</div>

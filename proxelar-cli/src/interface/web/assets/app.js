@@ -3,7 +3,6 @@
     const detailPanel = document.getElementById('detail-panel');
     const detailContent = document.getElementById('detail-content');
     const statusEl = document.getElementById('status');
-    const methodFilter = document.getElementById('method-filter');
     const searchInput = document.getElementById('search');
     const clearBtn = document.getElementById('clear-btn');
     const tabs = document.querySelectorAll('.tab');
@@ -293,9 +292,57 @@
 
     // ─── Table rendering ─────────────────────────────────────────────────────
 
+    const FILTER_COLUMNS = ['time', 'proto', 'method', 'host', 'path', 'status', 'type', 'size', 'duration'];
+
+    function parseSearch(search) {
+        const colonIdx = search.indexOf(':');
+        if (colonIdx > 0) {
+            const col = search.slice(0, colonIdx).trim().toLowerCase();
+            const val = search.slice(colonIdx + 1).toLowerCase();
+            if (FILTER_COLUMNS.includes(col)) {
+                return { col: col, val: val };
+            }
+        }
+        return { col: null, val: search };
+    }
+
+    function rowMatchesSearch(r, col, val) {
+        if (!val) return true;
+        const isWs = !!r.ws;
+        const uri = parseUri(r.request.uri || '');
+        const response = isWs ? r.wsFlow.response : r.response;
+
+        if (!col) {
+            return (r.request.uri || '').toLowerCase().includes(val)
+                || (r.request.method || '').toLowerCase().includes(val);
+        }
+        switch (col) {
+            case 'time':
+                return formatTime(r.request.time).includes(val);
+            case 'proto':
+                return getProto(r.request.uri || '', isWs).toLowerCase().includes(val);
+            case 'method':
+                return (isWs ? 'get' : (r.request.method || '').toLowerCase()).includes(val);
+            case 'host':
+                return uri.host.toLowerCase().includes(val);
+            case 'path':
+                return uri.path.toLowerCase().includes(val);
+            case 'status':
+                return response ? String(response.status).includes(val) : false;
+            case 'type':
+                return response ? getContentType(response.headers).toLowerCase().includes(val) : false;
+            case 'size':
+                return response ? formatSize(bodySize(response.body)).toLowerCase().includes(val) : false;
+            case 'duration':
+                return response ? formatDuration(r.request.time, response.time).includes(val) : false;
+            default:
+                return true;
+        }
+    }
+
     function getFiltered() {
-        const method = methodFilter.value;
-        const search = searchInput.value.toLowerCase();
+        const rawSearch = searchInput.value.toLowerCase().trim();
+        const { col, val } = parseSearch(rawSearch);
 
         // Build a merged list: pending first (ordered by Map insertion), then completed
         const rows = [];
@@ -313,15 +360,7 @@
         });
 
         return rows.filter(function(r) {
-            if (r.ws) {
-                // WS flows are always GET; skip method filter mismatch only if non-GET selected
-                if (method && method !== 'GET') return false;
-                if (search && !r.request.uri.toLowerCase().includes(search)) return false;
-                return true;
-            }
-            if (method && r.request.method !== method) return false;
-            if (search && !r.request.uri.toLowerCase().includes(search)) return false;
-            return true;
+            return rowMatchesSearch(r, col, val);
         });
     }
 
@@ -688,7 +727,6 @@
         renderTable();
     };
 
-    methodFilter.onchange = renderTable;
     searchInput.oninput = renderTable;
 
     connect();

@@ -1,5 +1,6 @@
 use std::collections::VecDeque;
 
+use chrono::{Local, TimeZone};
 use crossterm::event::{KeyCode, KeyEvent};
 use proxyapi::ProxyEvent;
 use proxyapi_models::{ProxiedRequest, ProxiedResponse, WsFrame};
@@ -269,21 +270,29 @@ pub struct AppState {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum FilterColumn {
+    Time,
+    Proto,
     Method,
-    Status,
     Host,
     Path,
+    Status,
+    Type,
     Size,
+    Duration,
 }
 
 fn parse_filter(filter: &str) -> (Option<FilterColumn>, &str) {
     if let Some(pos) = filter.find(':') {
         let col = match filter[..pos].to_ascii_lowercase().as_str() {
+            "time" => Some(FilterColumn::Time),
+            "proto" => Some(FilterColumn::Proto),
             "method" => Some(FilterColumn::Method),
-            "status" => Some(FilterColumn::Status),
             "host" => Some(FilterColumn::Host),
             "path" => Some(FilterColumn::Path),
+            "status" => Some(FilterColumn::Status),
+            "type" => Some(FilterColumn::Type),
             "size" => Some(FilterColumn::Size),
+            "duration" => Some(FilterColumn::Duration),
             _ => None,
         };
         if let Some(col) = col {
@@ -293,7 +302,17 @@ fn parse_filter(filter: &str) -> (Option<FilterColumn>, &str) {
     (None, filter)
 }
 
-fn request_matches_column(request: &ProxiedRequest, col: FilterColumn, val: &str) -> bool {
+fn proto_str(request: &ProxiedRequest, is_ws: bool) -> &'static str {
+    let tls = matches!(request.uri().scheme_str(), Some("https") | Some("wss"));
+    match (is_ws, tls) {
+        (true, true) => "wss",
+        (true, false) => "ws",
+        (false, true) => "https",
+        (false, false) => "http",
+    }
+}
+
+fn request_matches_column(request: &ProxiedRequest, col: FilterColumn, val: &str, is_ws: bool) -> bool {
     match col {
         FilterColumn::Method => request.method().as_str().to_ascii_lowercase().contains(val),
         FilterColumn::Host => request
@@ -303,7 +322,8 @@ fn request_matches_column(request: &ProxiedRequest, col: FilterColumn, val: &str
             .to_ascii_lowercase()
             .contains(val),
         FilterColumn::Path => request.uri().path().to_ascii_lowercase().contains(val),
-        FilterColumn::Status | FilterColumn::Size => false,
+        FilterColumn::Proto => proto_str(request, is_ws).contains(val),
+        _ => false,
     }
 }
 
@@ -328,26 +348,68 @@ pub(crate) fn matches_filter(entry: &FlowEntry, filter: Option<&str>) -> bool {
             Some(FilterColumn::Size) => crate::interface::format_size(response.body().len())
                 .to_ascii_lowercase()
                 .contains(val),
-            Some(col) => request_matches_column(request, col, val),
+            Some(FilterColumn::Type) => response
+                .headers()
+                .get(http::header::CONTENT_TYPE)
+                .and_then(|v| v.to_str().ok())
+                .unwrap_or("")
+                .to_ascii_lowercase()
+                .contains(val),
+            Some(FilterColumn::Duration) => {
+                let ms = response.time() - request.time();
+                format_duration_filter(ms).contains(val)
+            }
+            Some(FilterColumn::Time) => format_time_filter(request.time()).contains(val),
+            Some(col) => request_matches_column(request, col, val, false),
             None => request_matches_any(request, val),
         },
         FlowEntry::Pending { request, .. } => match col {
-            Some(col) => request_matches_column(request, col, val),
+            Some(FilterColumn::Time) => format_time_filter(request.time()).contains(val),
+            Some(col) => request_matches_column(request, col, val, false),
             None => request_matches_any(request, val),
         },
         FlowEntry::Error { message } => col.is_none() && message.to_ascii_lowercase().contains(val),
         FlowEntry::WebSocket {
-            request, closed, ..
+            request,
+            _response: ws_response,
+            ..
         } => match col {
             Some(FilterColumn::Method) => "get".contains(val),
-            Some(FilterColumn::Status) => {
-                // mirrors the UI: WS✓ for closed, WS⇄ for live
-                let status_str = if *closed { "ws\u{2713}" } else { "ws\u{21c4}" };
-                status_str.contains(val)
+            Some(FilterColumn::Status) => ws_response.status().as_u16().to_string().contains(val),
+            Some(FilterColumn::Type) => ws_response
+                .headers()
+                .get(http::header::CONTENT_TYPE)
+                .and_then(|v| v.to_str().ok())
+                .unwrap_or("")
+                .to_ascii_lowercase()
+                .contains(val),
+            Some(FilterColumn::Duration) => {
+                let ms = ws_response.time() - request.time();
+                format_duration_filter(ms).contains(val)
             }
-            Some(col) => request_matches_column(request, col, val),
+            Some(FilterColumn::Time) => format_time_filter(request.time()).contains(val),
+            Some(col) => request_matches_column(request, col, val, true),
             None => request.uri().to_string().to_ascii_lowercase().contains(val),
         },
+    }
+}
+
+fn format_time_filter(millis: i64) -> String {
+    Local
+        .timestamp_millis_opt(millis)
+        .single()
+        .map(|dt| dt.format("%H:%M:%S").to_string())
+        .unwrap_or_default()
+}
+
+fn format_duration_filter(ms: i64) -> String {
+    if ms < 0 {
+        return String::new();
+    }
+    if ms >= 1000 {
+        format!("{:.1}s", ms as f64 / 1000.0)
+    } else {
+        format!("{ms}ms")
     }
 }
 

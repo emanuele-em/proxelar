@@ -65,6 +65,12 @@ header h1 { font-size: 18px; color: var(--accent); }
     font-size: 13px;
 }
 
+#search {
+    flex: 1;
+    min-width: 280px;
+    font-family: monospace;
+}
+
 .controls button:hover { background: var(--border); cursor: pointer; }
 
 .status {
