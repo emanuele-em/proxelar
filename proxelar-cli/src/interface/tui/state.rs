@@ -312,7 +312,12 @@ fn proto_str(request: &ProxiedRequest, is_ws: bool) -> &'static str {
     }
 }
 
-fn request_matches_column(request: &ProxiedRequest, col: FilterColumn, val: &str, is_ws: bool) -> bool {
+fn request_matches_column(
+    request: &ProxiedRequest,
+    col: FilterColumn,
+    val: &str,
+    is_ws: bool,
+) -> bool {
     match col {
         FilterColumn::Method => request.method().as_str().to_ascii_lowercase().contains(val),
         FilterColumn::Host => request

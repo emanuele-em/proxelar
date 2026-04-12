@@ -70,9 +70,7 @@ pub fn draw(f: &mut Frame, state: &mut AppState) {
         .iter()
         .map(|(_idx, entry)| match entry {
             FlowEntry::Complete {
-                request,
-                response,
-                ..
+                request, response, ..
             } => {
                 let method = request.method().as_str();
                 let status = response.status().as_u16();
@@ -692,9 +690,7 @@ fn status_style(status: u16) -> Style {
         200..=299 => Style::default().fg(Color::LightGreen),
         300..=399 => Style::default().fg(Color::LightBlue),
         400..=499 => Style::default().fg(Color::LightRed),
-        500..=599 => Style::default()
-            .fg(Color::Red)
-            .add_modifier(Modifier::BOLD),
+        500..=599 => Style::default().fg(Color::Red).add_modifier(Modifier::BOLD),
         _ => Style::default().fg(Color::White),
     }
 }
@@ -787,7 +783,10 @@ fn draw_help_modal(f: &mut Frame) {
         ("Esc", "Cancel filter / close detail"),
         ("column:value", "Filter by column (e.g. status:200)"),
         ("time / proto / method / host", "Recognised column names"),
-        ("path / status / type / size / duration", "Recognised column names (cont.)"),
+        (
+            "path / status / type / size / duration",
+            "Recognised column names (cont.)",
+        ),
         ("", ""),
         ("--- Intercept ---", ""),
         ("i", "Toggle intercept ON / OFF"),
