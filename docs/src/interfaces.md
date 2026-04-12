@@ -10,7 +10,7 @@ proxelar
 proxelar -i tui
 ```
 
-An interactive terminal interface built with [ratatui](https://github.com/ratatui/ratatui). Shows a table of all captured requests and WebSocket connections with method, status, host, path, and response size.
+An interactive terminal interface built with [ratatui](https://github.com/ratatui/ratatui). Shows a table of all captured requests and WebSocket connections with nine columns: time, protocol, method, host, path, status, content-type, size, and duration.
 
 ### Key bindings
 
@@ -36,11 +36,15 @@ Press `/` to enter filter mode. Plain text searches across method and URL. Use `
 
 | Syntax | Matches |
 |--------|---------|
+| `time:14:` | rows captured after 14:00 |
+| `proto:https` | rows using HTTPS or WSS |
 | `method:POST` | rows whose method contains `POST` |
-| `status:404` | rows whose status contains `404` |
 | `host:github` | rows whose host contains `github` |
 | `path:/api` | rows whose path contains `/api` |
+| `status:404` | rows whose status contains `404` |
+| `type:json` | rows whose content-type contains `json` |
 | `size:1.5` | rows whose formatted size contains `1.5` |
+| `duration:slow` | rows whose formatted duration contains `slow` |
 
 Column names are case-insensitive. Press `Enter` to apply, `Esc` to cancel.
 
@@ -64,10 +68,11 @@ Opens a web interface at `http://127.0.0.1:8081` (configurable with `--gui-port`
 
 Features:
 
-- Interactive request table with live updates
+- Interactive request table with live updates — nine columns: Time, Proto, Method, Host, Path, Status, Type, Size, Duration
 - WebSocket inspection — connections appear as live/closed rows; click to browse frames
-- Filter by HTTP method or URL
+- Unified `column:value` search bar — same syntax as the TUI filter (e.g. `status:404`, `type:json`, `proto:https`)
 - Click a row to view full request/response detail
+- Intercept mode — pause requests, edit method/URI/headers/body, then forward or drop
 - JSON pretty-printing in the detail view
 - Light and dark mode (follows system preference)
 

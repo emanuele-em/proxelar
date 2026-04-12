@@ -7,6 +7,14 @@
 
 ## [Unreleased]
 
+## [0.4.3] - 2026-04-12
+
+- Request table now shows nine columns — Time, Proto, Method, Host, Path, Status, Type (content-type), Size, Duration — in both TUI and web GUI
+- Filter expanded to all nine columns: `time:14:`, `proto:https`, `method:GET`, `host:github`, `path:/api`, `status:200`, `type:json`, `size:1KB`, `duration:slow`
+- Web GUI: replaced the method dropdown with a unified `column:value` search bar matching TUI behaviour
+- Semantic per-column color coding — each protocol, method, status range, content-type category, size tier, and duration tier has its own distinct color in both interfaces
+- Dependency update: tokio 1.51.1
+
 ## [0.4.2] - 2026-04-11
 
 - WebSocket inspection — connections appear as `WS⇄` / `WS✓` rows in the TUI and web GUI; click or select to browse individual frames with direction, opcode, size, and payload preview

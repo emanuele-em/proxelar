@@ -40,7 +40,7 @@ Useful for debugging APIs, reverse engineering third-party services, testing mob
 - **Forward & reverse proxy** — CONNECT tunneling or upstream URI rewriting
 - **Three interfaces** — terminal (stdout), interactive TUI (ratatui), web GUI (axum + WebSocket)
 - **WebSocket inspection** — connections captured alongside HTTP traffic; browse frames by direction, opcode, and payload
-- **Column-scoped filtering** — `status:404`, `method:POST`, `host:github`, `path:/api`, `size:1KB` or plain text search
+- **Column-scoped filtering** — `time:14:`, `proto:https`, `method:POST`, `host:github`, `path:/api`, `status:404`, `type:json`, `size:1KB`, `duration:slow` or plain text search
 - **Easy CA install** — visit `http://proxel.ar` through the proxy to download and install the root cert
 
 ---
@@ -218,7 +218,7 @@ More examples in [`examples/scripts/`](examples/scripts/) — header injection, 
 
 ## Documentation
 
-Latest release: **[Proxelar 0.4.2 — WebSocket Inspection and Smarter Filtering](https://micheletti.io/proxelar-042/)**
+Latest release: **[Proxelar 0.4.3 — Richer Request Table and Unified Column Filtering](https://micheletti.io/proxelar-043/)**
 
 Full documentation at **[proxelar.micheletti.io](https://proxelar.micheletti.io)**:
 
