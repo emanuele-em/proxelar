@@ -5,3 +5,7 @@ default-members = ["proxelar-cli"]
 
 [workspace.package]
 rust-version = "1.94"
+
+[profile.release]
+codegen-units = 1
+lto = true
