@@ -23,7 +23,7 @@ tokio-rustls = "0.26"
 rustls = { version = "0.23", default-features = false, features = ["ring", "logging", "std", "tls12"] }
 rustls-pki-types = "1.11"
 hyper-rustls = { version = "0.27", features = ["http1", "logging", "tls12", "ring", "webpki-tokio"] }
-openssl = { version = "0.10.76", features = ["vendored"] }
+openssl = { version = "0.10.78", features = ["vendored"] }
 moka = { version = "0.12", features = ["future"] }
 tokio = { version = "1.51", features = ["rt", "net", "io-util", "macros", "sync", "time"] }
 async-trait = "0.1"
