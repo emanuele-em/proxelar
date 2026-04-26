@@ -11,7 +11,7 @@ use bytes::Bytes;
 use http::HeaderMap;
 use proxyapi::{InterceptConfig, InterceptDecision, ProxyEvent};
 use proxyapi_models::ProxiedRequest;
-use rand::Rng;
+use rand::RngExt;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::sync::Arc;
