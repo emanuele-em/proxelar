@@ -7,6 +7,9 @@
 
 ## [Unreleased]
 
+- Dependency updates: rand 0.10.1, actions/upload-pages-artifact 5, softprops/action-gh-release 3
+- Replace CLAUDE.md with compact AGENTS.md contributor instructions
+
 ## [0.4.3] - 2026-04-12
 
 - Request table now shows nine columns — Time, Proto, Method, Host, Path, Status, Type (content-type), Size, Duration — in both TUI and web GUI
