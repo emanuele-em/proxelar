@@ -1,6 +1,6 @@
 use bytes::Bytes;
 use http::{HeaderMap, Method, StatusCode, Uri, Version};
-use proxyapi_models::{ProxiedRequest, ProxiedResponse};
+use proxyapi_models::{ProxiedRequest, ProxiedResponse, WsDirection, WsFrame, WsOpcode};
 
 #[test]
 fn test_proxied_request_serialization() {
@@ -136,4 +136,60 @@ fn test_proxied_response_large_body() {
     let deserialized: ProxiedResponse = serde_json::from_str(&json).unwrap();
     assert_eq!(deserialized.body().len(), 1024 * 1024);
     assert_eq!(res, deserialized);
+}
+
+#[test]
+fn test_ws_frame_serialization() {
+    let frame = WsFrame::new(
+        WsDirection::ClientToServer,
+        WsOpcode::Text,
+        1234,
+        Bytes::from_static(b"hello"),
+        false,
+    );
+
+    let json = serde_json::to_string(&frame).unwrap();
+    let deserialized: WsFrame = serde_json::from_str(&json).unwrap();
+
+    assert_eq!(deserialized.direction, WsDirection::ClientToServer);
+    assert_eq!(deserialized.opcode, WsOpcode::Text);
+    assert_eq!(deserialized.time, 1234);
+    assert_eq!(deserialized.payload.as_ref(), b"hello");
+    assert!(!deserialized.truncated);
+}
+
+#[test]
+fn test_ws_frame_variants_serialize() {
+    let directions = [
+        (WsDirection::ClientToServer, "ClientToServer"),
+        (WsDirection::ServerToClient, "ServerToClient"),
+    ];
+    let opcodes = [
+        (WsOpcode::Continuation, "Continuation"),
+        (WsOpcode::Text, "Text"),
+        (WsOpcode::Binary, "Binary"),
+        (WsOpcode::Close, "Close"),
+        (WsOpcode::Ping, "Ping"),
+        (WsOpcode::Pong, "Pong"),
+    ];
+
+    for (direction, expected) in directions {
+        let value = serde_json::to_value(direction).unwrap();
+        assert_eq!(value, serde_json::json!(expected));
+        assert_eq!(
+            serde_json::from_value::<WsDirection>(serde_json::json!(expected)).unwrap(),
+            direction
+        );
+    }
+
+    for (opcode, expected) in opcodes {
+        let value = serde_json::to_value(opcode).unwrap();
+        assert_eq!(value, serde_json::json!(expected));
+        assert_eq!(
+            serde_json::from_value::<WsOpcode>(serde_json::json!(expected)).unwrap(),
+            opcode
+        );
+    }
+
+    assert!(serde_json::from_value::<WsOpcode>(serde_json::json!("text")).is_err());
 }
