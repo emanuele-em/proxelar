@@ -4,13 +4,23 @@ on:
   pull_request:
   push:
     branches: ["main"]
+  merge_group:
+  workflow_dispatch:
 
 permissions:
   contents: read
 
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
 env:
   CARGO_INCREMENTAL: 0
   CARGO_TERM_COLOR: always
+  COVERAGE_MIN_LINES: "80"
+  COVERAGE_TARGET_LINES: "80"
+  CORE_COVERAGE_TARGET_LINES: "90"
+  MSRV: "1.94"
 
 jobs:
   fmt:
@@ -23,8 +33,8 @@ jobs:
           components: rustfmt
       - run: cargo fmt --all --check
 
-  check:
-    name: Check (${{ matrix.os }})
+  test:
+    name: Test (${{ matrix.os }}, ${{ matrix.rust }})
     needs: fmt
     runs-on: ${{ matrix.os }}
     strategy:
@@ -32,35 +42,89 @@ jobs:
       matrix:
         include:
           - os: ubuntu-latest
+            rust: stable
           - os: macos-latest
+            rust: stable
           - os: windows-latest
-    steps:
-      - uses: actions/checkout@v6
-      - uses: dtolnay/rust-toolchain@stable
-        with:
-          components: clippy
-      - uses: Swatinem/rust-cache@v2
-      - name: Build
-        run: cargo build --workspace
-      - name: Clippy
-        run: cargo clippy --workspace -- -D warnings
-      - name: Test
-        run: cargo test --workspace
-
-  msrv:
-    name: MSRV (1.94)
-    needs: fmt
-    runs-on: ubuntu-latest
+            rust: stable
+          - os: ubuntu-latest
+            rust: "1.94"
     steps:
       - uses: actions/checkout@v6
       - uses: dtolnay/rust-toolchain@master
         with:
-          toolchain: "1.94"
+          toolchain: ${{ matrix.rust }}
+          components: clippy
       - uses: Swatinem/rust-cache@v2
       - name: Build
-        run: cargo build --workspace
+        run: cargo build --workspace --locked
+      - name: Clippy
+        run: cargo clippy --workspace --all-targets --all-features -- -D warnings
       - name: Test
-        run: cargo test --workspace
+        run: cargo test --workspace --locked
+
+  feature-gates:
+    name: Feature gates
+    needs: fmt
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - name: Build without default features
+        run: cargo build --workspace --locked --no-default-features
+      - name: Test without default features
+        run: cargo test --workspace --locked --no-default-features
+      - name: Test proxyapi scripting explicitly
+        run: cargo test -p proxyapi --locked --features scripting -- scripting
+
+  coverage:
+    name: Coverage
+    needs: fmt
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: llvm-tools-preview
+      - uses: Swatinem/rust-cache@v2
+      - uses: taiki-e/install-action@cargo-llvm-cov
+      - name: Coverage policy
+        run: |
+          echo "Blocking workspace gate: ${COVERAGE_MIN_LINES}% line coverage"
+          echo "Blocking proxyapi gate: ${CORE_COVERAGE_TARGET_LINES}% line coverage"
+      - name: Workspace coverage
+        run: >
+          cargo llvm-cov --workspace --all-features --locked
+          --ignore-filename-regex '(^|/)(tests|target)/'
+          --fail-under-lines "$COVERAGE_MIN_LINES"
+      - name: Core proxyapi coverage
+        run: >
+          cargo llvm-cov -p proxyapi --all-features --locked
+          --ignore-filename-regex '(^|/)(tests|target)/'
+          --fail-under-lines "$CORE_COVERAGE_TARGET_LINES"
+
+  package:
+    name: Package crates
+    needs: fmt
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - run: cargo package --workspace --locked --no-verify
+
+  rustdoc:
+    name: Rustdoc
+    needs: fmt
+    runs-on: ubuntu-latest
+    env:
+      RUSTDOCFLAGS: -D warnings
+    steps:
+      - uses: actions/checkout@v6
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - run: cargo doc --workspace --all-features --no-deps --locked
 
   audit:
     name: Security audit
@@ -73,3 +137,26 @@ jobs:
       - uses: rustsec/audit-check@v2
         with:
           token: ${{ secrets.GITHUB_TOKEN }}
+
+  check:
+    name: Required checks
+    if: always()
+    needs:
+      - fmt
+      - test
+      - feature-gates
+      - coverage
+      - package
+      - rustdoc
+      - audit
+    runs-on: ubuntu-latest
+    steps:
+      - name: Verify all required jobs passed
+        run: |
+          test "${{ needs.fmt.result }}" = "success"
+          test "${{ needs.test.result }}" = "success"
+          test "${{ needs.feature-gates.result }}" = "success"
+          test "${{ needs.coverage.result }}" = "success"
+          test "${{ needs.package.result }}" = "success"
+          test "${{ needs.rustdoc.result }}" = "success"
+          test "${{ needs.audit.result }}" = "success"
