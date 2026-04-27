@@ -2,7 +2,9 @@
 
 ## Reporting a Vulnerability
 
-If you discover a security vulnerability, please report it by [opening a GitHub issue](https://github.com/emanuele-em/proxelar/issues) with as much detail as possible — description, steps to reproduce, and any relevant code or screenshots.
+If you discover a security vulnerability, please report it privately through [GitHub Security Advisories](https://github.com/emanuele-em/proxelar/security/advisories/new) with as much detail as possible: description, steps to reproduce, and any relevant code or screenshots.
+
+Please do not open a public GitHub issue for suspected vulnerabilities.
 
 ## Response
 

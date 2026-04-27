@@ -7,7 +7,7 @@ Proxelar intercepts HTTPS traffic by generating a local Certificate Authority (C
 On first run, Proxelar generates a 4096-bit RSA CA certificate and private key in `~/.proxelar/`:
 
 - `~/.proxelar/proxelar-ca.pem` — CA certificate
-- `~/.proxelar/proxelar-ca-key.pem` — CA private key (mode 0600)
+- `~/.proxelar/proxelar-ca.key` — CA private key (mode 0600)
 
 If these files already exist, they are reused.
 

@@ -7,6 +7,11 @@ authors = ["Emanuele Micheletti <micheletti.emanuele@hotmail.com>"]
 description = "Data models for the Proxelar MITM proxy"
 license = "MIT"
 repository = "https://github.com/emanuele-em/proxelar"
+homepage = "https://proxelar.micheletti.io"
+documentation = "https://docs.rs/proxyapi_models"
+readme = "../README.md"
+categories = ["data-structures", "network-programming", "web-programming::http-server"]
+keywords = ["proxy", "http", "models", "serde", "traffic"]
 
 [dependencies]
 serde = { version = "1.0", features = ["derive"] }

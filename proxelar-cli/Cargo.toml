@@ -7,6 +7,11 @@ authors = ["Emanuele Micheletti <micheletti.emanuele@hotmail.com>"]
 description = "MITM proxy for HTTP/HTTPS traffic"
 license = "MIT"
 repository = "https://github.com/emanuele-em/proxelar"
+homepage = "https://proxelar.micheletti.io"
+documentation = "https://docs.rs/proxelar"
+readme = "../README.md"
+categories = ["command-line-utilities", "development-tools", "network-programming"]
+keywords = ["proxy", "mitm", "http", "https", "lua"]
 
 [features]
 default = ["scripting"]
