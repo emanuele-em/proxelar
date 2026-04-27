@@ -1,5 +1,8 @@
 /target
 .DS_Store
+*.swp
+*.swo
+*.swx
 
 # CA certificate files (generated at runtime)
 *.cer
