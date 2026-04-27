@@ -650,3 +650,229 @@ impl AppState {
         self.detail_open = false;
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use bytes::Bytes;
+    use crossterm::event::KeyModifiers;
+    use http::{HeaderMap, Method, StatusCode, Version};
+    use proxyapi_models::{WsDirection, WsFrame, WsOpcode};
+
+    fn key(code: KeyCode) -> KeyEvent {
+        KeyEvent::new(code, KeyModifiers::NONE)
+    }
+
+    fn request(method: Method, uri: &str, time: i64) -> Box<ProxiedRequest> {
+        let mut headers = HeaderMap::new();
+        headers.insert("x-test", "state".parse().unwrap());
+        Box::new(ProxiedRequest::new(
+            method,
+            uri.parse().unwrap(),
+            Version::HTTP_11,
+            headers,
+            Bytes::from_static(b"request"),
+            time,
+        ))
+    }
+
+    fn response(
+        status: StatusCode,
+        content_type: Option<&str>,
+        body: Bytes,
+        time: i64,
+    ) -> Box<ProxiedResponse> {
+        let mut headers = HeaderMap::new();
+        if let Some(content_type) = content_type {
+            headers.insert(http::header::CONTENT_TYPE, content_type.parse().unwrap());
+        }
+        Box::new(ProxiedResponse::new(
+            status,
+            Version::HTTP_11,
+            headers,
+            body,
+            time,
+        ))
+    }
+
+    #[test]
+    fn edit_session_handles_unicode_multiline_editing() {
+        let mut session = EditSession::new(9, "ab\ncd");
+
+        assert!(matches!(
+            session.handle_key(key(KeyCode::Right)),
+            EditAction::None
+        ));
+        session.handle_key(key(KeyCode::Char('é')));
+        session.handle_key(key(KeyCode::End));
+        session.handle_key(key(KeyCode::Enter));
+        session.handle_key(key(KeyCode::Char('x')));
+        session.handle_key(key(KeyCode::Backspace));
+        session.handle_key(key(KeyCode::Backspace));
+        session.handle_key(key(KeyCode::Delete));
+
+        assert_eq!(session.to_text(), "aébcd");
+        assert!(matches!(
+            session.handle_key(key(KeyCode::Esc)),
+            EditAction::StageEdits
+        ));
+
+        session.typing = false;
+        assert!(matches!(
+            session.handle_key(key(KeyCode::Esc)),
+            EditAction::Discard
+        ));
+    }
+
+    #[test]
+    fn edit_session_scrolls_cursor_into_view() {
+        let mut session = EditSession::new(1, "a\nb\nc\nd");
+        session.cursor_row = 3;
+        session.scroll_into_view(2);
+        assert_eq!(session.scroll, 2);
+
+        session.cursor_row = 0;
+        session.scroll_into_view(2);
+        assert_eq!(session.scroll, 0);
+
+        session.scroll = 10;
+        session.scroll_into_view(0);
+        assert_eq!(session.scroll, 10);
+    }
+
+    #[test]
+    fn app_state_promotes_pending_flow_in_place() {
+        let mut state = AppState::new();
+        state.add_event(ProxyEvent::RequestIntercepted {
+            id: 7,
+            request: request(Method::POST, "http://api.test/pending", 1000),
+        });
+        state.table_state.select(Some(0));
+
+        assert_eq!(state.pending_count(), 1);
+        assert_eq!(state.selected_pending_id(), Some(7));
+        assert_eq!(
+            state.selected_pending_request().unwrap().1.uri().path(),
+            "/pending"
+        );
+
+        state.add_event(ProxyEvent::RequestComplete {
+            id: 7,
+            request: request(Method::POST, "http://api.test/done", 1000),
+            response: response(
+                StatusCode::CREATED,
+                Some("application/json"),
+                Bytes::new(),
+                1250,
+            ),
+        });
+
+        assert_eq!(state.pending_count(), 0);
+        assert_eq!(state.entries.len(), 1);
+        assert_eq!(state.selected_request().unwrap().uri().path(), "/done");
+        assert!(matches!(
+            state.entries.front().unwrap(),
+            FlowEntry::Complete { id: 7, .. }
+        ));
+    }
+
+    #[test]
+    fn app_state_filters_complete_and_websocket_entries_by_column() {
+        let complete = FlowEntry::Complete {
+            id: 1,
+            request: request(Method::GET, "https://api.example.test/items?q=one", 1000),
+            response: response(
+                StatusCode::CREATED,
+                Some("application/json"),
+                Bytes::from(vec![0; 2048]),
+                2500,
+            ),
+        };
+
+        assert!(matches_filter(&complete, Some("method:get")));
+        assert!(matches_filter(&complete, Some("host:api.example")));
+        assert!(matches_filter(&complete, Some("path:/items")));
+        assert!(matches_filter(&complete, Some("status:201")));
+        assert!(matches_filter(&complete, Some("type:json")));
+        assert!(matches_filter(&complete, Some("size:2.0kb")));
+        assert!(matches_filter(&complete, Some("duration:1.5s")));
+        assert!(matches_filter(&complete, Some("proto:https")));
+        assert!(matches_filter(&complete, Some("items?q=one")));
+        assert!(!matches_filter(&complete, Some("method:post")));
+
+        let websocket = FlowEntry::WebSocket {
+            id: 2,
+            request: request(Method::GET, "wss://socket.example.test/live", 3000),
+            _response: response(StatusCode::SWITCHING_PROTOCOLS, None, Bytes::new(), 3010),
+            frames: VecDeque::new(),
+            closed: false,
+        };
+
+        assert!(matches_filter(&websocket, Some("proto:wss")));
+        assert!(matches_filter(&websocket, Some("method:get")));
+        assert!(matches_filter(&websocket, Some("status:101")));
+        assert!(matches_filter(&websocket, Some("socket.example")));
+        assert!(!matches_filter(&websocket, Some("status:200")));
+    }
+
+    #[test]
+    fn app_state_tracks_websocket_frames_and_close() {
+        let mut state = AppState::new();
+        state.add_event(ProxyEvent::WebSocketConnected {
+            id: 99,
+            request: request(Method::GET, "ws://socket.test/live", 0),
+            response: response(StatusCode::SWITCHING_PROTOCOLS, None, Bytes::new(), 1),
+        });
+
+        state.add_event(ProxyEvent::WebSocketFrame {
+            conn_id: 99,
+            frame: Box::new(WsFrame::new(
+                WsDirection::ClientToServer,
+                WsOpcode::Text,
+                2,
+                Bytes::from_static(b"hello"),
+                false,
+            )),
+        });
+        state.add_event(ProxyEvent::WebSocketClosed { conn_id: 99 });
+
+        match state.entries.front().unwrap() {
+            FlowEntry::WebSocket { frames, closed, .. } => {
+                assert_eq!(frames.len(), 1);
+                assert_eq!(frames[0].payload.as_ref(), b"hello");
+                assert!(*closed);
+            }
+            _ => panic!("expected websocket entry"),
+        }
+    }
+
+    #[test]
+    fn selection_and_remove_pending_respect_filtered_rows() {
+        let mut state = AppState::new();
+        state.add_event(ProxyEvent::RequestIntercepted {
+            id: 1,
+            request: request(Method::GET, "http://api.test/one", 0),
+        });
+        state.add_event(ProxyEvent::RequestIntercepted {
+            id: 2,
+            request: request(Method::POST, "http://api.test/two", 0),
+        });
+
+        state.filter = Some("method:post".to_owned());
+        state.select_last();
+        assert_eq!(state.selected_pending_id(), Some(2));
+
+        state.remove_pending_by_id(2);
+        assert_eq!(state.table_state.selected(), None);
+
+        state.filter = None;
+        state.select_first();
+        assert_eq!(state.selected_pending_id(), Some(1));
+
+        state.detail_open = true;
+        state.clear();
+        assert!(state.entries.is_empty());
+        assert_eq!(state.table_state.selected(), None);
+        assert!(!state.detail_open);
+    }
+}

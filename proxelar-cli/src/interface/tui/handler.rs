@@ -266,3 +266,107 @@ fn parse_raw_http_request(text: &str) -> Result<(String, String, http::HeaderMap
     let body = Bytes::copy_from_slice(body_str.as_bytes());
     Ok((method, uri, headers, body))
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crossterm::event::KeyModifiers;
+    use http::{HeaderMap, Method, Version};
+    use proxyapi::ProxyEvent;
+    use proxyapi_models::{ProxiedRequest, ProxiedResponse};
+
+    fn key(code: KeyCode) -> KeyEvent {
+        KeyEvent::new(code, KeyModifiers::NONE)
+    }
+
+    fn request(body: Bytes) -> ProxiedRequest {
+        let mut headers = HeaderMap::new();
+        headers.append("x-test", "one".parse().unwrap());
+        headers.append("x-test", "two".parse().unwrap());
+        ProxiedRequest::new(
+            Method::POST,
+            "http://api.test/path?x=1".parse().unwrap(),
+            Version::HTTP_11,
+            headers,
+            body,
+            100,
+        )
+    }
+
+    #[test]
+    fn parse_raw_http_request_accepts_crlf_and_repeated_headers() {
+        let (method, uri, headers, body) = parse_raw_http_request(
+            "patch http://api.test/items HTTP/1.1\r\n\
+             x-test: one\r\n\
+             x-test: two\r\n\
+             \r\n\
+             body",
+        )
+        .unwrap();
+
+        assert_eq!(method, "PATCH");
+        assert_eq!(uri, "http://api.test/items");
+        assert_eq!(headers.get_all("x-test").iter().count(), 2);
+        assert_eq!(body.as_ref(), b"body");
+    }
+
+    #[test]
+    fn request_to_text_preserves_headers_and_marks_binary_body() {
+        let (text, binary_body) = request_to_text(&request(Bytes::from_static(b"\xff\x00")));
+
+        assert!(text.starts_with("POST http://api.test/path?x=1 HTTP/1.1\n"));
+        assert!(text.contains("x-test: one\n"));
+        assert!(text.contains("x-test: two\n"));
+        assert!(binary_body);
+    }
+
+    #[test]
+    fn handle_key_event_filter_mode_sets_and_clears_filter() {
+        let intercept = InterceptConfig::new();
+        let (replay_tx, _replay_rx) = mpsc::channel(1);
+        let mut state = AppState::new();
+
+        assert!(!handle_key_event(
+            key(KeyCode::Char('/')),
+            &mut state,
+            &intercept,
+            &replay_tx
+        ));
+        assert!(state.filter_mode);
+
+        handle_key_event(key(KeyCode::Char('g')), &mut state, &intercept, &replay_tx);
+        handle_key_event(key(KeyCode::Char('e')), &mut state, &intercept, &replay_tx);
+        handle_key_event(key(KeyCode::Enter), &mut state, &intercept, &replay_tx);
+
+        assert!(!state.filter_mode);
+        assert_eq!(state.filter.as_deref(), Some("ge"));
+
+        handle_key_event(key(KeyCode::Esc), &mut state, &intercept, &replay_tx);
+        assert_eq!(state.filter, None);
+    }
+
+    #[test]
+    fn handle_key_event_replays_selected_request() {
+        let intercept = InterceptConfig::new();
+        let (replay_tx, mut replay_rx) = mpsc::channel(1);
+        let mut state = AppState::new();
+        state.add_event(ProxyEvent::RequestComplete {
+            id: 1,
+            request: Box::new(request(Bytes::from_static(b"body"))),
+            response: Box::new(ProxiedResponse::new(
+                http::StatusCode::OK,
+                Version::HTTP_11,
+                HeaderMap::new(),
+                Bytes::new(),
+                200,
+            )),
+        });
+        state.select_first();
+
+        handle_key_event(key(KeyCode::Char('r')), &mut state, &intercept, &replay_tx);
+
+        let replayed = replay_rx.try_recv().unwrap();
+        assert_eq!(replayed.uri().path(), "/path");
+        assert_eq!(replayed.body().as_ref(), b"body");
+    }
+}

@@ -839,3 +839,338 @@ fn draw_help_modal(f: &mut Frame) {
 
     f.render_widget(help, area);
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use bytes::Bytes;
+    use http::{HeaderMap, Method, StatusCode, Version};
+    use proxyapi_models::{ProxiedRequest, ProxiedResponse};
+    use ratatui::{backend::TestBackend, buffer::Buffer, Terminal};
+
+    fn request(method: Method, uri: &str, body: Bytes, time: i64) -> Box<ProxiedRequest> {
+        let mut headers = HeaderMap::new();
+        headers.insert("content-type", "application/json".parse().unwrap());
+        headers.insert("x-test", "ui".parse().unwrap());
+        Box::new(ProxiedRequest::new(
+            method,
+            uri.parse().unwrap(),
+            Version::HTTP_11,
+            headers,
+            body,
+            time,
+        ))
+    }
+
+    fn response(
+        status: StatusCode,
+        content_type: Option<&str>,
+        body: Bytes,
+        time: i64,
+    ) -> Box<ProxiedResponse> {
+        let mut headers = HeaderMap::new();
+        if let Some(content_type) = content_type {
+            headers.insert(http::header::CONTENT_TYPE, content_type.parse().unwrap());
+        }
+        Box::new(ProxiedResponse::new(
+            status,
+            Version::HTTP_11,
+            headers,
+            body,
+            time,
+        ))
+    }
+
+    fn render(state: &mut AppState) -> String {
+        let backend = TestBackend::new(160, 42);
+        let mut terminal = Terminal::new(backend).unwrap();
+        terminal.draw(|frame| draw(frame, state)).unwrap();
+        buffer_text(terminal.backend().buffer())
+    }
+
+    fn buffer_text(buffer: &Buffer) -> String {
+        buffer
+            .content
+            .chunks(buffer.area.width as usize)
+            .map(|row| row.iter().map(|cell| cell.symbol()).collect::<String>())
+            .collect::<Vec<_>>()
+            .join("\n")
+    }
+
+    #[test]
+    fn format_and_color_helpers_cover_protocol_status_size_duration_variants() {
+        let http_uri: Uri = "http://example.test/path?q=1".parse().unwrap();
+        let https_uri: Uri = "https://secure.test/".parse().unwrap();
+        let wss_uri: Uri = "wss://socket.test/live".parse().unwrap();
+
+        assert_eq!(path_and_query(&http_uri), "/path?q=1");
+        assert_eq!(proto_from_uri(&http_uri, false), "HTTP");
+        assert_eq!(proto_from_uri(&https_uri, false), "HTTPS");
+        assert_eq!(proto_from_uri(&http_uri, true), "WS");
+        assert_eq!(proto_from_uri(&wss_uri, true), "WSS");
+
+        assert_eq!(format_duration(-1), "-");
+        assert_eq!(format_duration(42), "42ms");
+        assert_eq!(format_duration(1_250), "1.2s");
+        assert_eq!(format_time(i64::MAX), "-");
+
+        assert_eq!(proto_color("HTTPS"), Color::LightGreen);
+        assert_eq!(proto_color("WSS"), Color::LightCyan);
+        assert_eq!(proto_color("HTTP"), Color::Yellow);
+        assert_eq!(proto_color("WS"), Color::LightMagenta);
+        assert_eq!(proto_color("OTHER"), Color::White);
+
+        assert_eq!(method_color("GET"), Color::LightGreen);
+        assert_eq!(method_color("POST"), Color::Yellow);
+        assert_eq!(method_color("PUT"), Color::LightBlue);
+        assert_eq!(method_color("DELETE"), Color::LightRed);
+        assert_eq!(method_color("PATCH"), Color::LightMagenta);
+        assert_eq!(method_color("HEAD"), Color::Gray);
+        assert_eq!(method_color("CUSTOM"), Color::White);
+
+        assert_eq!(content_type_color("[no content]"), Color::DarkGray);
+        assert_eq!(content_type_color("application/json"), Color::LightCyan);
+        assert_eq!(content_type_color("text/html"), Color::LightYellow);
+        assert_eq!(content_type_color("text/css"), Color::LightMagenta);
+        assert_eq!(content_type_color("image/png"), Color::Magenta);
+        assert_eq!(content_type_color("font/woff2"), Color::Blue);
+        assert_eq!(content_type_color("application/xml"), Color::Cyan);
+        assert_eq!(content_type_color("multipart/form-data"), Color::Yellow);
+        assert_eq!(
+            content_type_color("application/octet-stream"),
+            Color::DarkGray
+        );
+        assert_eq!(content_type_color("application/x-custom"), Color::White);
+
+        assert_eq!(size_color(0), Color::DarkGray);
+        assert_eq!(size_color(512), Color::Gray);
+        assert_eq!(size_color(2_048), Color::White);
+        assert_eq!(size_color(20_000), Color::LightYellow);
+        assert_eq!(size_color(200_000), Color::Yellow);
+        assert_eq!(size_color(2_000_000), Color::LightRed);
+
+        assert_eq!(duration_color(-1), Color::DarkGray);
+        assert_eq!(duration_color(50), Color::LightGreen);
+        assert_eq!(duration_color(150), Color::Green);
+        assert_eq!(duration_color(500), Color::Yellow);
+        assert_eq!(duration_color(1_000), Color::LightRed);
+        assert_eq!(duration_color(3_000), Color::Red);
+
+        assert_eq!(status_style(100).fg, Some(Color::Gray));
+        assert_eq!(status_style(204).fg, Some(Color::LightGreen));
+        assert_eq!(status_style(302).fg, Some(Color::LightBlue));
+        assert_eq!(status_style(404).fg, Some(Color::LightRed));
+        assert_eq!(status_style(503).fg, Some(Color::Red));
+        assert_eq!(status_style(700).fg, Some(Color::White));
+    }
+
+    #[test]
+    fn build_detail_lines_include_headers_bodies_and_frame_states() {
+        let req = request(
+            Method::PATCH,
+            "https://api.test/items",
+            Bytes::from_static(b"{\"ok\":true}"),
+            0,
+        );
+        let res = response(
+            StatusCode::CREATED,
+            Some("application/json; charset=utf-8"),
+            Bytes::from_static(b"created"),
+            100,
+        );
+        let mut frames = VecDeque::new();
+        frames.push_back(WsFrame::new(
+            WsDirection::ClientToServer,
+            WsOpcode::Text,
+            1,
+            Bytes::from_static(b"hello websocket"),
+            false,
+        ));
+        frames.push_back(WsFrame::new(
+            WsDirection::ServerToClient,
+            WsOpcode::Binary,
+            2,
+            Bytes::from_static(&[0, 1, 2, 3]),
+            true,
+        ));
+        frames.push_back(WsFrame::new(
+            WsDirection::ServerToClient,
+            WsOpcode::Pong,
+            3,
+            Bytes::from_static(b"pong"),
+            false,
+        ));
+
+        assert!(build_request_lines(&req)
+            .iter()
+            .any(|line| line.to_string().contains("PATCH")));
+        assert!(build_response_lines(&res)
+            .iter()
+            .any(|line| line.to_string().contains("201")));
+        assert!(abbrev_content_type(res.headers()).contains("application/json"));
+
+        let open_empty = build_frames_lines(&VecDeque::new(), false, 0, false);
+        assert_eq!(open_empty[0].to_string(), "Waiting for frames...");
+        let closed_empty = build_frames_lines(&VecDeque::new(), true, 0, false);
+        assert_eq!(
+            closed_empty[0].to_string(),
+            "No frames captured (connection closed)"
+        );
+
+        let followed = build_frames_lines(&frames, false, 0, true);
+        let followed_text = followed
+            .iter()
+            .map(ToString::to_string)
+            .collect::<Vec<_>>()
+            .join("\n");
+        assert!(followed_text.contains("hello websocket"));
+        assert!(followed_text.contains("[trunc]"));
+        assert!(followed_text.contains("[FOLLOW]"));
+
+        let closed = build_frames_lines(&frames, true, 1, false);
+        let closed_text = closed
+            .iter()
+            .map(ToString::to_string)
+            .collect::<Vec<_>>()
+            .join("\n");
+        assert!(closed_text.contains("00 01 02 03"));
+        assert!(closed_text.contains("Connection closed"));
+    }
+
+    #[test]
+    fn draw_renders_complete_response_detail_and_websocket_frames() {
+        let mut state = AppState::new();
+        state.entries.push_back(FlowEntry::Complete {
+            id: 1,
+            request: request(
+                Method::GET,
+                "https://api.test/items?q=1",
+                Bytes::new(),
+                1_000,
+            ),
+            response: response(
+                StatusCode::OK,
+                Some("application/json"),
+                Bytes::from_static(b"{\"items\":[]}"),
+                1_050,
+            ),
+        });
+        state.entries.push_back(FlowEntry::WebSocket {
+            id: 2,
+            request: request(Method::GET, "wss://socket.test/live", Bytes::new(), 2_000),
+            _response: response(StatusCode::SWITCHING_PROTOCOLS, None, Bytes::new(), 2_010),
+            frames: VecDeque::from([
+                WsFrame::new(
+                    WsDirection::ClientToServer,
+                    WsOpcode::Text,
+                    2_020,
+                    Bytes::from_static(b"client"),
+                    false,
+                ),
+                WsFrame::new(
+                    WsDirection::ServerToClient,
+                    WsOpcode::Ping,
+                    2_021,
+                    Bytes::from_static(b"ping"),
+                    false,
+                ),
+                WsFrame::new(
+                    WsDirection::ServerToClient,
+                    WsOpcode::Close,
+                    2_022,
+                    Bytes::new(),
+                    false,
+                ),
+            ]),
+            closed: true,
+        });
+        state.detail_open = true;
+        state.table_state.select(Some(0));
+
+        let rendered = render(&mut state);
+        assert!(rendered.contains("Proxelar"));
+        assert!(rendered.contains("api.test"));
+        assert!(rendered.contains("GET"));
+
+        state.detail_tab = DetailTab::Response;
+        let rendered = render(&mut state);
+        assert!(rendered.contains("application/json"));
+        assert!(rendered.contains("{\"items\":[]}"));
+
+        state.table_state.select(Some(1));
+        state.detail_tab = DetailTab::Response;
+        let rendered = render(&mut state);
+        assert!(rendered.contains("socket.test"));
+        assert!(rendered.contains("client"));
+        assert!(rendered.contains("Connection closed"));
+    }
+
+    #[test]
+    fn draw_renders_pending_error_filter_help_and_editor_states() {
+        let mut state = AppState::new();
+        state.entries.push_back(FlowEntry::Pending {
+            id: 10,
+            request: request(
+                Method::POST,
+                "http://pending.test/submit",
+                Bytes::from_static(b"body"),
+                1,
+            ),
+        });
+        state.entries.push_back(FlowEntry::Error {
+            message: "proxy failed".to_owned(),
+        });
+        state.table_state.select(Some(0));
+        state.detail_open = true;
+        state.intercept_enabled = true;
+        state.filter_mode = true;
+        state.filter_input = "status:500".to_owned();
+        state.show_help = true;
+
+        let rendered = render(&mut state);
+        assert!(rendered.contains("Intercepted Request"));
+        assert!(rendered.contains("Filter: status:500_"));
+        assert!(rendered.contains("Keybindings"));
+
+        state.show_help = false;
+        state.filter_mode = false;
+        state.edit_session = Some(EditSession {
+            id: 10,
+            lines: vec!["GET / HTTP/1.1".to_owned(), "Host: example.test".to_owned()],
+            cursor_row: 0,
+            cursor_col: 3,
+            scroll: 0,
+            typing: true,
+            parse_error: false,
+            binary_body: false,
+        });
+
+        let rendered = render(&mut state);
+        assert!(rendered.contains("Editing Request"));
+        assert!(rendered.contains("Host: example.test"));
+
+        let session = state.edit_session.as_mut().unwrap();
+        session.typing = false;
+        session.parse_error = true;
+        session.binary_body = true;
+        let rendered = render(&mut state);
+        assert!(rendered.contains("parse error"));
+        assert!(rendered.contains("fix the request line"));
+
+        state.edit_session = None;
+        state.table_state.select(Some(1));
+        let rendered = render(&mut state);
+        assert!(rendered.contains("proxy failed"));
+    }
+
+    #[test]
+    fn centered_rect_returns_area_inside_parent() {
+        let parent = Rect::new(0, 0, 100, 40);
+        let area = centered_rect(50, 50, parent);
+
+        assert_eq!(area.x, 25);
+        assert_eq!(area.y, 10);
+        assert_eq!(area.width, 50);
+        assert_eq!(area.height, 20);
+    }
+}
