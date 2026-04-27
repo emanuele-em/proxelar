@@ -106,7 +106,7 @@ pub async fn collect_body(body: hyper::body::Incoming) -> Bytes {
 
 /// Default handler that captures request/response pairs and emits [`ProxyEvent`]s.
 ///
-/// When the `scripting` feature is enabled and a [`ScriptEngine`] is attached,
+/// When the `scripting` feature is enabled and a script engine is attached,
 /// Lua `on_request` / `on_response` hooks are called for every request/response.
 #[derive(Clone)]
 pub struct CapturingHandler {
@@ -125,7 +125,7 @@ impl std::fmt::Debug for CapturingHandler {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("CapturingHandler")
             .field("event_tx", &self.event_tx)
-            .field("captured_request", &self.captured_request)
+            .field("captured_request", &self.captured_request.is_some())
             .field("pending_id", &self.pending_id)
             .finish_non_exhaustive()
     }
@@ -466,5 +466,417 @@ impl HttpHandler for CapturingHandler {
         let (parts, incoming) = res.into_parts();
         let body_bytes = collect_body(incoming).await;
         collect_and_emit(self, parts, body_bytes)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use http::{HeaderMap, Method, StatusCode, Uri, Version};
+    use http_body_util::BodyExt;
+
+    fn proxied_request() -> ProxiedRequest {
+        let mut headers = HeaderMap::new();
+        headers.insert("x-original", "yes".parse().unwrap());
+        ProxiedRequest::new(
+            Method::POST,
+            "http://example.test/path?x=1".parse::<Uri>().unwrap(),
+            Version::HTTP_11,
+            headers,
+            Bytes::from_static(b"request body"),
+            100,
+        )
+    }
+
+    async fn body_bytes(response: Response<ProxyBody>) -> Bytes {
+        response.into_body().collect().await.unwrap().to_bytes()
+    }
+
+    #[test]
+    fn debug_does_not_expose_large_captured_request() {
+        let (event_tx, _event_rx) = mpsc::channel(1);
+        let mut handler = CapturingHandler::new(event_tx);
+        handler.captured_request = Some(proxied_request());
+
+        let debug = format!("{handler:?}");
+
+        assert!(debug.contains("CapturingHandler"));
+        assert!(debug.contains("captured_request: true"));
+        assert!(debug.contains(".."));
+        assert!(!debug.contains("example.test"));
+        assert!(!debug.contains("/path"));
+        assert!(!debug.contains("x-original"));
+        assert!(!debug.contains("request body"));
+    }
+
+    #[tokio::test]
+    async fn collect_and_emit_uses_pending_id_and_rebuilds_response_body() {
+        let (event_tx, mut event_rx) = mpsc::channel(1);
+        let mut handler = CapturingHandler::new(event_tx);
+        handler.pending_id = Some(77);
+        handler.captured_request = Some(proxied_request());
+
+        let (mut parts, _) = Response::builder()
+            .status(StatusCode::ACCEPTED)
+            .header("x-response", "ok")
+            .body(())
+            .unwrap()
+            .into_parts();
+        parts.version = Version::HTTP_11;
+
+        let response = collect_and_emit(&mut handler, parts, Bytes::from_static(b"accepted"));
+
+        assert_eq!(body_bytes(response).await.as_ref(), b"accepted");
+        match event_rx.recv().await.unwrap() {
+            ProxyEvent::RequestComplete {
+                id,
+                request,
+                response,
+            } => {
+                assert_eq!(id, 77);
+                assert_eq!(request.uri().path(), "/path");
+                assert_eq!(response.status(), StatusCode::ACCEPTED);
+                assert_eq!(response.headers()["x-response"], "ok");
+                assert_eq!(response.body().as_ref(), b"accepted");
+            }
+            other => panic!("expected RequestComplete, got {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn collect_and_emit_without_captured_request_sends_no_event() {
+        let (event_tx, mut event_rx) = mpsc::channel(1);
+        let mut handler = CapturingHandler::new(event_tx);
+        let (parts, _) = Response::builder()
+            .status(StatusCode::NO_CONTENT)
+            .body(())
+            .unwrap()
+            .into_parts();
+
+        let response = collect_and_emit(&mut handler, parts, Bytes::new());
+
+        assert!(body_bytes(response).await.is_empty());
+        assert!(event_rx.try_recv().is_err());
+    }
+
+    #[tokio::test]
+    async fn handle_replayed_request_forwards_without_intercept() {
+        let (event_tx, _event_rx) = mpsc::channel(1);
+        let mut handler = CapturingHandler::new(event_tx);
+
+        let request = handler
+            .handle_replayed_request(proxied_request())
+            .await
+            .unwrap();
+
+        assert_eq!(request.method(), Method::POST);
+        assert_eq!(request.uri().path(), "/path");
+        assert_eq!(request.headers()["x-original"], "yes");
+        let body = request.into_body().collect().await.unwrap().to_bytes();
+        assert_eq!(body.as_ref(), b"request body");
+        assert!(handler.pending_id.is_some());
+        assert_eq!(handler.captured_request.unwrap().uri().path(), "/path");
+    }
+
+    #[test]
+    fn take_pending_id_and_event_sender_clone_return_internal_state() {
+        let (event_tx, mut event_rx) = mpsc::channel(1);
+        let mut handler = CapturingHandler::new(event_tx);
+        handler.pending_id = Some(123);
+
+        assert_eq!(handler.take_pending_id(), Some(123));
+        assert_eq!(handler.take_pending_id(), None);
+
+        handler
+            .event_tx_clone()
+            .try_send(ProxyEvent::Error {
+                message: "cloned sender".to_owned(),
+            })
+            .unwrap();
+        assert_eq!(
+            event_rx.try_recv().unwrap().to_string_for_test(),
+            "cloned sender"
+        );
+    }
+
+    #[tokio::test]
+    async fn handle_replayed_request_applies_modified_intercept_decision() {
+        let (event_tx, mut event_rx) = mpsc::channel(4);
+        let intercept = InterceptConfig::new();
+        intercept.set_enabled(true);
+        let mut handler = CapturingHandler::new(event_tx).with_intercept(Arc::clone(&intercept));
+
+        let task =
+            tokio::spawn(async move { handler.handle_replayed_request(proxied_request()).await });
+
+        let id = match event_rx.recv().await.unwrap() {
+            ProxyEvent::RequestIntercepted { id, request } => {
+                assert_eq!(request.uri().path(), "/path");
+                id
+            }
+            other => panic!("expected RequestIntercepted, got {other:?}"),
+        };
+
+        let mut headers = HeaderMap::new();
+        headers.insert("x-modified", "yes".parse().unwrap());
+        assert!(intercept.resolve(
+            id,
+            InterceptDecision::Modified {
+                method: "PUT".to_owned(),
+                uri: "http://example.test/changed".to_owned(),
+                headers,
+                body: Bytes::from_static(b"changed body"),
+            },
+        ));
+
+        let request = task.await.unwrap().unwrap();
+        assert_eq!(request.method(), Method::PUT);
+        assert_eq!(request.uri().path(), "/changed");
+        assert_eq!(request.headers()["x-modified"], "yes");
+        let body = request.into_body().collect().await.unwrap().to_bytes();
+        assert_eq!(body.as_ref(), b"changed body");
+    }
+
+    #[tokio::test]
+    async fn handle_replayed_request_forward_intercept_decision_keeps_original_request() {
+        let (event_tx, mut event_rx) = mpsc::channel(4);
+        let intercept = InterceptConfig::new();
+        intercept.set_enabled(true);
+        let mut handler = CapturingHandler::new(event_tx).with_intercept(Arc::clone(&intercept));
+
+        let task =
+            tokio::spawn(async move { handler.handle_replayed_request(proxied_request()).await });
+
+        let id = match event_rx.recv().await.unwrap() {
+            ProxyEvent::RequestIntercepted { id, request } => {
+                assert_eq!(request.method(), Method::POST);
+                assert_eq!(request.uri().path(), "/path");
+                id
+            }
+            other => panic!("expected RequestIntercepted, got {other:?}"),
+        };
+
+        assert!(intercept.resolve(id, InterceptDecision::Forward));
+
+        let request = task.await.unwrap().unwrap();
+        assert_eq!(request.method(), Method::POST);
+        assert_eq!(request.uri().path(), "/path");
+        assert_eq!(request.headers()["x-original"], "yes");
+        let body = request.into_body().collect().await.unwrap().to_bytes();
+        assert_eq!(body.as_ref(), b"request body");
+    }
+
+    #[tokio::test]
+    async fn handle_replayed_request_block_decision_emits_synthetic_completion() {
+        let (event_tx, mut event_rx) = mpsc::channel(4);
+        let intercept = InterceptConfig::new();
+        intercept.set_enabled(true);
+        let mut handler = CapturingHandler::new(event_tx).with_intercept(Arc::clone(&intercept));
+
+        let task =
+            tokio::spawn(async move { handler.handle_replayed_request(proxied_request()).await });
+
+        let id = match event_rx.recv().await.unwrap() {
+            ProxyEvent::RequestIntercepted { id, .. } => id,
+            other => panic!("expected RequestIntercepted, got {other:?}"),
+        };
+
+        assert!(intercept.resolve(
+            id,
+            InterceptDecision::Block {
+                status: 418,
+                body: Bytes::from_static(b"blocked"),
+            },
+        ));
+
+        assert!(task.await.unwrap().is_none());
+        match event_rx.recv().await.unwrap() {
+            ProxyEvent::RequestComplete {
+                request, response, ..
+            } => {
+                assert_eq!(request.uri().path(), "/path");
+                assert_eq!(response.status(), StatusCode::IM_A_TEAPOT);
+                assert_eq!(response.body().as_ref(), b"blocked");
+            }
+            other => panic!("expected RequestComplete, got {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn handle_replayed_request_forwards_when_intercept_event_channel_is_full() {
+        let (event_tx, mut event_rx) = mpsc::channel(1);
+        event_tx
+            .try_send(ProxyEvent::Error {
+                message: "fill channel".to_owned(),
+            })
+            .unwrap();
+        let intercept = InterceptConfig::new();
+        intercept.set_enabled(true);
+        let mut handler = CapturingHandler::new(event_tx).with_intercept(intercept);
+
+        let request = handler
+            .handle_replayed_request(proxied_request())
+            .await
+            .unwrap();
+
+        assert_eq!(request.method(), Method::POST);
+        assert_eq!(
+            event_rx.recv().await.unwrap().to_string_for_test(),
+            "fill channel"
+        );
+    }
+
+    #[tokio::test]
+    async fn send_event_drops_full_or_closed_channels_without_panicking() {
+        let (event_tx, mut event_rx) = mpsc::channel(1);
+        let handler = CapturingHandler::new(event_tx);
+        handler.send_event(ProxyEvent::Error {
+            message: "first".to_owned(),
+        });
+        handler.send_event(ProxyEvent::Error {
+            message: "second".to_owned(),
+        });
+        assert_eq!(event_rx.recv().await.unwrap().to_string_for_test(), "first");
+
+        drop(event_rx);
+        handler.send_event(ProxyEvent::Error {
+            message: "closed".to_owned(),
+        });
+    }
+
+    #[cfg(feature = "scripting")]
+    #[tokio::test]
+    async fn collect_and_emit_runs_script_response_hook() {
+        use std::io::Write;
+        use tempfile::NamedTempFile;
+
+        let mut file = NamedTempFile::new().unwrap();
+        file.write_all(
+            br#"
+            function on_response(req, res)
+                res.status = 201
+                res.headers["x-script"] = "yes"
+                res.body = "scripted"
+                return res
+            end
+            "#,
+        )
+        .unwrap();
+        file.flush().unwrap();
+
+        let engine = Arc::new(crate::scripting::ScriptEngine::new(file.path()).unwrap());
+        let (event_tx, mut event_rx) = mpsc::channel(1);
+        let mut handler = CapturingHandler::new(event_tx).with_script_engine(engine);
+        handler.captured_request = Some(proxied_request());
+
+        let (parts, _) = Response::builder()
+            .status(StatusCode::OK)
+            .body(())
+            .unwrap()
+            .into_parts();
+
+        let response = collect_and_emit(&mut handler, parts, Bytes::from_static(b"original"));
+
+        assert_eq!(response.status(), StatusCode::CREATED);
+        assert_eq!(response.headers()["x-script"], "yes");
+        assert_eq!(body_bytes(response).await.as_ref(), b"scripted");
+        match event_rx.recv().await.unwrap() {
+            ProxyEvent::RequestComplete { response, .. } => {
+                assert_eq!(response.status(), StatusCode::CREATED);
+                assert_eq!(response.headers()["x-script"], "yes");
+                assert_eq!(response.body().as_ref(), b"scripted");
+            }
+            other => panic!("expected RequestComplete, got {other:?}"),
+        }
+    }
+
+    #[cfg(feature = "scripting")]
+    #[tokio::test]
+    async fn collect_and_emit_passes_through_on_script_response_error() {
+        use std::io::Write;
+        use tempfile::NamedTempFile;
+
+        let mut file = NamedTempFile::new().unwrap();
+        file.write_all(
+            br#"
+            function on_response(req, res)
+                error("boom")
+            end
+            "#,
+        )
+        .unwrap();
+        file.flush().unwrap();
+
+        let engine = Arc::new(crate::scripting::ScriptEngine::new(file.path()).unwrap());
+        let (event_tx, _event_rx) = mpsc::channel(1);
+        let mut handler = CapturingHandler::new(event_tx).with_script_engine(engine);
+
+        let (parts, _) = Response::builder()
+            .status(StatusCode::OK)
+            .body(())
+            .unwrap()
+            .into_parts();
+
+        let response = collect_and_emit(&mut handler, parts, Bytes::from_static(b"original"));
+
+        assert_eq!(response.status(), StatusCode::OK);
+        assert_eq!(body_bytes(response).await.as_ref(), b"original");
+    }
+
+    #[cfg(feature = "scripting")]
+    #[tokio::test]
+    async fn collect_and_emit_passes_through_when_script_returns_nil_response() {
+        use std::io::Write;
+        use tempfile::NamedTempFile;
+
+        let mut file = NamedTempFile::new().unwrap();
+        file.write_all(
+            br#"
+            function on_response(req, res)
+                return nil
+            end
+            "#,
+        )
+        .unwrap();
+        file.flush().unwrap();
+
+        let engine = Arc::new(crate::scripting::ScriptEngine::new(file.path()).unwrap());
+        let (event_tx, mut event_rx) = mpsc::channel(1);
+        let mut handler = CapturingHandler::new(event_tx).with_script_engine(engine);
+        handler.captured_request = Some(proxied_request());
+
+        let (parts, _) = Response::builder()
+            .status(StatusCode::OK)
+            .header("x-original-response", "yes")
+            .body(())
+            .unwrap()
+            .into_parts();
+
+        let response = collect_and_emit(&mut handler, parts, Bytes::from_static(b"original"));
+
+        assert_eq!(response.status(), StatusCode::OK);
+        assert_eq!(response.headers()["x-original-response"], "yes");
+        assert_eq!(body_bytes(response).await.as_ref(), b"original");
+        match event_rx.recv().await.unwrap() {
+            ProxyEvent::RequestComplete { response, .. } => {
+                assert_eq!(response.status(), StatusCode::OK);
+                assert_eq!(response.headers()["x-original-response"], "yes");
+                assert_eq!(response.body().as_ref(), b"original");
+            }
+            other => panic!("expected RequestComplete, got {other:?}"),
+        }
+    }
+
+    trait ProxyEventTestExt {
+        fn to_string_for_test(&self) -> &str;
+    }
+
+    impl ProxyEventTestExt for ProxyEvent {
+        fn to_string_for_test(&self) -> &str {
+            match self {
+                ProxyEvent::Error { message } => message,
+                _ => "",
+            }
+        }
     }
 }

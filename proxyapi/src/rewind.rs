@@ -78,3 +78,75 @@ where
         self.inner.is_write_vectored()
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::io::IoSlice;
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+    #[tokio::test]
+    async fn reads_buffered_prefix_before_inner_stream() {
+        let (mut client, server) = tokio::io::duplex(64);
+        client.write_all(b"inner").await.unwrap();
+        drop(client);
+
+        let mut rewind = Rewind::new_buffered(server, Bytes::from_static(b"prefix-"));
+        let mut out = Vec::new();
+        rewind.read_to_end(&mut out).await.unwrap();
+
+        assert_eq!(out, b"prefix-inner");
+    }
+
+    #[tokio::test]
+    async fn reads_prefix_across_multiple_small_buffers() {
+        let (_client, server) = tokio::io::duplex(64);
+        let mut rewind = Rewind::new_buffered(server, Bytes::from_static(b"abcdef"));
+
+        let mut first = [0; 2];
+        rewind.read_exact(&mut first).await.unwrap();
+        assert_eq!(&first, b"ab");
+
+        let mut second = [0; 3];
+        rewind.read_exact(&mut second).await.unwrap();
+        assert_eq!(&second, b"cde");
+    }
+
+    #[tokio::test]
+    async fn empty_prefix_delegates_to_inner_stream() {
+        let (mut client, server) = tokio::io::duplex(64);
+        client.write_all(b"body").await.unwrap();
+        drop(client);
+
+        let mut rewind = Rewind::new_buffered(server, Bytes::new());
+        let mut out = Vec::new();
+        rewind.read_to_end(&mut out).await.unwrap();
+
+        assert_eq!(out, b"body");
+    }
+
+    #[tokio::test]
+    async fn writes_are_forwarded_to_inner_stream() {
+        let (client, mut server) = tokio::io::duplex(64);
+        let mut rewind = Rewind::new_buffered(client, Bytes::new());
+
+        rewind.write_all(b"pi").await.unwrap();
+        let mut written = rewind
+            .write_vectored(&[IoSlice::new(b"n"), IoSlice::new(b"g")])
+            .await
+            .unwrap();
+        let rest = b"ng";
+        while written < rest.len() {
+            let n = rewind.write(&rest[written..]).await.unwrap();
+            assert!(n > 0);
+            written += n;
+        }
+        rewind.flush().await.unwrap();
+        rewind.shutdown().await.unwrap();
+
+        let mut out = Vec::new();
+        server.read_to_end(&mut out).await.unwrap();
+
+        assert_eq!(out, b"ping");
+    }
+}

@@ -47,7 +47,7 @@ mod tests {
 
     #[test]
     fn test_io_error_conversion() {
-        let io_err = std::io::Error::new(std::io::ErrorKind::Other, "io fail");
+        let io_err = std::io::Error::other("io fail");
         let err: Error = io_err.into();
         assert!(err.to_string().contains("io"));
     }

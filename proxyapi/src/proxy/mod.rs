@@ -177,3 +177,72 @@ async fn recv_replay(rx: &mut Option<mpsc::Receiver<ProxiedRequest>>) -> Option<
         None => std::future::pending().await,
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use bytes::Bytes;
+    use http::{HeaderMap, Method, Version};
+    use std::io;
+
+    #[test]
+    fn benign_shutdown_error_detection_matches_expected_messages() {
+        let shutting_down = io::Error::other("connection is shutting down");
+        let unclean = io::Error::other("connection was not closed cleanly");
+        let refused = io::Error::other("connection refused");
+
+        assert!(is_benign_shutdown_error(&shutting_down));
+        assert!(is_benign_shutdown_error(&unclean));
+        assert!(!is_benign_shutdown_error(&refused));
+    }
+
+    #[test]
+    fn proxy_new_stores_config() {
+        let (event_tx, _event_rx) = mpsc::channel(1);
+        let config = ProxyConfig {
+            addr: "127.0.0.1:0".parse().unwrap(),
+            mode: ProxyMode::Reverse {
+                target: "http://example.test".parse().unwrap(),
+            },
+            event_tx,
+            ca_dir: PathBuf::from("."),
+            intercept: None,
+            #[cfg(feature = "scripting")]
+            script_path: None,
+            replay_rx: None,
+        };
+
+        let proxy = Proxy::new(config);
+
+        assert_eq!(proxy.config.addr.port(), 0);
+        assert!(matches!(proxy.config.mode, ProxyMode::Reverse { .. }));
+    }
+
+    #[tokio::test]
+    async fn recv_replay_reads_from_channel() {
+        let (tx, rx) = mpsc::channel(1);
+        let req = ProxiedRequest::new(
+            Method::GET,
+            "http://example.test/replay".parse().unwrap(),
+            Version::HTTP_11,
+            HeaderMap::new(),
+            Bytes::new(),
+            1,
+        );
+        tx.send(req).await.unwrap();
+        let mut rx = Some(rx);
+
+        let received = recv_replay(&mut rx).await.unwrap();
+
+        assert_eq!(received.uri().path(), "/replay");
+    }
+
+    #[tokio::test]
+    async fn recv_replay_without_channel_waits_forever() {
+        let mut rx = None;
+        let result =
+            tokio::time::timeout(std::time::Duration::from_millis(10), recv_replay(&mut rx)).await;
+
+        assert!(result.is_err());
+    }
+}

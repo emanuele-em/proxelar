@@ -428,6 +428,45 @@ mod tests {
     }
 
     #[test]
+    fn test_on_request_rejects_invalid_return_type() {
+        let engine = engine_from_script(
+            r#"
+            function on_request(req)
+                return 42
+            end
+            "#,
+        );
+        let headers = HeaderMap::new();
+
+        let err = engine
+            .on_request("GET", "http://example.com", &headers, b"")
+            .unwrap_err()
+            .to_string();
+
+        assert!(err.contains("on_request must return a table or nil"));
+    }
+
+    #[test]
+    fn test_on_request_rejects_invalid_header_value_type() {
+        let engine = engine_from_script(
+            r#"
+            function on_request(req)
+                req.headers["x-bad"] = 7
+                return req
+            end
+            "#,
+        );
+        let headers = HeaderMap::new();
+
+        let err = engine
+            .on_request("GET", "http://example.com", &headers, b"")
+            .unwrap_err()
+            .to_string();
+
+        assert!(err.contains("Header value for 'x-bad' must be a string or array of strings"));
+    }
+
+    #[test]
     fn test_on_response_modify() {
         let engine = engine_from_script(
             r#"
@@ -461,6 +500,62 @@ mod tests {
             .on_response("GET", "http://example.com", 200, &headers, b"body")
             .unwrap();
         assert!(matches!(result, ScriptResponseAction::PassThrough));
+    }
+
+    #[test]
+    fn test_on_response_passthrough_nil() {
+        let engine = engine_from_script(
+            r#"
+            function on_response(req, res)
+                return nil
+            end
+            "#,
+        );
+        let headers = HeaderMap::new();
+        let result = engine
+            .on_response("GET", "http://example.com", 200, &headers, b"body")
+            .unwrap();
+
+        assert!(matches!(result, ScriptResponseAction::PassThrough));
+    }
+
+    #[test]
+    fn test_on_response_rejects_invalid_return_type() {
+        let engine = engine_from_script(
+            r#"
+            function on_response(req, res)
+                return false
+            end
+            "#,
+        );
+        let headers = HeaderMap::new();
+
+        let err = engine
+            .on_response("GET", "http://example.com", 200, &headers, b"body")
+            .unwrap_err()
+            .to_string();
+
+        assert!(err.contains("on_response must return a table or nil"));
+    }
+
+    #[test]
+    fn test_on_response_rejects_invalid_header_value_type() {
+        let engine = engine_from_script(
+            r#"
+            function on_response(req, res)
+                res.headers["x-bad"] = true
+                return res
+            end
+            "#,
+        );
+        let headers = HeaderMap::new();
+
+        let err = engine
+            .on_response("GET", "http://example.com", 200, &headers, b"body")
+            .unwrap_err()
+            .to_string();
+
+        assert!(err.contains("Header value for 'x-bad' must be a string or array of strings"));
     }
 
     #[test]

@@ -575,3 +575,129 @@ pub(crate) async fn handle_replay(
         Err(e) => tracing::warn!("Replay request failed: {e}"),
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::body;
+
+    #[test]
+    fn websocket_upgrade_requires_upgrade_header_and_connection_token() {
+        let req = Request::builder()
+            .uri("http://example.test/ws")
+            .header(hyper::header::UPGRADE, "WebSocket")
+            .header(hyper::header::CONNECTION, "keep-alive, Upgrade")
+            .body(())
+            .unwrap();
+        assert!(is_websocket_upgrade(&req));
+
+        let missing_connection = Request::builder()
+            .uri("http://example.test/ws")
+            .header(hyper::header::UPGRADE, "websocket")
+            .body(())
+            .unwrap();
+        assert!(!is_websocket_upgrade(&missing_connection));
+
+        let wrong_upgrade = Request::builder()
+            .uri("http://example.test/ws")
+            .header(hyper::header::UPGRADE, "h2c")
+            .header(hyper::header::CONNECTION, "upgrade")
+            .body(())
+            .unwrap();
+        assert!(!is_websocket_upgrade(&wrong_upgrade));
+    }
+
+    #[test]
+    fn normalize_request_removes_host_joins_cookies_and_pins_http11() {
+        let req = Request::builder()
+            .method(Method::GET)
+            .uri("http://upstream.test/path")
+            .version(hyper::Version::HTTP_10)
+            .header(hyper::header::HOST, "wrong-host.test")
+            .header(hyper::header::COOKIE, "a=1")
+            .header(hyper::header::COOKIE, "b=2")
+            .body(body::empty())
+            .unwrap();
+
+        let req = normalize_request(req);
+
+        assert!(!req.headers().contains_key(hyper::header::HOST));
+        assert_eq!(
+            req.headers().get(hyper::header::COOKIE).unwrap(),
+            "a=1; b=2"
+        );
+        assert_eq!(
+            req.headers().get_all(hyper::header::COOKIE).iter().count(),
+            1
+        );
+        assert_eq!(req.version(), hyper::Version::HTTP_11);
+    }
+
+    #[tokio::test]
+    async fn emit_ws_frame_maps_text_message_to_event() {
+        let (tx, mut rx) = mpsc::channel(1);
+
+        emit_ws_frame(
+            &tx,
+            42,
+            &Message::Text("hello".into()),
+            WsDirection::ClientToServer,
+        );
+
+        match rx.recv().await.unwrap() {
+            ProxyEvent::WebSocketFrame { conn_id, frame } => {
+                assert_eq!(conn_id, 42);
+                assert_eq!(frame.direction, WsDirection::ClientToServer);
+                assert_eq!(frame.opcode, WsOpcode::Text);
+                assert_eq!(frame.payload.as_ref(), b"hello");
+                assert!(!frame.truncated);
+            }
+            other => panic!("expected WebSocketFrame event, got {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn emit_ws_frame_maps_control_messages() {
+        let (tx, mut rx) = mpsc::channel(3);
+
+        emit_ws_frame(
+            &tx,
+            7,
+            &Message::Binary(vec![1, 2, 3].into()),
+            WsDirection::ServerToClient,
+        );
+        emit_ws_frame(
+            &tx,
+            7,
+            &Message::Ping(Bytes::from_static(b"ping")),
+            WsDirection::ServerToClient,
+        );
+        emit_ws_frame(&tx, 7, &Message::Close(None), WsDirection::ServerToClient);
+
+        let first = rx.recv().await.unwrap();
+        let second = rx.recv().await.unwrap();
+        let third = rx.recv().await.unwrap();
+
+        match first {
+            ProxyEvent::WebSocketFrame { frame, .. } => {
+                assert_eq!(frame.opcode, WsOpcode::Binary);
+                assert_eq!(frame.payload.as_ref(), &[1, 2, 3]);
+            }
+            other => panic!("expected binary frame, got {other:?}"),
+        }
+        match second {
+            ProxyEvent::WebSocketFrame { frame, .. } => {
+                assert_eq!(frame.opcode, WsOpcode::Ping);
+                assert_eq!(frame.payload.as_ref(), b"ping");
+            }
+            other => panic!("expected ping frame, got {other:?}"),
+        }
+        match third {
+            ProxyEvent::WebSocketFrame { frame, .. } => {
+                assert_eq!(frame.opcode, WsOpcode::Close);
+                assert!(frame.payload.is_empty());
+            }
+            other => panic!("expected close frame, got {other:?}"),
+        }
+    }
+}

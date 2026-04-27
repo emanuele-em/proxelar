@@ -102,3 +102,45 @@ fn rewrite_uri(
 
     Ok(req)
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::body;
+
+    #[test]
+    fn rewrite_uri_preserves_path_query_and_sets_target_host() {
+        let req = Request::builder()
+            .uri("/api/items?name=one")
+            .header(hyper::header::HOST, "client.example")
+            .body(body::empty())
+            .unwrap();
+        let target: Uri = "https://upstream.example:8443".parse().unwrap();
+
+        let req = rewrite_uri(req, &target).unwrap();
+
+        assert_eq!(req.uri().scheme_str(), Some("https"));
+        assert_eq!(
+            req.uri().authority().map(|a| a.as_str()),
+            Some("upstream.example:8443")
+        );
+        assert_eq!(req.uri().path(), "/api/items");
+        assert_eq!(req.uri().query(), Some("name=one"));
+        assert_eq!(req.headers()[hyper::header::HOST], "upstream.example:8443");
+    }
+
+    #[test]
+    fn rewrite_uri_leaves_host_when_target_has_no_authority() {
+        let req = Request::builder()
+            .uri("/local")
+            .header(hyper::header::HOST, "client.example")
+            .body(body::empty())
+            .unwrap();
+        let target: Uri = "/target-only".parse().unwrap();
+
+        let req = rewrite_uri(req, &target).unwrap();
+
+        assert_eq!(req.uri().path(), "/local");
+        assert_eq!(req.headers()[hyper::header::HOST], "client.example");
+    }
+}
