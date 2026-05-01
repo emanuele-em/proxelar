@@ -14,9 +14,7 @@ const EVENT_CHANNEL_CAPACITY: usize = 10_000;
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
-    rustls::crypto::ring::default_provider()
-        .install_default()
-        .map_err(|e| format!("Failed to install rustls crypto provider: {e:?}"))?;
+    let _ = rustls::crypto::ring::default_provider().install_default();
 
     let args = Args::parse();
     tracing_subscriber::fmt()
@@ -57,6 +55,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         event_tx,
         ca_dir,
         intercept: Some(Arc::clone(&intercept)),
+        body_capture_limit: args.body_capture_limit,
         #[cfg(feature = "scripting")]
         script_path: args.script,
         replay_rx: Some(replay_rx),

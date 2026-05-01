@@ -40,6 +40,14 @@ pub struct Args {
     /// Path to a Lua script for request/response hooks
     #[arg(short = 's', long = "script", value_name = "FILE")]
     pub script: Option<PathBuf>,
+
+    /// Maximum body bytes buffered for capture/editing before passthrough
+    #[arg(
+        long = "body-capture-limit",
+        value_name = "BYTES",
+        default_value_t = proxyapi::DEFAULT_BODY_CAPTURE_LIMIT
+    )]
+    pub body_capture_limit: usize,
 }
 
 #[derive(Clone, Debug, ValueEnum)]
@@ -65,6 +73,10 @@ mod tests {
         assert!(matches!(args.interface, Interface::Tui));
         assert!(matches!(args.mode, Mode::Forward));
         assert_eq!(args.port, 8080);
+        assert_eq!(
+            args.body_capture_limit,
+            proxyapi::DEFAULT_BODY_CAPTURE_LIMIT
+        );
     }
 
     #[test]
@@ -78,5 +90,12 @@ mod tests {
         let args = Args::parse_from(["proxelar", "-i", "gui", "--gui-port", "9090"]);
         assert!(matches!(args.interface, Interface::Gui));
         assert_eq!(args.gui_port, 9090);
+    }
+
+    #[test]
+    fn test_body_capture_limit_arg() {
+        let args = Args::parse_from(["proxelar", "--body-capture-limit", "4096"]);
+
+        assert_eq!(args.body_capture_limit, 4096);
     }
 }

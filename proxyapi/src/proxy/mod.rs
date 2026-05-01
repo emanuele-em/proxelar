@@ -44,6 +44,8 @@ pub struct ProxyConfig {
     pub ca_dir: PathBuf,
     /// Optional intercept controller for interactive request/response editing.
     pub intercept: Option<Arc<InterceptConfig>>,
+    /// Maximum body bytes buffered for capture/editing before streaming passthrough.
+    pub body_capture_limit: usize,
     /// Optional path to a Lua script for request/response hooks.
     #[cfg(feature = "scripting")]
     pub script_path: Option<PathBuf>,
@@ -119,7 +121,8 @@ impl Proxy {
                             continue;
                         }
                     };
-                    let mut handler = CapturingHandler::new(self.config.event_tx.clone());
+                    let mut handler = CapturingHandler::new(self.config.event_tx.clone())
+                        .with_body_capture_limit(self.config.body_capture_limit);
                     if let Some(ref ic) = self.config.intercept {
                         handler = handler.with_intercept(Arc::clone(ic));
                     }
@@ -146,7 +149,8 @@ impl Proxy {
                     }
                 }
                 Some(req) = recv_replay(&mut replay_rx) => {
-                    let mut handler = CapturingHandler::new(self.config.event_tx.clone());
+                    let mut handler = CapturingHandler::new(self.config.event_tx.clone())
+                        .with_body_capture_limit(self.config.body_capture_limit);
                     if let Some(ref ic) = self.config.intercept {
                         handler = handler.with_intercept(Arc::clone(ic));
                     }
@@ -181,6 +185,7 @@ async fn recv_replay(rx: &mut Option<mpsc::Receiver<ProxiedRequest>>) -> Option<
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::handler::DEFAULT_BODY_CAPTURE_LIMIT;
     use bytes::Bytes;
     use http::{HeaderMap, Method, Version};
     use std::io;
@@ -207,6 +212,7 @@ mod tests {
             event_tx,
             ca_dir: PathBuf::from("."),
             intercept: None,
+            body_capture_limit: DEFAULT_BODY_CAPTURE_LIMIT,
             #[cfg(feature = "scripting")]
             script_path: None,
             replay_rx: None,

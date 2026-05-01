@@ -22,7 +22,7 @@ use std::net::SocketAddr;
 
 pub use error::Error;
 pub use event::ProxyEvent;
-pub use handler::CapturingHandler;
+pub use handler::{CapturingHandler, DEFAULT_BODY_CAPTURE_LIMIT};
 pub use intercept::{InterceptConfig, InterceptDecision};
 pub use proxy::{Proxy, ProxyConfig, ProxyMode};
 
