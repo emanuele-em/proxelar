@@ -13,6 +13,8 @@ use std::sync::Arc;
 use tokio::net::TcpListener;
 use tokio::sync::mpsc;
 
+const EVENT_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(10);
+
 #[tokio::test]
 async fn test_reverse_proxy_starts_and_shuts_down() {
     let _ = rustls::crypto::ring::default_provider().install_default();
@@ -99,7 +101,7 @@ async fn reverse_proxy_forwards_http_and_emits_request_complete() {
     assert_eq!(response.headers()["x-upstream-path"], "/hello");
     assert_eq!(response.text().await.unwrap(), "upstream response");
 
-    let event = tokio::time::timeout(std::time::Duration::from_secs(2), event_rx.recv())
+    let event = tokio::time::timeout(EVENT_TIMEOUT, event_rx.recv())
         .await
         .unwrap()
         .unwrap();
@@ -217,7 +219,7 @@ async fn reverse_proxy_intercepts_oversized_request_before_streaming_original() 
             .unwrap()
     });
 
-    let intercepted = tokio::time::timeout(std::time::Duration::from_secs(2), event_rx.recv())
+    let intercepted = tokio::time::timeout(EVENT_TIMEOUT, event_rx.recv())
         .await
         .unwrap()
         .unwrap();

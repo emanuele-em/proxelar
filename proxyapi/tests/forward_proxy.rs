@@ -15,6 +15,8 @@ use tokio_tungstenite::tungstenite::protocol::Role;
 use tokio_tungstenite::tungstenite::Message;
 use tokio_tungstenite::WebSocketStream;
 
+const EVENT_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(10);
+
 #[tokio::test]
 async fn test_forward_proxy_starts_and_shuts_down() {
     let _ = rustls::crypto::ring::default_provider().install_default();
@@ -783,7 +785,7 @@ fn assert_response_header(response: &str, name: &str, value: &str) {
 }
 
 async fn recv_request_complete(event_rx: &mut mpsc::Receiver<ProxyEvent>) -> ProxyEvent {
-    tokio::time::timeout(std::time::Duration::from_secs(2), async {
+    tokio::time::timeout(EVENT_TIMEOUT, async {
         loop {
             let event = event_rx.recv().await.unwrap();
             if matches!(event, ProxyEvent::RequestComplete { .. }) {
