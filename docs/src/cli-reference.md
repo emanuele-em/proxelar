@@ -16,6 +16,7 @@ proxelar [OPTIONS]
 | `--script` | `-s` | — | Path to a Lua script for request/response hooks |
 | `--gui-port` | | `8081` | Web GUI port (only used with `-i gui`) |
 | `--ca-dir` | | `~/.proxelar` | Directory for CA certificate and key files |
+| `--body-capture-limit` | | `free` | Maximum body bytes buffered for capture/editing; use `free`, `unlimited`, or `none` for unlimited |
 
 ## Environment variables
 
@@ -40,4 +41,7 @@ proxelar -m reverse --target http://localhost:3000 --script auth.lua
 
 # Forward proxy with logging script
 proxelar --script log_traffic.lua
+
+# Capture only the first 1 MiB of large bodies while streaming traffic through
+proxelar --body-capture-limit 1048576
 ```

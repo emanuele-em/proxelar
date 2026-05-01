@@ -25,7 +25,7 @@ cargo package --workspace --list
 
 ## Making Changes
 
-1. Fork the repo and create a branch from `master`
+1. Fork the repo and create a branch from `main`
 2. Make your changes
 3. Add or update tests for behavior changes
 4. Run the relevant checks from the testing section below

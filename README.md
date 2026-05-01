@@ -109,6 +109,7 @@ proxelar -i gui       # web GUI at http://localhost:8081
 proxelar -m reverse --target http://localhost:3000   # reverse proxy
 proxelar -b 0.0.0.0 -p 9090                         # custom bind/port
 proxelar --script examples/scripts/block_domain.lua  # with a Lua script
+proxelar --body-capture-limit 1048576                # cap captured/editable body bytes
 ```
 
 <details>
@@ -124,6 +125,7 @@ proxelar --script examples/scripts/block_domain.lua  # with a Lua script
 | `--gui-port` | Web GUI port | `8081` |
 | `--ca-dir` | CA certificate directory | `~/.proxelar` |
 | `-s, --script` | Lua script for request/response hooks | — |
+| `--body-capture-limit` | Maximum body bytes buffered for capture/editing; use `free`, `unlimited`, or `none` for unlimited | `free` |
 
 </details>
 
@@ -218,7 +220,7 @@ More examples in [`examples/scripts/`](examples/scripts/) — header injection, 
 
 ## Documentation
 
-Latest release: **[Proxelar 0.4.3 — Richer Request Table and Unified Column Filtering](https://micheletti.io/proxelar-043/)**
+Latest release: **[Proxelar 0.4.4 — Body Capture Limits for Large Traffic](https://github.com/emanuele-em/proxelar/releases/tag/v0.4.4)**
 
 Full documentation at **[proxelar.micheletti.io](https://proxelar.micheletti.io)**:
 
