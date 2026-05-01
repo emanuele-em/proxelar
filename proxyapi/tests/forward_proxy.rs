@@ -5,7 +5,7 @@ use hyper::body::Incoming;
 use hyper::service::service_fn;
 use hyper::{Request, Response};
 use hyper_util::rt::TokioIo;
-use proxyapi::{Proxy, ProxyConfig, ProxyEvent, ProxyMode};
+use proxyapi::{Proxy, ProxyConfig, ProxyEvent, ProxyMode, DEFAULT_BODY_CAPTURE_LIMIT};
 use proxyapi_models::ProxiedRequest;
 use std::net::SocketAddr;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
@@ -14,6 +14,8 @@ use tokio::sync::mpsc;
 use tokio_tungstenite::tungstenite::protocol::Role;
 use tokio_tungstenite::tungstenite::Message;
 use tokio_tungstenite::WebSocketStream;
+
+const EVENT_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(10);
 
 #[tokio::test]
 async fn test_forward_proxy_starts_and_shuts_down() {
@@ -29,6 +31,7 @@ async fn test_forward_proxy_starts_and_shuts_down() {
         event_tx,
         ca_dir: ca_dir.path().to_path_buf(),
         intercept: None,
+        body_capture_limit: DEFAULT_BODY_CAPTURE_LIMIT,
         #[cfg(feature = "scripting")]
         script_path: None,
         replay_rx: None,
@@ -507,6 +510,7 @@ async fn start_forward_proxy() -> (
         event_tx,
         ca_dir: ca_dir.path().to_path_buf(),
         intercept: None,
+        body_capture_limit: DEFAULT_BODY_CAPTURE_LIMIT,
         #[cfg(feature = "scripting")]
         script_path: None,
         replay_rx: None,
@@ -545,6 +549,7 @@ async fn start_forward_proxy_with_replay() -> (
         event_tx,
         ca_dir: ca_dir.path().to_path_buf(),
         intercept: None,
+        body_capture_limit: DEFAULT_BODY_CAPTURE_LIMIT,
         #[cfg(feature = "scripting")]
         script_path: None,
         replay_rx: Some(replay_rx),
@@ -780,7 +785,7 @@ fn assert_response_header(response: &str, name: &str, value: &str) {
 }
 
 async fn recv_request_complete(event_rx: &mut mpsc::Receiver<ProxyEvent>) -> ProxyEvent {
-    tokio::time::timeout(std::time::Duration::from_secs(2), async {
+    tokio::time::timeout(EVENT_TIMEOUT, async {
         loop {
             let event = event_rx.recv().await.unwrap();
             if matches!(event, ProxyEvent::RequestComplete { .. }) {

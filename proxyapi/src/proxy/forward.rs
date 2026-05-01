@@ -18,7 +18,7 @@ use proxyapi_models::{ProxiedRequest, ProxiedResponse, WsDirection, WsFrame, WsO
 use crate::body::{self, ProxyBody};
 use crate::ca::{cert_server, CertificateAuthority, Ssl};
 use crate::event::ProxyEvent;
-use crate::handler::{collect_and_emit, collect_body, now_millis, CapturingHandler};
+use crate::handler::{now_millis, CapturingHandler};
 use crate::rewind::Rewind;
 use crate::{HttpContext, HttpHandler, RequestOrResponse};
 
@@ -30,8 +30,8 @@ const HTTP_GET_PREFIX: &[u8; 4] = b"GET ";
 const TLS_RECORD_HANDSHAKE: u8 = 0x16;
 /// TLS major version byte (SSLv3 / TLS 1.x).
 const TLS_VERSION_MAJOR: u8 = 0x03;
-/// Maximum payload size captured per WebSocket frame (100 MB, matches MAX_BODY_SIZE).
-const MAX_WS_FRAME_PAYLOAD: usize = 100 * 1024 * 1024;
+/// Maximum payload size captured per WebSocket frame.
+const MAX_WS_FRAME_PAYLOAD: Option<usize> = crate::handler::DEFAULT_BODY_CAPTURE_LIMIT;
 
 /// Returns true when the request carries WebSocket upgrade tokens.
 fn is_websocket_upgrade<B>(req: &Request<B>) -> bool {
@@ -136,9 +136,7 @@ pub async fn handle_connection(
 
                         Ok(Response::from_parts(parts, body::empty()))
                     } else {
-                        let (parts, body) = res.into_parts();
-                        let body_bytes = collect_body(body).await;
-                        Ok(collect_and_emit(&mut handler, parts, body_bytes))
+                        Ok(handler.handle_upstream_response(res).await)
                     }
                 }
                 Err(e) => {
@@ -413,9 +411,7 @@ where
 
                         Ok(Response::from_parts(parts, body::empty()))
                     } else {
-                        let (parts, body) = res.into_parts();
-                        let body_bytes = collect_body(body).await;
-                        Ok(collect_and_emit(&mut handler, parts, body_bytes))
+                        Ok(handler.handle_upstream_response(res).await)
                     }
                 }
                 Err(e) => {
@@ -546,8 +542,9 @@ fn emit_ws_frame(
         Message::Close(_) => (WsOpcode::Close, b""),
         Message::Frame(_) => (WsOpcode::Continuation, b""),
     };
-    let truncated = raw.len() > MAX_WS_FRAME_PAYLOAD;
-    let payload = Bytes::copy_from_slice(&raw[..raw.len().min(MAX_WS_FRAME_PAYLOAD)]);
+    let limit = MAX_WS_FRAME_PAYLOAD.unwrap_or(raw.len());
+    let truncated = raw.len() > limit;
+    let payload = Bytes::copy_from_slice(&raw[..raw.len().min(limit)]);
     let _ = tx.try_send(ProxyEvent::WebSocketFrame {
         conn_id,
         frame: Box::new(WsFrame::new(direction, opcode, time, payload, truncated)),
@@ -568,9 +565,7 @@ pub(crate) async fn handle_replay(
     };
     match client.request(normalize_request(fwd_req)).await {
         Ok(res) => {
-            let (parts, body) = res.into_parts();
-            let body_bytes = collect_body(body).await;
-            collect_and_emit(&mut handler, parts, body_bytes);
+            handler.record_upstream_response(res).await;
         }
         Err(e) => tracing::warn!("Replay request failed: {e}"),
     }

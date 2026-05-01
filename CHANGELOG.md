@@ -7,6 +7,7 @@
 
 ## [Unreleased]
 
+- Add an optional body capture limit so large uploads/downloads can stream safely while preserving the default unlimited capture behavior.
 - Dependency updates: rand 0.10.1, actions/upload-pages-artifact 5, softprops/action-gh-release 3
 - Replace CLAUDE.md with compact AGENTS.md contributor instructions
 
