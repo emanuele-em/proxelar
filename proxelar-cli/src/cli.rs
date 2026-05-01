@@ -1,6 +1,7 @@
 use clap::{Parser, ValueEnum};
 use std::net::IpAddr;
 use std::path::PathBuf;
+use std::str::FromStr;
 
 #[derive(Parser)]
 #[command(
@@ -41,13 +42,43 @@ pub struct Args {
     #[arg(short = 's', long = "script", value_name = "FILE")]
     pub script: Option<PathBuf>,
 
-    /// Maximum body bytes buffered for capture/editing before passthrough
+    /// Maximum body bytes buffered for capture/editing before passthrough (`free` for unlimited)
     #[arg(
         long = "body-capture-limit",
-        value_name = "BYTES",
-        default_value_t = proxyapi::DEFAULT_BODY_CAPTURE_LIMIT
+        value_name = "BYTES|free",
+        default_value = "free"
     )]
-    pub body_capture_limit: usize,
+    pub body_capture_limit: BodyCaptureLimit,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum BodyCaptureLimit {
+    Unlimited,
+    Bytes(usize),
+}
+
+impl BodyCaptureLimit {
+    pub fn into_option(self) -> Option<usize> {
+        match self {
+            Self::Unlimited => None,
+            Self::Bytes(bytes) => Some(bytes),
+        }
+    }
+}
+
+impl FromStr for BodyCaptureLimit {
+    type Err = String;
+
+    fn from_str(value: &str) -> Result<Self, Self::Err> {
+        let value = value.trim();
+        match value.to_ascii_lowercase().as_str() {
+            "free" | "unlimited" | "none" => Ok(Self::Unlimited),
+            _ => value
+                .parse()
+                .map(Self::Bytes)
+                .map_err(|_| "expected a byte count, `free`, `unlimited`, or `none`".to_owned()),
+        }
+    }
 }
 
 #[derive(Clone, Debug, ValueEnum)]
@@ -74,7 +105,7 @@ mod tests {
         assert!(matches!(args.mode, Mode::Forward));
         assert_eq!(args.port, 8080);
         assert_eq!(
-            args.body_capture_limit,
+            args.body_capture_limit.into_option(),
             proxyapi::DEFAULT_BODY_CAPTURE_LIMIT
         );
     }
@@ -96,6 +127,13 @@ mod tests {
     fn test_body_capture_limit_arg() {
         let args = Args::parse_from(["proxelar", "--body-capture-limit", "4096"]);
 
-        assert_eq!(args.body_capture_limit, 4096);
+        assert_eq!(args.body_capture_limit, BodyCaptureLimit::Bytes(4096));
+    }
+
+    #[test]
+    fn test_body_capture_limit_free_arg() {
+        let args = Args::parse_from(["proxelar", "--body-capture-limit", "free"]);
+
+        assert_eq!(args.body_capture_limit, BodyCaptureLimit::Unlimited);
     }
 }

@@ -190,7 +190,7 @@ async fn reverse_proxy_intercepts_oversized_request_before_streaming_original() 
         event_tx,
         ca_dir: ca_dir.path().to_path_buf(),
         intercept: Some(Arc::clone(&intercept)),
-        body_capture_limit: 4,
+        body_capture_limit: Some(4),
         #[cfg(feature = "scripting")]
         script_path: None,
         replay_rx: None,
@@ -292,7 +292,7 @@ async fn reverse_proxy_runs_scripts_for_oversized_request_and_response() {
         event_tx,
         ca_dir: ca_dir.path().to_path_buf(),
         intercept: None,
-        body_capture_limit: 4,
+        body_capture_limit: Some(4),
         script_path: Some(script.path().to_path_buf()),
         replay_rx: None,
     };

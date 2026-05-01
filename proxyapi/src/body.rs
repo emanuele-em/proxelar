@@ -15,7 +15,7 @@ pub type ProxyBody = BoxBody<Bytes, hyper::Error>;
 #[derive(Clone, Debug)]
 pub(crate) struct BodyCapture {
     inner: Arc<Mutex<BodyCaptureState>>,
-    limit: usize,
+    limit: Option<usize>,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -33,7 +33,7 @@ struct BodyCaptureState {
 }
 
 impl BodyCapture {
-    pub(crate) fn new(limit: usize) -> Self {
+    pub(crate) fn new(limit: Option<usize>) -> Self {
         Self {
             inner: Arc::new(Mutex::new(BodyCaptureState {
                 bytes: BytesMut::new(),
@@ -48,13 +48,17 @@ impl BodyCapture {
         let mut state = self.inner.lock().unwrap_or_else(|e| e.into_inner());
         state.total_seen = state.total_seen.saturating_add(chunk.len());
 
-        let remaining = self.limit.saturating_sub(state.bytes.len());
-        if remaining > 0 {
-            let keep = remaining.min(chunk.len());
-            state.bytes.extend_from_slice(&chunk[..keep]);
-        }
-        if chunk.len() > remaining {
-            state.truncated = true;
+        if let Some(limit) = self.limit {
+            let remaining = limit.saturating_sub(state.bytes.len());
+            if remaining > 0 {
+                let keep = remaining.min(chunk.len());
+                state.bytes.extend_from_slice(&chunk[..keep]);
+            }
+            if chunk.len() > remaining {
+                state.truncated = true;
+            }
+        } else {
+            state.bytes.extend_from_slice(chunk);
         }
     }
 
@@ -265,7 +269,7 @@ mod tests {
 
     #[tokio::test]
     async fn capture_body_forwards_all_bytes_and_caps_snapshot() {
-        let capture_state = BodyCapture::new(4);
+        let capture_state = BodyCapture::new(Some(4));
         let body = capture(
             full(Bytes::from_static(b"abcdef")),
             capture_state.clone(),
@@ -282,12 +286,30 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn capture_body_keeps_full_snapshot_when_unlimited() {
+        let capture_state = BodyCapture::new(None);
+        let body = capture(
+            full(Bytes::from_static(b"abcdef")),
+            capture_state.clone(),
+            || {},
+        );
+
+        let collected = body.collect().await.unwrap().to_bytes();
+        let snapshot = capture_state.snapshot();
+
+        assert_eq!(collected.as_ref(), b"abcdef");
+        assert_eq!(snapshot.bytes.as_ref(), b"abcdef");
+        assert!(!snapshot.truncated);
+        assert_eq!(snapshot.total_seen, 6);
+    }
+
+    #[tokio::test]
     async fn capture_body_runs_completion_once_at_end_of_stream() {
         use std::sync::atomic::{AtomicUsize, Ordering};
 
         let completed = Arc::new(AtomicUsize::new(0));
         let completed_for_body = Arc::clone(&completed);
-        let body = capture(full(Bytes::new()), BodyCapture::new(16), move || {
+        let body = capture(full(Bytes::new()), BodyCapture::new(Some(16)), move || {
             completed_for_body.fetch_add(1, Ordering::SeqCst);
         });
 
@@ -305,7 +327,7 @@ mod tests {
         let completed_for_body = Arc::clone(&completed);
         let body = capture(
             full(Bytes::from_static(b"body")),
-            BodyCapture::new(16),
+            BodyCapture::new(Some(16)),
             move || {
                 completed_for_body.fetch_add(1, Ordering::SeqCst);
             },

@@ -55,7 +55,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         event_tx,
         ca_dir,
         intercept: Some(Arc::clone(&intercept)),
-        body_capture_limit: args.body_capture_limit,
+        body_capture_limit: args.body_capture_limit.into_option(),
         #[cfg(feature = "scripting")]
         script_path: args.script,
         replay_rx: Some(replay_rx),

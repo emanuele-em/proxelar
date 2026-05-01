@@ -31,7 +31,7 @@ const TLS_RECORD_HANDSHAKE: u8 = 0x16;
 /// TLS major version byte (SSLv3 / TLS 1.x).
 const TLS_VERSION_MAJOR: u8 = 0x03;
 /// Maximum payload size captured per WebSocket frame.
-const MAX_WS_FRAME_PAYLOAD: usize = crate::handler::DEFAULT_BODY_CAPTURE_LIMIT;
+const MAX_WS_FRAME_PAYLOAD: Option<usize> = crate::handler::DEFAULT_BODY_CAPTURE_LIMIT;
 
 /// Returns true when the request carries WebSocket upgrade tokens.
 fn is_websocket_upgrade<B>(req: &Request<B>) -> bool {
@@ -542,8 +542,9 @@ fn emit_ws_frame(
         Message::Close(_) => (WsOpcode::Close, b""),
         Message::Frame(_) => (WsOpcode::Continuation, b""),
     };
-    let truncated = raw.len() > MAX_WS_FRAME_PAYLOAD;
-    let payload = Bytes::copy_from_slice(&raw[..raw.len().min(MAX_WS_FRAME_PAYLOAD)]);
+    let limit = MAX_WS_FRAME_PAYLOAD.unwrap_or(raw.len());
+    let truncated = raw.len() > limit;
+    let payload = Bytes::copy_from_slice(&raw[..raw.len().min(limit)]);
     let _ = tx.try_send(ProxyEvent::WebSocketFrame {
         conn_id,
         frame: Box::new(WsFrame::new(direction, opcode, time, payload, truncated)),

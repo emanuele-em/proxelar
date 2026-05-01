@@ -45,7 +45,9 @@ pub struct ProxyConfig {
     /// Optional intercept controller for interactive request/response editing.
     pub intercept: Option<Arc<InterceptConfig>>,
     /// Maximum body bytes buffered for capture/editing before streaming passthrough.
-    pub body_capture_limit: usize,
+    ///
+    /// `None` means unlimited capture.
+    pub body_capture_limit: Option<usize>,
     /// Optional path to a Lua script for request/response hooks.
     #[cfg(feature = "scripting")]
     pub script_path: Option<PathBuf>,

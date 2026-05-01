@@ -12,11 +12,11 @@ use crate::event::{next_id, ProxyEvent};
 use crate::intercept::{InterceptConfig, InterceptDecision};
 use crate::{HttpContext, HttpHandler, RequestOrResponse};
 
-/// Default maximum body size the proxy buffers for capture/editing (100 MB).
+/// Default body capture limit.
 ///
-/// Larger bodies are streamed through unchanged when possible, with stored
-/// captures capped at this size.
-pub const DEFAULT_BODY_CAPTURE_LIMIT: usize = 100 * 1024 * 1024;
+/// `None` keeps the default mitmproxy-style behavior: buffer complete HTTP
+/// bodies for capture/editing unless the user configures an explicit limit.
+pub const DEFAULT_BODY_CAPTURE_LIMIT: Option<usize> = None;
 
 enum BodyCollection {
     Complete(Bytes),
@@ -205,7 +205,7 @@ impl HookedResponseBody {
 ///
 /// When the body exceeds the limit, returns a reconstructed streaming body that
 /// first replays already-read bytes, then continues the original body.
-async fn collect_body<B>(mut body: B, limit: usize, kind: &'static str) -> BodyCollection
+async fn collect_body<B>(mut body: B, limit: Option<usize>, kind: &'static str) -> BodyCollection
 where
     B: HttpBody<Data = Bytes, Error = hyper::Error> + Send + Sync + Unpin + 'static,
 {
@@ -221,6 +221,11 @@ where
         };
 
         let Ok(data) = frame.into_data() else {
+            continue;
+        };
+
+        let Some(limit) = limit else {
+            buffer.extend_from_slice(&data);
             continue;
         };
 
@@ -258,7 +263,7 @@ pub struct CapturingHandler {
     /// share the same ID and the UI can correlate them.
     pending_id: Option<u64>,
     intercept: Option<Arc<InterceptConfig>>,
-    body_capture_limit: usize,
+    body_capture_limit: Option<usize>,
     #[cfg(feature = "scripting")]
     script_engine: Option<Arc<crate::scripting::ScriptEngine>>,
 }
@@ -291,10 +296,10 @@ impl CapturingHandler {
 
     /// Set the maximum body bytes buffered for capture and byte-editing paths.
     ///
-    /// Bodies above this limit are streamed through unchanged and captured only
-    /// up to the configured limit.
+    /// `None` means unlimited capture. `Some(limit)` streams bodies above the
+    /// limit through unchanged and captures only up to the configured limit.
     #[must_use]
-    pub fn with_body_capture_limit(mut self, limit: usize) -> Self {
+    pub fn with_body_capture_limit(mut self, limit: Option<usize>) -> Self {
         self.body_capture_limit = limit;
         self
     }
@@ -967,7 +972,7 @@ mod tests {
     async fn stream_response_forwards_full_body_and_emits_capped_snapshots() {
         let (event_tx, mut event_rx) = mpsc::channel(1);
         let mut handler = CapturingHandler::new(event_tx);
-        handler.body_capture_limit = 4;
+        handler.body_capture_limit = Some(4);
         handler.pending_id = Some(88);
 
         let (req_parts, _) = Request::builder()
@@ -976,7 +981,7 @@ mod tests {
             .body(())
             .unwrap()
             .into_parts();
-        let request_capture = BodyCapture::new(4);
+        let request_capture = BodyCapture::new(Some(4));
         request_capture.append(&Bytes::from_static(b"abcdef"));
         let request_done = Arc::new(Notify::new());
         request_done.notify_one();
@@ -1084,7 +1089,7 @@ mod tests {
             .body(())
             .unwrap()
             .into_parts();
-        let request_capture = BodyCapture::new(10);
+        let request_capture = BodyCapture::new(Some(10));
         request_capture.append(&Bytes::from_static(b"abc"));
         let request_done = Arc::new(Notify::new());
         handler.captured_request = Some(CapturedRequest::streaming(
@@ -1124,12 +1129,26 @@ mod tests {
 
     #[tokio::test]
     async fn collect_body_returns_streaming_body_when_limit_is_exceeded() {
-        match collect_body(body::full(Bytes::from_static(b"abcdef")), 4, "response").await {
+        match collect_body(
+            body::full(Bytes::from_static(b"abcdef")),
+            Some(4),
+            "response",
+        )
+        .await
+        {
             BodyCollection::Complete(_) => panic!("expected limit fallback"),
             BodyCollection::Exceeded { captured, body } => {
                 assert_eq!(captured.as_ref(), b"abcd");
                 assert_eq!(body.collect().await.unwrap().to_bytes().as_ref(), b"abcdef");
             }
+        }
+    }
+
+    #[tokio::test]
+    async fn collect_body_buffers_full_body_when_unlimited() {
+        match collect_body(body::full(Bytes::from_static(b"abcdef")), None, "response").await {
+            BodyCollection::Complete(body) => assert_eq!(body.as_ref(), b"abcdef"),
+            BodyCollection::Exceeded { .. } => panic!("expected complete body"),
         }
     }
 
