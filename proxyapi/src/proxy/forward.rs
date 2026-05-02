@@ -141,10 +141,11 @@ pub async fn handle_connection(
                 }
                 Err(e) => {
                     tracing::error!("Client request error: {e}");
-                    Ok(Response::builder()
-                        .status(502)
-                        .body(body::full(Bytes::from("Bad Gateway")))
-                        .unwrap_or_else(|_| Response::new(body::empty())))
+                    Ok(handler.synthetic_response(
+                        http::StatusCode::BAD_GATEWAY,
+                        http::HeaderMap::new(),
+                        Bytes::from_static(b"Bad Gateway"),
+                    ))
                 }
             }
         }
@@ -416,10 +417,11 @@ where
                 }
                 Err(e) => {
                     tracing::error!("Client request error: {e}");
-                    Ok(Response::builder()
-                        .status(502)
-                        .body(body::full(Bytes::from("Bad Gateway")))
-                        .unwrap_or_else(|_| Response::new(body::empty())))
+                    Ok(handler.synthetic_response(
+                        http::StatusCode::BAD_GATEWAY,
+                        http::HeaderMap::new(),
+                        Bytes::from_static(b"Bad Gateway"),
+                    ))
                 }
             }
         }
@@ -567,7 +569,14 @@ pub(crate) async fn handle_replay(
         Ok(res) => {
             handler.record_upstream_response(res).await;
         }
-        Err(e) => tracing::warn!("Replay request failed: {e}"),
+        Err(e) => {
+            tracing::warn!("Replay request failed: {e}");
+            handler.emit_synthetic_completion(
+                http::StatusCode::BAD_GATEWAY,
+                http::HeaderMap::new(),
+                Bytes::from(format!("Replay request failed: {e}")),
+            );
+        }
     }
 }
 

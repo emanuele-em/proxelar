@@ -7,6 +7,8 @@
 
 ## [Unreleased]
 
+- Emit visible flow events for Lua short-circuits, intercept drops, replay failures, and upstream proxy errors.
+
 ## [0.4.4] - 2026-05-01
 
 - Add an optional body capture limit so large uploads/downloads can stream safely while preserving the default unlimited capture behavior.

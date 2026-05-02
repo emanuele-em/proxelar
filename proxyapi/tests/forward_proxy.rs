@@ -236,7 +236,16 @@ async fn forward_proxy_returns_502_when_upstream_connection_fails() {
 
     assert!(raw_response.starts_with("HTTP/1.1 502 Bad Gateway"));
     assert!(raw_response.ends_with("Bad Gateway"));
-    assert!(event_rx.try_recv().is_err());
+    match recv_request_complete(&mut event_rx).await {
+        ProxyEvent::RequestComplete {
+            request, response, ..
+        } => {
+            assert_eq!(request.uri().path(), "/missing");
+            assert_eq!(response.status(), http::StatusCode::BAD_GATEWAY);
+            assert_eq!(response.body().as_ref(), b"Bad Gateway");
+        }
+        other => panic!("expected RequestComplete event, got {other:?}"),
+    }
 
     let _ = shutdown_tx.send(());
     assert!(handle.await.unwrap().is_ok());
@@ -354,7 +363,7 @@ async fn forward_proxy_connect_plain_http_serves_cert_page_inside_tunnel() {
 async fn forward_proxy_connect_plain_http_returns_502_when_upstream_fails() {
     let _ = rustls::crypto::ring::default_provider().install_default();
     let unused_upstream = reserve_loopback_addr().await;
-    let (proxy_addr, shutdown_tx, handle, _event_rx, _ca_dir) = start_forward_proxy().await;
+    let (proxy_addr, shutdown_tx, handle, mut event_rx, _ca_dir) = start_forward_proxy().await;
 
     let mut stream = TcpStream::connect(proxy_addr).await.unwrap();
     write_connect(&mut stream, unused_upstream).await;
@@ -378,6 +387,16 @@ async fn forward_proxy_connect_plain_http_returns_502_when_upstream_fails() {
     let raw_response = read_to_string_until_eof(&mut stream).await;
     assert!(raw_response.starts_with("HTTP/1.1 502 Bad Gateway"));
     assert!(raw_response.ends_with("Bad Gateway"));
+    match recv_request_complete(&mut event_rx).await {
+        ProxyEvent::RequestComplete {
+            request, response, ..
+        } => {
+            assert_eq!(request.uri().path(), "/fail");
+            assert_eq!(response.status(), http::StatusCode::BAD_GATEWAY);
+            assert_eq!(response.body().as_ref(), b"Bad Gateway");
+        }
+        other => panic!("expected RequestComplete event, got {other:?}"),
+    }
 
     let _ = shutdown_tx.send(());
     assert!(handle.await.unwrap().is_ok());
@@ -419,6 +438,38 @@ async fn forward_proxy_replays_captured_request_through_proxy_loop() {
 
     let _ = shutdown_tx.send(());
     let _ = upstream_shutdown.send(());
+    assert!(handle.await.unwrap().is_ok());
+}
+
+#[tokio::test]
+async fn forward_proxy_replay_failure_emits_request_complete() {
+    let _ = rustls::crypto::ring::default_provider().install_default();
+    let unused_upstream = reserve_loopback_addr().await;
+    let (_proxy_addr, shutdown_tx, handle, mut event_rx, replay_tx, _ca_dir) =
+        start_forward_proxy_with_replay().await;
+
+    let req = ProxiedRequest::new(
+        http::Method::GET,
+        format!("http://{unused_upstream}/missing").parse().unwrap(),
+        http::Version::HTTP_11,
+        http::HeaderMap::new(),
+        Bytes::new(),
+        10,
+    );
+    replay_tx.send(req).await.unwrap();
+
+    match recv_request_complete(&mut event_rx).await {
+        ProxyEvent::RequestComplete {
+            request, response, ..
+        } => {
+            assert_eq!(request.uri().path(), "/missing");
+            assert_eq!(response.status(), http::StatusCode::BAD_GATEWAY);
+            assert!(String::from_utf8_lossy(response.body()).contains("Replay request failed"));
+        }
+        other => panic!("expected RequestComplete event, got {other:?}"),
+    }
+
+    let _ = shutdown_tx.send(());
     assert!(handle.await.unwrap().is_ok());
 }
 

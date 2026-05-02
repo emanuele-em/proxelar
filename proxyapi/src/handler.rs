@@ -176,6 +176,22 @@ fn send_request_complete(
     );
 }
 
+fn synthetic_response_parts(
+    status: http::StatusCode,
+    headers: http::HeaderMap,
+    body: Bytes,
+) -> (http::response::Parts, Bytes) {
+    let mut builder = Response::builder().status(status);
+    if let Some(response_headers) = builder.headers_mut() {
+        *response_headers = headers;
+    }
+
+    builder
+        .body(body)
+        .expect("synthetic response components should be valid")
+        .into_parts()
+}
+
 struct HookedResponse {
     parts: http::response::Parts,
     body: HookedResponseBody,
@@ -462,6 +478,27 @@ impl CapturingHandler {
 
     pub(crate) fn send_event(&self, event: ProxyEvent) {
         try_send_event(&self.event_tx, event);
+    }
+
+    pub(crate) fn synthetic_response(
+        &mut self,
+        status: http::StatusCode,
+        headers: http::HeaderMap,
+        body: Bytes,
+    ) -> Response<ProxyBody> {
+        let (parts, body) = synthetic_response_parts(status, headers, body);
+        self.emit_response_snapshot(&parts, body.clone());
+        Response::from_parts(parts, body::full(body))
+    }
+
+    pub(crate) fn emit_synthetic_completion(
+        &mut self,
+        status: http::StatusCode,
+        headers: http::HeaderMap,
+        body: Bytes,
+    ) {
+        let (parts, body) = synthetic_response_parts(status, headers, body);
+        self.emit_response_snapshot(&parts, body);
     }
 
     pub(crate) async fn handle_upstream_response<B>(
@@ -776,14 +813,11 @@ impl HttpHandler for CapturingHandler {
 
                     let status_code = http::StatusCode::from_u16(status)
                         .unwrap_or(http::StatusCode::INTERNAL_SERVER_ERROR);
-                    let mut builder = Response::builder().status(status_code);
-                    if let Some(h) = builder.headers_mut() {
-                        *h = headers;
-                    }
-                    let response = builder
-                        .body(body::full(body))
-                        .unwrap_or_else(|_| Response::new(body::empty()));
-                    return RequestOrResponse::Response(response);
+                    return RequestOrResponse::Response(self.synthetic_response(
+                        status_code,
+                        headers,
+                        body,
+                    ));
                 }
                 Ok(crate::scripting::ScriptRequestAction::PassThrough) => {}
                 Err(e) => {
@@ -841,21 +875,21 @@ impl HttpHandler for CapturingHandler {
                             // Short-circuit: captured_request is already set above.
                             let status_code = http::StatusCode::from_u16(status)
                                 .unwrap_or(http::StatusCode::BAD_GATEWAY);
-                            let response = Response::builder()
-                                .status(status_code)
-                                .body(body::full(body))
-                                .unwrap_or_else(|_| Response::new(body::empty()));
-                            return RequestOrResponse::Response(response);
+                            return RequestOrResponse::Response(self.synthetic_response(
+                                status_code,
+                                http::HeaderMap::new(),
+                                body,
+                            ));
                         }
                         _ => {
                             // Timeout or sender dropped (intercept turned off):
                             // return 504 so the client gets a clear error.
                             tracing::warn!("Intercept timed out for id={id}, returning 504");
-                            let response = Response::builder()
-                                .status(http::StatusCode::GATEWAY_TIMEOUT)
-                                .body(body::empty())
-                                .unwrap_or_else(|_| Response::new(body::empty()));
-                            return RequestOrResponse::Response(response);
+                            return RequestOrResponse::Response(self.synthetic_response(
+                                http::StatusCode::GATEWAY_TIMEOUT,
+                                http::HeaderMap::new(),
+                                Bytes::new(),
+                            ));
                         }
                     }
 
@@ -966,6 +1000,40 @@ mod tests {
 
         assert!(body_bytes(response).await.is_empty());
         assert!(event_rx.try_recv().is_err());
+    }
+
+    #[tokio::test]
+    async fn synthetic_response_returns_body_and_emits_completion() {
+        let (event_tx, mut event_rx) = mpsc::channel(1);
+        let mut handler = CapturingHandler::new(event_tx);
+        handler.pending_id = Some(78);
+        handler.captured_request = Some(CapturedRequest::buffered(proxied_request()));
+
+        let mut headers = HeaderMap::new();
+        headers.insert("x-synthetic", "yes".parse().unwrap());
+        let response = handler.synthetic_response(
+            StatusCode::BAD_GATEWAY,
+            headers,
+            Bytes::from_static(b"synthetic body"),
+        );
+
+        assert_eq!(response.status(), StatusCode::BAD_GATEWAY);
+        assert_eq!(response.headers()["x-synthetic"], "yes");
+        assert_eq!(body_bytes(response).await.as_ref(), b"synthetic body");
+        match event_rx.recv().await.unwrap() {
+            ProxyEvent::RequestComplete {
+                id,
+                request,
+                response,
+            } => {
+                assert_eq!(id, 78);
+                assert_eq!(request.uri().path(), "/path");
+                assert_eq!(response.status(), StatusCode::BAD_GATEWAY);
+                assert_eq!(response.headers()["x-synthetic"], "yes");
+                assert_eq!(response.body().as_ref(), b"synthetic body");
+            }
+            other => panic!("expected RequestComplete, got {other:?}"),
+        }
     }
 
     #[tokio::test]

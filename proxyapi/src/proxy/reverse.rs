@@ -3,11 +3,11 @@ use std::sync::Arc;
 
 use bytes::Bytes;
 use hyper::service::service_fn;
-use hyper::{Request, Response, Uri};
+use hyper::{Request, Uri};
 use hyper_util::rt::TokioIo;
 use tokio::net::TcpStream;
 
-use crate::body::{self, ProxyBody};
+use crate::body::ProxyBody;
 use crate::handler::CapturingHandler;
 use crate::{HttpContext, HttpHandler, RequestOrResponse};
 
@@ -40,10 +40,11 @@ pub async fn handle_connection(
                 Ok(req) => req,
                 Err(e) => {
                     tracing::error!("Failed to rewrite URI to target: {e}");
-                    return Ok(Response::builder()
-                        .status(502)
-                        .body(body::full(Bytes::from("Bad Gateway: URI rewrite failed")))
-                        .unwrap_or_else(|_| Response::new(body::empty())));
+                    return Ok(handler.synthetic_response(
+                        http::StatusCode::BAD_GATEWAY,
+                        http::HeaderMap::new(),
+                        Bytes::from_static(b"Bad Gateway: URI rewrite failed"),
+                    ));
                 }
             };
 
@@ -51,10 +52,11 @@ pub async fn handle_connection(
                 Ok(res) => Ok(handler.handle_upstream_response(res).await),
                 Err(e) => {
                     tracing::error!("Reverse proxy error: {e}");
-                    Ok(Response::builder()
-                        .status(502)
-                        .body(body::full(Bytes::from("Bad Gateway")))
-                        .unwrap_or_else(|_| Response::new(body::empty())))
+                    Ok(handler.synthetic_response(
+                        http::StatusCode::BAD_GATEWAY,
+                        http::HeaderMap::new(),
+                        Bytes::from_static(b"Bad Gateway"),
+                    ))
                 }
             }
         }

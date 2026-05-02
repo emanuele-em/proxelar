@@ -168,7 +168,20 @@ async fn reverse_proxy_returns_502_when_target_is_unreachable() {
 
     assert_eq!(response.status(), reqwest::StatusCode::BAD_GATEWAY);
     assert_eq!(response.text().await.unwrap(), "Bad Gateway");
-    assert!(event_rx.try_recv().is_err());
+    let event = tokio::time::timeout(EVENT_TIMEOUT, event_rx.recv())
+        .await
+        .unwrap()
+        .unwrap();
+    match event {
+        ProxyEvent::RequestComplete {
+            request, response, ..
+        } => {
+            assert_eq!(request.uri().path(), "/missing");
+            assert_eq!(response.status(), http::StatusCode::BAD_GATEWAY);
+            assert_eq!(response.body().as_ref(), b"Bad Gateway");
+        }
+        other => panic!("expected RequestComplete event, got {other:?}"),
+    }
 
     let _ = shutdown_tx.send(());
     assert!(handle.await.unwrap().is_ok());
@@ -258,6 +271,103 @@ async fn reverse_proxy_intercepts_oversized_request_before_streaming_original() 
     assert!(handle.await.unwrap().is_ok());
 }
 
+#[tokio::test]
+async fn reverse_proxy_intercept_drop_emits_request_complete() {
+    let _ = rustls::crypto::ring::default_provider().install_default();
+    let (upstream_addr, upstream_shutdown) = start_upstream_server().await;
+    let proxy_addr = reserve_loopback_addr().await;
+    let ca_dir = tempfile::tempdir().unwrap();
+    let intercept = InterceptConfig::new();
+    intercept.set_enabled(true);
+
+    let (event_tx, mut event_rx) = mpsc::channel::<ProxyEvent>(100);
+    let config = ProxyConfig {
+        addr: proxy_addr,
+        mode: ProxyMode::Reverse {
+            target: format!("http://{upstream_addr}").parse().unwrap(),
+        },
+        event_tx,
+        ca_dir: ca_dir.path().to_path_buf(),
+        intercept: Some(Arc::clone(&intercept)),
+        body_capture_limit: DEFAULT_BODY_CAPTURE_LIMIT,
+        #[cfg(feature = "scripting")]
+        script_path: None,
+        replay_rx: None,
+    };
+
+    let proxy = Proxy::new(config);
+    let (shutdown_tx, shutdown_rx) = tokio::sync::oneshot::channel();
+    let handle = tokio::spawn(async move {
+        proxy
+            .start(async {
+                shutdown_rx.await.ok();
+            })
+            .await
+    });
+
+    wait_for_tcp(proxy_addr).await;
+
+    let response_task = tokio::spawn(async move {
+        reqwest::Client::new()
+            .get(format!("http://{proxy_addr}/blocked"))
+            .send()
+            .await
+            .unwrap()
+    });
+
+    let id = match tokio::time::timeout(EVENT_TIMEOUT, event_rx.recv())
+        .await
+        .unwrap()
+        .unwrap()
+    {
+        ProxyEvent::RequestIntercepted { id, request } => {
+            assert_eq!(request.uri().path(), "/blocked");
+            id
+        }
+        other => panic!("expected RequestIntercepted event, got {other:?}"),
+    };
+
+    assert!(intercept.resolve(
+        id,
+        InterceptDecision::Block {
+            status: 451,
+            body: Bytes::from_static(b"blocked by test"),
+        },
+    ));
+
+    let response = response_task.await.unwrap();
+    assert_eq!(
+        response.status(),
+        reqwest::StatusCode::UNAVAILABLE_FOR_LEGAL_REASONS
+    );
+    assert_eq!(response.text().await.unwrap(), "blocked by test");
+
+    match tokio::time::timeout(EVENT_TIMEOUT, event_rx.recv())
+        .await
+        .unwrap()
+        .unwrap()
+    {
+        ProxyEvent::RequestComplete {
+            id: complete_id,
+            request,
+            response,
+        } => {
+            assert_eq!(complete_id, id);
+            assert_eq!(request.uri().path(), "/blocked");
+            assert_eq!(
+                response.status(),
+                http::StatusCode::UNAVAILABLE_FOR_LEGAL_REASONS
+            );
+            assert_eq!(response.body().as_ref(), b"blocked by test");
+        }
+        other => panic!("expected RequestComplete event, got {other:?}"),
+    }
+
+    let _ = shutdown_tx.send(());
+    let _ = upstream_shutdown.send(());
+    assert!(handle.await.unwrap().is_ok());
+}
+
 #[cfg(feature = "scripting")]
 #[tokio::test]
 async fn reverse_proxy_runs_scripts_for_oversized_request_and_response() {
@@ -325,6 +435,89 @@ async fn reverse_proxy_runs_scripts_for_oversized_request_and_response() {
 
     let _ = shutdown_tx.send(());
     let _ = upstream_shutdown.send(());
+    assert!(handle.await.unwrap().is_ok());
+}
+
+#[cfg(feature = "scripting")]
+#[tokio::test]
+async fn reverse_proxy_lua_short_circuit_emits_request_complete() {
+    use std::io::Write;
+
+    let _ = rustls::crypto::ring::default_provider().install_default();
+    let unused_upstream = reserve_loopback_addr().await;
+    let proxy_addr = reserve_loopback_addr().await;
+    let ca_dir = tempfile::tempdir().unwrap();
+    let mut script = tempfile::NamedTempFile::new().unwrap();
+    script
+        .write_all(
+            br#"
+            function on_request(req)
+                return {
+                    status = 202,
+                    headers = { ["x-script"] = "short" },
+                    body = "short-circuited"
+                }
+            end
+            "#,
+        )
+        .unwrap();
+    script.flush().unwrap();
+
+    let (event_tx, mut event_rx) = mpsc::channel::<ProxyEvent>(100);
+    let config = ProxyConfig {
+        addr: proxy_addr,
+        mode: ProxyMode::Reverse {
+            target: format!("http://{unused_upstream}").parse().unwrap(),
+        },
+        event_tx,
+        ca_dir: ca_dir.path().to_path_buf(),
+        intercept: None,
+        body_capture_limit: DEFAULT_BODY_CAPTURE_LIMIT,
+        script_path: Some(script.path().to_path_buf()),
+        replay_rx: None,
+    };
+
+    let proxy = Proxy::new(config);
+    let (shutdown_tx, shutdown_rx) = tokio::sync::oneshot::channel();
+    let handle = tokio::spawn(async move {
+        proxy
+            .start(async {
+                shutdown_rx.await.ok();
+            })
+            .await
+    });
+
+    wait_for_tcp(proxy_addr).await;
+
+    let response = reqwest::Client::new()
+        .post(format!("http://{proxy_addr}/script-short"))
+        .body("request body")
+        .send()
+        .await
+        .unwrap();
+
+    assert_eq!(response.status(), reqwest::StatusCode::ACCEPTED);
+    assert_eq!(response.headers()["x-script"], "short");
+    assert_eq!(response.text().await.unwrap(), "short-circuited");
+
+    match tokio::time::timeout(EVENT_TIMEOUT, event_rx.recv())
+        .await
+        .unwrap()
+        .unwrap()
+    {
+        ProxyEvent::RequestComplete {
+            request, response, ..
+        } => {
+            assert_eq!(request.uri().path(), "/script-short");
+            assert_eq!(request.body().as_ref(), b"request body");
+            assert_eq!(response.status(), http::StatusCode::ACCEPTED);
+            assert_eq!(response.headers()["x-script"], "short");
+            assert_eq!(response.body().as_ref(), b"short-circuited");
+        }
+        other => panic!("expected RequestComplete event, got {other:?}"),
+    }
+
+    let _ = shutdown_tx.send(());
     assert!(handle.await.unwrap().is_ok());
 }
 
