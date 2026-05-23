@@ -1,10 +1,10 @@
 use bytes::Bytes;
 use futures_util::{SinkExt, StreamExt};
-use http_body_util::Full;
+use http_body_util::{BodyExt, Full};
 use hyper::body::Incoming;
 use hyper::service::service_fn;
 use hyper::{Request, Response};
-use hyper_util::rt::TokioIo;
+use hyper_util::rt::{TokioExecutor, TokioIo};
 use proxyapi::{Proxy, ProxyConfig, ProxyEvent, ProxyMode, DEFAULT_BODY_CAPTURE_LIMIT};
 use proxyapi_models::ProxiedRequest;
 use std::net::SocketAddr;
@@ -111,6 +111,67 @@ async fn forward_proxy_forwards_absolute_http_and_emits_request_complete() {
 }
 
 #[tokio::test]
+async fn forward_proxy_forwards_h2c_absolute_http_and_emits_http2_capture() {
+    let _ = rustls::crypto::ring::default_provider().install_default();
+    let (upstream_addr, upstream_shutdown) = start_upstream_server().await;
+    let (proxy_addr, shutdown_tx, handle, mut event_rx, _ca_dir) = start_forward_proxy().await;
+
+    let mut sender = connect_h2(proxy_addr).await;
+    let request = Request::builder()
+        .method(http::Method::GET)
+        .version(http::Version::HTTP_2)
+        .uri(format!("http://{upstream_addr}/h2c?via=proxy"))
+        .header("x-client-test", "h2c-absolute-roundtrip")
+        .body(Full::new(Bytes::new()))
+        .unwrap();
+    let response = sender.send_request(request).await.unwrap();
+
+    assert_eq!(response.version(), http::Version::HTTP_2);
+    assert_eq!(response.status(), http::StatusCode::OK);
+    assert_eq!(
+        response.headers()["x-upstream-path-query"],
+        "/h2c?via=proxy"
+    );
+    assert_eq!(
+        response.headers()["x-upstream-host"],
+        upstream_addr.to_string()
+    );
+    assert_eq!(response.headers()["x-upstream-version"], "HTTP/1.1");
+    assert_eq!(
+        response
+            .into_body()
+            .collect()
+            .await
+            .unwrap()
+            .to_bytes()
+            .as_ref(),
+        b"forward response"
+    );
+
+    match recv_request_complete(&mut event_rx).await {
+        ProxyEvent::RequestComplete {
+            request, response, ..
+        } => {
+            assert_eq!(request.version(), http::Version::HTTP_2);
+            assert_eq!(request.uri().scheme_str(), Some("http"));
+            assert_eq!(
+                request.uri().authority().unwrap().as_str(),
+                upstream_addr.to_string()
+            );
+            assert_eq!(request.uri().path(), "/h2c");
+            assert_eq!(request.headers()["x-client-test"], "h2c-absolute-roundtrip");
+            assert_eq!(response.status(), http::StatusCode::OK);
+            assert_eq!(response.body().as_ref(), b"forward response");
+        }
+        other => panic!("expected RequestComplete event, got {other:?}"),
+    }
+
+    let _ = shutdown_tx.send(());
+    let _ = upstream_shutdown.send(());
+    assert!(handle.await.unwrap().is_ok());
+}
+
+#[tokio::test]
 async fn forward_proxy_connect_plain_http_reconstructs_uri_and_emits_request_complete() {
     let _ = rustls::crypto::ring::default_provider().install_default();
     let (upstream_addr, upstream_shutdown) = start_upstream_server().await;
@@ -173,6 +234,71 @@ async fn forward_proxy_connect_plain_http_reconstructs_uri_and_emits_request_com
             assert_eq!(request.headers()["x-client-test"], "connect-roundtrip");
             assert_eq!(response.status(), http::StatusCode::OK);
             assert_eq!(response.body().as_ref(), b"forward response");
+        }
+        other => panic!("expected RequestComplete event, got {other:?}"),
+    }
+
+    let _ = shutdown_tx.send(());
+    let _ = upstream_shutdown.send(());
+    assert!(handle.await.unwrap().is_ok());
+}
+
+#[tokio::test]
+async fn forward_proxy_h2_connect_tunnels_h2c_requests() {
+    let _ = rustls::crypto::ring::default_provider().install_default();
+    let (upstream_addr, upstream_shutdown) = start_upstream_server().await;
+    let (proxy_addr, shutdown_tx, handle, mut event_rx, _ca_dir) = start_forward_proxy().await;
+
+    let mut outer_sender = connect_h2(proxy_addr).await;
+    let connect = Request::builder()
+        .method(http::Method::CONNECT)
+        .version(http::Version::HTTP_2)
+        .uri(upstream_addr.to_string())
+        .body(Full::new(Bytes::new()))
+        .unwrap();
+    let connect_response = outer_sender.send_request(connect).await.unwrap();
+    assert_eq!(connect_response.status(), http::StatusCode::OK);
+
+    let upgraded = hyper::upgrade::on(connect_response).await.unwrap();
+    let mut inner_sender = connect_h2_io(upgraded).await;
+    let request = Request::builder()
+        .method(http::Method::POST)
+        .version(http::Version::HTTP_2)
+        .uri(format!("http://{upstream_addr}/h2-tunnel?via=connect"))
+        .header("x-client-test", "h2-connect-roundtrip")
+        .body(Full::new(Bytes::from_static(b"body through h2 connect")))
+        .unwrap();
+    let response = inner_sender.send_request(request).await.unwrap();
+
+    assert_eq!(response.version(), http::Version::HTTP_2);
+    assert_eq!(response.status(), http::StatusCode::OK);
+    assert_eq!(
+        response.headers()["x-upstream-path-query"],
+        "/h2-tunnel?via=connect"
+    );
+    assert_eq!(response.headers()["x-upstream-version"], "HTTP/1.1");
+    assert_eq!(
+        response
+            .into_body()
+            .collect()
+            .await
+            .unwrap()
+            .to_bytes()
+            .as_ref(),
+        b"forward response"
+    );
+
+    match recv_request_complete(&mut event_rx).await {
+        ProxyEvent::RequestComplete {
+            request, response, ..
+        } => {
+            assert_eq!(request.version(), http::Version::HTTP_2);
+            assert_eq!(request.method(), http::Method::POST);
+            assert_eq!(request.uri().path(), "/h2-tunnel");
+            assert_eq!(request.uri().query(), Some("via=connect"));
+            assert_eq!(request.headers()["x-client-test"], "h2-connect-roundtrip");
+            assert_eq!(request.body().as_ref(), b"body through h2 connect");
+            assert_eq!(response.status(), http::StatusCode::OK);
         }
         other => panic!("expected RequestComplete event, got {other:?}"),
     }
@@ -641,6 +767,25 @@ async fn wait_for_tcp(addr: SocketAddr) -> Result<(), std::io::Error> {
     }
 }
 
+async fn connect_h2(addr: SocketAddr) -> hyper::client::conn::http2::SendRequest<Full<Bytes>> {
+    let stream = TcpStream::connect(addr).await.unwrap();
+    connect_h2_io(TokioIo::new(stream)).await
+}
+
+async fn connect_h2_io<I>(io: I) -> hyper::client::conn::http2::SendRequest<Full<Bytes>>
+where
+    I: hyper::rt::Read + hyper::rt::Write + Unpin + Send + 'static,
+{
+    let (sender, connection) = hyper::client::conn::http2::Builder::new(TokioExecutor::new())
+        .handshake(io)
+        .await
+        .unwrap();
+    tokio::spawn(async move {
+        let _ = connection.await;
+    });
+    sender
+}
+
 async fn write_connect(stream: &mut TcpStream, authority: SocketAddr) {
     stream
         .write_all(
@@ -775,6 +920,7 @@ async fn upstream_response(req: Request<Incoming>) -> Result<Response<Full<Bytes
         .status(http::StatusCode::OK)
         .header("x-upstream-path-query", path_query)
         .header("x-upstream-host", host)
+        .header("x-upstream-version", format!("{:?}", req.version()))
         .body(Full::new(Bytes::from_static(b"forward response")))
         .unwrap())
 }
