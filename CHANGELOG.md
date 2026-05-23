@@ -7,6 +7,7 @@
 
 ## [Unreleased]
 
+- Accept HTTP/2 client connections in forward and reverse proxy modes while preserving HTTP/1.1 upstream forwarding invariants.
 - Emit visible flow events for Lua short-circuits, intercept drops, replay failures, and upstream proxy errors.
 
 ## [0.4.4] - 2026-05-01
