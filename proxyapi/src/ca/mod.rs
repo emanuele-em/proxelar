@@ -213,7 +213,7 @@ impl CertificateAuthority for Ssl {
             .with_no_client_auth()
             .with_single_cert(certs, private_key)?;
 
-        server_cfg.alpn_protocols = vec![b"http/1.1".to_vec()];
+        server_cfg.alpn_protocols = vec![b"h2".to_vec(), b"http/1.1".to_vec()];
 
         let server_cfg = Arc::new(server_cfg);
 

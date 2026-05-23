@@ -1,11 +1,19 @@
 pub(crate) mod forward;
 pub(crate) mod reverse;
 
-use std::{future::Future, net::SocketAddr, path::PathBuf, sync::Arc};
+use std::{error::Error as StdError, future::Future, net::SocketAddr, path::PathBuf, sync::Arc};
 
-use hyper::Uri;
+use hyper::body::{Body as HttpBody, Incoming};
+use hyper::header::{
+    HeaderName, CONNECTION, COOKIE, HOST, PROXY_AUTHENTICATE, PROXY_AUTHORIZATION, TE,
+    TRANSFER_ENCODING, UPGRADE,
+};
+use hyper::rt::{Read, Write};
+use hyper::service::Service;
+use hyper::{HeaderMap, Request, Response, Uri};
 use hyper_util::client::legacy::connect::HttpConnector;
 use hyper_util::rt::TokioExecutor;
+use hyper_util::server::conn::auto;
 use proxyapi_models::ProxiedRequest;
 use tokio::net::TcpListener;
 use tokio::sync::mpsc;
@@ -22,6 +30,10 @@ use crate::scripting::ScriptEngine;
 /// Shared HTTP(S) client type used by both forward and reverse proxy.
 pub(crate) type Client =
     hyper_util::client::legacy::Client<hyper_rustls::HttpsConnector<HttpConnector>, ProxyBody>;
+pub(crate) type BoxError = Box<dyn StdError + Send + Sync>;
+
+const KEEP_ALIVE: HeaderName = HeaderName::from_static("keep-alive");
+const PROXY_CONNECTION: HeaderName = HeaderName::from_static("proxy-connection");
 
 /// Check if an error is a benign "shutting down" or "connection closed" error.
 ///
@@ -30,6 +42,105 @@ pub(crate) type Client =
 pub(crate) fn is_benign_shutdown_error(e: &dyn std::error::Error) -> bool {
     let msg = e.to_string();
     msg.contains("shutting down") || msg.contains("connection was not closed cleanly")
+}
+
+/// Serve an HTTP connection using Hyper's protocol auto-detection.
+///
+/// The upgrade-capable path is required for HTTP/1 CONNECT, WebSocket upgrades,
+/// and Hyper's HTTP/2 CONNECT upgrade adapter.
+pub(crate) async fn serve_auto_connection<I, S, B>(io: I, service: S) -> Result<(), BoxError>
+where
+    I: Read + Write + Unpin + Send + 'static,
+    S: Service<Request<Incoming>, Response = Response<B>>,
+    S::Future: 'static,
+    S::Error: Into<BoxError>,
+    B: HttpBody + 'static,
+    B::Error: Into<BoxError>,
+    TokioExecutor: auto::HttpServerConnExec<S::Future, B>,
+{
+    let builder = auto::Builder::new(TokioExecutor::new())
+        .preserve_header_case(true)
+        .title_case_headers(true);
+
+    builder.serve_connection_with_upgrades(io, service).await
+}
+
+/// Prepare a captured request for the upstream HTTP/1.1 client.
+///
+/// This centralizes the proxy's existing invariants and strips hop-by-hop
+/// metadata that must not be forwarded across protocol boundaries.
+pub(crate) fn prepare_upstream_request(mut req: Request<ProxyBody>) -> Request<ProxyBody> {
+    strip_hop_by_hop_headers(req.headers_mut());
+    req.headers_mut().remove(HOST);
+    req.headers_mut().remove(PROXY_AUTHORIZATION);
+    req.headers_mut().remove(TE);
+    join_cookie_headers(req.headers_mut());
+    *req.version_mut() = hyper::Version::HTTP_11;
+    req
+}
+
+/// Prepare an HTTP/1.1 protocol-upgrade request for the upstream client.
+///
+/// Upgrade handshakes intentionally keep `Connection` and `Upgrade`; stripping
+/// them would turn WebSocket forwarding into an ordinary HTTP request.
+pub(crate) fn prepare_upstream_upgrade_request(mut req: Request<ProxyBody>) -> Request<ProxyBody> {
+    req.headers_mut().remove(HOST);
+    req.headers_mut().remove(PROXY_AUTHORIZATION);
+    join_cookie_headers(req.headers_mut());
+    *req.version_mut() = hyper::Version::HTTP_11;
+    req
+}
+
+/// Remove response headers that are illegal on HTTP/2 connections.
+fn sanitize_response_for_http2<B>(res: &mut Response<B>) {
+    strip_hop_by_hop_headers(res.headers_mut());
+    res.headers_mut().remove(PROXY_AUTHENTICATE);
+    res.headers_mut().remove(TE);
+}
+
+pub(crate) fn sanitize_response_for_client<B>(res: &mut Response<B>, version: hyper::Version) {
+    if version == hyper::Version::HTTP_2 {
+        sanitize_response_for_http2(res);
+    }
+}
+
+fn join_cookie_headers(headers: &mut HeaderMap) {
+    if let http::header::Entry::Occupied(mut cookies) = headers.entry(COOKIE) {
+        let joined_cookies = bstr::join(b"; ", cookies.iter());
+        match joined_cookies.try_into() {
+            Ok(value) => {
+                cookies.insert(value);
+            }
+            Err(e) => {
+                tracing::warn!("Failed to join cookies, removing header: {e}");
+                cookies.remove();
+            }
+        }
+    }
+}
+
+fn strip_hop_by_hop_headers(headers: &mut HeaderMap) {
+    let connection_tokens = connection_tokens(headers);
+    headers.remove(CONNECTION);
+
+    for name in connection_tokens {
+        headers.remove(name);
+    }
+
+    headers.remove(KEEP_ALIVE);
+    headers.remove(PROXY_CONNECTION);
+    headers.remove(TRANSFER_ENCODING);
+    headers.remove(UPGRADE);
+}
+
+fn connection_tokens(headers: &HeaderMap) -> Vec<HeaderName> {
+    headers
+        .get_all(CONNECTION)
+        .iter()
+        .filter_map(|value| value.to_str().ok())
+        .flat_map(|value| value.split(','))
+        .filter_map(|token| HeaderName::from_bytes(token.trim().as_bytes()).ok())
+        .collect()
 }
 
 /// Configuration for creating a [`Proxy`].
@@ -252,5 +363,104 @@ mod tests {
             tokio::time::timeout(std::time::Duration::from_millis(10), recv_replay(&mut rx)).await;
 
         assert!(result.is_err());
+    }
+
+    #[test]
+    fn prepare_upstream_request_preserves_invariants_and_strips_hop_by_hop_headers() {
+        let req = Request::builder()
+            .method(Method::GET)
+            .uri("http://upstream.test/path")
+            .version(Version::HTTP_2)
+            .header(HOST, "wrong-host.test")
+            .header(COOKIE, "a=1")
+            .header(COOKIE, "b=2")
+            .header(CONNECTION, "x-remove, keep-alive")
+            .header("x-remove", "yes")
+            .header(KEEP_ALIVE, "timeout=5")
+            .header(PROXY_CONNECTION, "keep-alive")
+            .header(TRANSFER_ENCODING, "chunked")
+            .header(UPGRADE, "websocket")
+            .header(PROXY_AUTHORIZATION, "Basic secret")
+            .header(TE, "trailers")
+            .body(crate::body::empty())
+            .unwrap();
+
+        let req = prepare_upstream_request(req);
+
+        assert_eq!(req.version(), Version::HTTP_11);
+        assert!(!req.headers().contains_key(HOST));
+        assert!(!req.headers().contains_key(CONNECTION));
+        assert!(!req.headers().contains_key("x-remove"));
+        assert!(!req.headers().contains_key(KEEP_ALIVE));
+        assert!(!req.headers().contains_key(PROXY_CONNECTION));
+        assert!(!req.headers().contains_key(TRANSFER_ENCODING));
+        assert!(!req.headers().contains_key(UPGRADE));
+        assert!(!req.headers().contains_key(PROXY_AUTHORIZATION));
+        assert!(!req.headers().contains_key(TE));
+        assert_eq!(
+            req.headers().get_all(COOKIE).iter().count(),
+            1,
+            "duplicate Cookie headers should be collapsed"
+        );
+        assert_eq!(req.headers()[COOKIE], "a=1; b=2");
+    }
+
+    #[test]
+    fn prepare_upstream_upgrade_request_preserves_upgrade_headers() {
+        let req = Request::builder()
+            .method(Method::GET)
+            .uri("http://upstream.test/ws")
+            .version(Version::HTTP_2)
+            .header(HOST, "wrong-host.test")
+            .header(CONNECTION, "Upgrade")
+            .header(UPGRADE, "websocket")
+            .header(PROXY_AUTHORIZATION, "Basic secret")
+            .body(crate::body::empty())
+            .unwrap();
+
+        let req = prepare_upstream_upgrade_request(req);
+
+        assert_eq!(req.version(), Version::HTTP_11);
+        assert!(!req.headers().contains_key(HOST));
+        assert!(!req.headers().contains_key(PROXY_AUTHORIZATION));
+        assert_eq!(req.headers()[CONNECTION], "Upgrade");
+        assert_eq!(req.headers()[UPGRADE], "websocket");
+    }
+
+    #[test]
+    fn sanitize_response_for_http2_strips_connection_metadata() {
+        let mut response = Response::builder()
+            .status(http::StatusCode::OK)
+            .header(CONNECTION, "x-remove, upgrade")
+            .header("x-remove", "yes")
+            .header(KEEP_ALIVE, "timeout=5")
+            .header(PROXY_CONNECTION, "keep-alive")
+            .header(TRANSFER_ENCODING, "chunked")
+            .header(UPGRADE, "websocket")
+            .header(PROXY_AUTHENTICATE, "Basic")
+            .header(TE, "trailers")
+            .body(crate::body::empty())
+            .unwrap();
+
+        sanitize_response_for_http2(&mut response);
+
+        assert!(!response.headers().contains_key(CONNECTION));
+        assert!(!response.headers().contains_key("x-remove"));
+        assert!(!response.headers().contains_key(KEEP_ALIVE));
+        assert!(!response.headers().contains_key(PROXY_CONNECTION));
+        assert!(!response.headers().contains_key(TRANSFER_ENCODING));
+        assert!(!response.headers().contains_key(UPGRADE));
+        assert!(!response.headers().contains_key(PROXY_AUTHENTICATE));
+        assert!(!response.headers().contains_key(TE));
+    }
+
+    #[test]
+    fn connection_tokens_ignores_invalid_header_names() {
+        let mut headers = HeaderMap::new();
+        headers.insert(CONNECTION, "x-valid, bad header".parse().unwrap());
+
+        let tokens = connection_tokens(&headers);
+
+        assert_eq!(tokens, vec![HeaderName::from_static("x-valid")]);
     }
 }
