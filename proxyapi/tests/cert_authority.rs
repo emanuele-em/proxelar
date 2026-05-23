@@ -30,7 +30,10 @@ async fn test_gen_server_config_creates_cert() {
     let ssl = Ssl::load_or_generate(dir.path()).unwrap();
     let authority: Authority = "example.com:443".parse().unwrap();
     let config = ssl.gen_server_config(&authority).await.unwrap();
-    assert!(!config.alpn_protocols.is_empty());
+    assert_eq!(
+        config.alpn_protocols,
+        vec![b"h2".to_vec(), b"http/1.1".to_vec()]
+    );
 }
 
 #[tokio::test]

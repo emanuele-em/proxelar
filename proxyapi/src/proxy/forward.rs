@@ -22,16 +22,45 @@ use crate::handler::{now_millis, CapturingHandler};
 use crate::rewind::Rewind;
 use crate::{HttpContext, HttpHandler, RequestOrResponse};
 
-use super::{is_benign_shutdown_error, Client};
+use super::{
+    is_benign_shutdown_error, prepare_upstream_request, prepare_upstream_upgrade_request,
+    sanitize_response_for_client, serve_auto_connection, BoxError, Client,
+};
 
-/// First bytes of an HTTP GET request.
-const HTTP_GET_PREFIX: &[u8; 4] = b"GET ";
+/// HTTP/2 prior-knowledge connection preface.
+const H2_PREFACE: &[u8] = b"PRI * HTTP/2.0\r\n\r\nSM\r\n\r\n";
+/// HTTP/1 request method prefixes used for CONNECT tunnel protocol sniffing.
+const HTTP1_METHOD_PREFIXES: &[&[u8]] = &[
+    b"CONNECT ",
+    b"DELETE ",
+    b"GET ",
+    b"HEAD ",
+    b"OPTIONS ",
+    b"PATCH ",
+    b"POST ",
+    b"PUT ",
+    b"TRACE ",
+];
 /// TLS record content type: Handshake.
 const TLS_RECORD_HANDSHAKE: u8 = 0x16;
 /// TLS major version byte (SSLv3 / TLS 1.x).
 const TLS_VERSION_MAJOR: u8 = 0x03;
 /// Maximum payload size captured per WebSocket frame.
 const MAX_WS_FRAME_PAYLOAD: Option<usize> = crate::handler::DEFAULT_BODY_CAPTURE_LIMIT;
+
+#[derive(Debug, Clone, Copy, Eq, PartialEq)]
+enum StreamProtocol {
+    Http,
+    Tls,
+    Unknown,
+}
+
+#[derive(Debug, Clone, Copy, Eq, PartialEq)]
+enum TunnelRequestError {
+    MissingHost,
+    InvalidHost,
+    InvalidUri,
+}
 
 /// Returns true when the request carries WebSocket upgrade tokens.
 fn is_websocket_upgrade<B>(req: &Request<B>) -> bool {
@@ -58,14 +87,12 @@ pub async fn handle_connection(
 ) {
     let io = TokioIo::new(stream);
 
-    let service = service_fn(move |mut req: Request<hyper::body::Incoming>| {
-        let mut handler = handler.clone();
+    let service = service_fn(move |req: Request<hyper::body::Incoming>| {
+        let handler = handler.clone();
         let ca = Arc::clone(&ca);
         let client = Arc::clone(&client);
 
         async move {
-            let ctx = HttpContext { remote_addr };
-
             // Direct request to the proxy itself (relative URI, no host).
             // Serves the cert download page at http://localhost:PORT/
             if req.uri().host().is_none() && !req.uri().path().is_empty() {
@@ -83,82 +110,12 @@ pub async fn handle_connection(
                 return process_connect(req, handler, ca, client, remote_addr, listen_addr);
             }
 
-            // Extract WebSocket upgrade future BEFORE handle_request consumes req.
-            let is_ws = is_websocket_upgrade(&req);
-            let client_on_upgrade = if is_ws {
-                Some(hyper::upgrade::on(&mut req))
-            } else {
-                None
-            };
-
-            let req = match handler.handle_request(&ctx, req).await {
-                RequestOrResponse::Request(req) => req,
-                RequestOrResponse::Response(res) => return Ok(res),
-            };
-
-            match client.request(normalize_request(req)).await {
-                Ok(mut res) => {
-                    if is_ws && res.status() == hyper::StatusCode::SWITCHING_PROTOCOLS {
-                        let server_on_upgrade = hyper::upgrade::on(&mut res);
-                        let (parts, _body) = res.into_parts();
-
-                        let ws_response = ProxiedResponse::new(
-                            parts.status,
-                            parts.version,
-                            parts.headers.clone(),
-                            Bytes::new(),
-                            now_millis(),
-                        );
-
-                        let conn_id = handler
-                            .take_pending_id()
-                            .unwrap_or_else(crate::event::next_id);
-                        if let Some(captured_req) = handler.take_captured_request() {
-                            handler.send_event(ProxyEvent::WebSocketConnected {
-                                id: conn_id,
-                                request: Box::new(captured_req),
-                                response: Box::new(ws_response),
-                            });
-                        }
-
-                        if let Some(client_fut) = client_on_upgrade {
-                            let event_tx = handler.event_tx_clone();
-                            tokio::spawn(async move {
-                                pump_websocket_frames(
-                                    conn_id,
-                                    client_fut,
-                                    server_on_upgrade,
-                                    event_tx,
-                                )
-                                .await;
-                            });
-                        }
-
-                        Ok(Response::from_parts(parts, body::empty()))
-                    } else {
-                        Ok(handler.handle_upstream_response(res).await)
-                    }
-                }
-                Err(e) => {
-                    tracing::error!("Client request error: {e}");
-                    Ok(handler.synthetic_response(
-                        http::StatusCode::BAD_GATEWAY,
-                        http::HeaderMap::new(),
-                        Bytes::from_static(b"Bad Gateway"),
-                    ))
-                }
-            }
+            forward_http_request(req, handler, client, remote_addr).await
         }
     });
 
-    if let Err(e) = hyper::server::conn::http1::Builder::new()
-        .preserve_header_case(true)
-        .title_case_headers(true)
-        .serve_connection(io, service)
-        .with_upgrades()
-        .await
-    {
-        if !is_benign_shutdown_error(&e) {
+    if let Err(e) = serve_auto_connection(io, service).await {
+        if !is_benign_shutdown_error(e.as_ref()) {
             tracing::debug!("Connection error: {e}");
         }
     }
@@ -191,86 +148,89 @@ fn process_connect(
         match hyper::upgrade::on(req).await {
             Ok(upgraded) => {
                 let mut upgraded = TokioIo::new(upgraded);
-                let mut buffer = [0u8; 4];
-                let bytes_read = match upgraded.read(&mut buffer).await {
-                    Ok(n) => n,
+                let (protocol, buffered) = match sniff_stream_protocol(&mut upgraded).await {
+                    Ok(result) => result,
                     Err(e) => {
                         tracing::error!("Failed to read from upgraded connection: {e}");
                         return;
                     }
                 };
 
-                let upgraded =
-                    Rewind::new_buffered(upgraded, Bytes::copy_from_slice(&buffer[..bytes_read]));
+                let upgraded = Rewind::new_buffered(upgraded, buffered.clone());
 
-                if buffer == *HTTP_GET_PREFIX {
-                    if let Err(e) = serve_stream(
-                        upgraded,
-                        Scheme::HTTP,
-                        handler,
-                        ca,
-                        client,
-                        remote_addr,
-                        listen_addr,
-                    )
-                    .await
-                    {
-                        tracing::debug!("HTTP connect error: {e}");
-                    }
-                } else if buffer[0] == TLS_RECORD_HANDSHAKE && buffer[1] == TLS_VERSION_MAJOR {
-                    let server_config = match ca.gen_server_config(&authority).await {
-                        Ok(cfg) => cfg,
-                        Err(e) => {
-                            tracing::error!(
-                                "Failed to generate server config for {authority}: {e}"
-                            );
-                            return;
-                        }
-                    };
-                    let stream = match TlsAcceptor::from(server_config).accept(upgraded).await {
-                        Ok(stream) => stream,
-                        Err(e) => {
-                            tracing::debug!("Failed to establish TLS connection: {e}");
-                            return;
-                        }
-                    };
-
-                    if let Err(e) = serve_stream(
-                        stream,
-                        Scheme::HTTPS,
-                        handler,
-                        ca,
-                        client,
-                        remote_addr,
-                        listen_addr,
-                    )
-                    .await
-                    {
-                        if !is_benign_shutdown_error(&*e) {
-                            tracing::warn!("HTTPS connect error for {authority}: {e}");
+                match protocol {
+                    StreamProtocol::Http => {
+                        if let Err(e) = serve_stream(
+                            upgraded,
+                            Scheme::HTTP,
+                            handler,
+                            ca,
+                            client,
+                            remote_addr,
+                            listen_addr,
+                        )
+                        .await
+                        {
+                            tracing::debug!("HTTP connect error: {e}");
                         }
                     }
-                } else {
-                    tracing::debug!(
-                        "Unknown protocol, read '{:02X?}' from upgraded connection",
-                        &buffer[..bytes_read]
-                    );
+                    StreamProtocol::Tls => {
+                        let server_config = match ca.gen_server_config(&authority).await {
+                            Ok(cfg) => cfg,
+                            Err(e) => {
+                                tracing::error!(
+                                    "Failed to generate server config for {authority}: {e}"
+                                );
+                                return;
+                            }
+                        };
+                        let stream = match TlsAcceptor::from(server_config).accept(upgraded).await {
+                            Ok(stream) => stream,
+                            Err(e) => {
+                                tracing::debug!("Failed to establish TLS connection: {e}");
+                                return;
+                            }
+                        };
 
-                    let authority_str = authority.as_str();
-                    let mut server = match TcpStream::connect(authority_str).await {
-                        Ok(server) => server,
-                        Err(e) => {
-                            tracing::debug!("Failed to connect to {authority_str}: {e}");
-                            return;
+                        if let Err(e) = serve_stream(
+                            stream,
+                            Scheme::HTTPS,
+                            handler,
+                            ca,
+                            client,
+                            remote_addr,
+                            listen_addr,
+                        )
+                        .await
+                        {
+                            if !is_benign_shutdown_error(&*e) {
+                                tracing::warn!("HTTPS connect error for {authority}: {e}");
+                            }
                         }
-                    };
-
-                    let mut upgraded = upgraded;
-                    if let Err(e) = tokio::io::copy_bidirectional(&mut upgraded, &mut server).await
-                    {
+                    }
+                    StreamProtocol::Unknown => {
                         tracing::debug!(
-                            "Failed to tunnel unknown protocol to {authority_str}: {e}"
+                            "Unknown protocol, read '{:02X?}' from upgraded connection",
+                            buffered.as_ref()
                         );
+
+                        let authority_str = authority.as_str();
+                        let mut server = match TcpStream::connect(authority_str).await {
+                            Ok(server) => server,
+                            Err(e) => {
+                                tracing::debug!("Failed to connect to {authority_str}: {e}");
+                                return;
+                            }
+                        };
+
+                        let mut upgraded = upgraded;
+                        if let Err(e) =
+                            tokio::io::copy_bidirectional(&mut upgraded, &mut server).await
+                        {
+                            tracing::debug!(
+                                "Failed to tunnel unknown protocol to {authority_str}: {e}"
+                            );
+                        }
                     }
                 }
             }
@@ -281,7 +241,7 @@ fn process_connect(
     Ok(Response::new(body::empty()))
 }
 
-/// Serve HTTP/1.1 requests over an already-established stream (plain or TLS).
+/// Serve HTTP requests over an already-established stream (plain or TLS).
 ///
 /// Each request is passed through the [`CapturingHandler`] for inspection before
 /// being forwarded to the upstream server via `client`.
@@ -293,65 +253,23 @@ async fn serve_stream<I>(
     client: Arc<Client>,
     remote_addr: SocketAddr,
     listen_addr: SocketAddr,
-) -> Result<(), Box<dyn std::error::Error + Send + Sync>>
+) -> Result<(), BoxError>
 where
     I: AsyncRead + AsyncWrite + Unpin + Send + 'static,
 {
     let io = TokioIo::new(stream);
 
     let service = service_fn(move |mut req: Request<hyper::body::Incoming>| {
-        let mut handler = handler.clone();
+        let handler = handler.clone();
         let ca = Arc::clone(&ca);
         let client = Arc::clone(&client);
         let scheme = scheme.clone();
 
         async move {
-            let ctx = HttpContext { remote_addr };
-
-            // Reconstruct full URI with scheme + authority from Host header
-            if req.version() == hyper::Version::HTTP_10 || req.version() == hyper::Version::HTTP_11
-            {
-                let (mut parts, body) = req.into_parts();
-
-                let host = if let Some(h) = parts.headers.get(hyper::header::HOST) {
-                    h.as_bytes()
-                } else {
-                    tracing::warn!("Request missing Host header");
-                    return Ok(Response::builder()
-                        .status(400)
-                        .body(body::full(Bytes::from("Bad Request: missing Host header")))
-                        .unwrap_or_else(|_| Response::new(body::empty())));
-                };
-
-                let authority = match Authority::try_from(host) {
-                    Ok(a) => a,
-                    Err(e) => {
-                        tracing::warn!("Failed to parse authority from Host header: {e}");
-                        return Ok(Response::builder()
-                            .status(400)
-                            .body(body::full(Bytes::from("Bad Request: invalid Host header")))
-                            .unwrap_or_else(|_| Response::new(body::empty())));
-                    }
-                };
-
-                parts.uri = {
-                    let mut uri_parts = parts.uri.into_parts();
-                    uri_parts.scheme = Some(scheme);
-                    uri_parts.authority = Some(authority);
-                    match Uri::from_parts(uri_parts) {
-                        Ok(uri) => uri,
-                        Err(e) => {
-                            tracing::warn!("Failed to build URI: {e}");
-                            return Ok(Response::builder()
-                                .status(400)
-                                .body(body::full(Bytes::from("Bad Request: invalid URI")))
-                                .unwrap_or_else(|_| Response::new(body::empty())));
-                        }
-                    }
-                };
-
-                req = Request::from_parts(parts, body);
-            }
+            req = match reconstruct_tunnel_uri(req, scheme) {
+                Ok(req) => req,
+                Err(e) => return Ok(e.into_response()),
+            };
 
             // Check for proxel.ar cert request (inside CONNECT tunnel)
             if cert_server::is_cert_request(&req) {
@@ -359,107 +277,224 @@ where
                 return Ok::<_, hyper::Error>(resp);
             }
 
-            // Extract WebSocket upgrade future BEFORE handle_request consumes req.
-            let is_ws = is_websocket_upgrade(&req);
-            let client_on_upgrade = if is_ws {
-                Some(hyper::upgrade::on(&mut req))
-            } else {
-                None
-            };
-
-            let req = match handler.handle_request(&ctx, req).await {
-                RequestOrResponse::Request(req) => req,
-                RequestOrResponse::Response(res) => return Ok(res),
-            };
-
-            match client.request(normalize_request(req)).await {
-                Ok(mut res) => {
-                    if is_ws && res.status() == hyper::StatusCode::SWITCHING_PROTOCOLS {
-                        let server_on_upgrade = hyper::upgrade::on(&mut res);
-                        let (parts, _body) = res.into_parts();
-
-                        let ws_response = ProxiedResponse::new(
-                            parts.status,
-                            parts.version,
-                            parts.headers.clone(),
-                            Bytes::new(),
-                            now_millis(),
-                        );
-
-                        let conn_id = handler
-                            .take_pending_id()
-                            .unwrap_or_else(crate::event::next_id);
-                        if let Some(captured_req) = handler.take_captured_request() {
-                            handler.send_event(ProxyEvent::WebSocketConnected {
-                                id: conn_id,
-                                request: Box::new(captured_req),
-                                response: Box::new(ws_response),
-                            });
-                        }
-
-                        if let Some(client_fut) = client_on_upgrade {
-                            let event_tx = handler.event_tx_clone();
-                            tokio::spawn(async move {
-                                pump_websocket_frames(
-                                    conn_id,
-                                    client_fut,
-                                    server_on_upgrade,
-                                    event_tx,
-                                )
-                                .await;
-                            });
-                        }
-
-                        Ok(Response::from_parts(parts, body::empty()))
-                    } else {
-                        Ok(handler.handle_upstream_response(res).await)
-                    }
-                }
-                Err(e) => {
-                    tracing::error!("Client request error: {e}");
-                    Ok(handler.synthetic_response(
-                        http::StatusCode::BAD_GATEWAY,
-                        http::HeaderMap::new(),
-                        Bytes::from_static(b"Bad Gateway"),
-                    ))
-                }
-            }
+            forward_http_request(req, handler, client, remote_addr).await
         }
     });
 
-    hyper::server::conn::http1::Builder::new()
-        .preserve_header_case(true)
-        .title_case_headers(true)
-        .serve_connection(io, service)
-        .with_upgrades()
-        .await
-        .map_err(Into::into)
+    serve_auto_connection(io, service).await
 }
 
-/// Strip hop-by-hop artifacts before forwarding a request upstream.
-///
-/// Removes the `Host` header (hyper sets it from the URI), joins duplicate
-/// `Cookie` headers into a single value, and pins the version to HTTP/1.1.
-fn normalize_request(mut req: Request<ProxyBody>) -> Request<ProxyBody> {
-    req.headers_mut().remove(hyper::header::HOST);
+async fn forward_http_request(
+    mut req: Request<hyper::body::Incoming>,
+    mut handler: CapturingHandler,
+    client: Arc<Client>,
+    remote_addr: SocketAddr,
+) -> Result<Response<ProxyBody>, hyper::Error> {
+    let client_version = req.version();
+    let ctx = HttpContext { remote_addr };
 
-    if let http::header::Entry::Occupied(mut cookies) =
-        req.headers_mut().entry(hyper::header::COOKIE)
-    {
-        let joined_cookies = bstr::join(b"; ", cookies.iter());
-        match joined_cookies.try_into() {
-            Ok(value) => {
-                cookies.insert(value);
+    // Extract WebSocket upgrade future before handle_request consumes req.
+    let is_ws = is_websocket_upgrade(&req);
+    let client_on_upgrade = if is_ws {
+        Some(hyper::upgrade::on(&mut req))
+    } else {
+        None
+    };
+
+    let req = match handler.handle_request(&ctx, req).await {
+        RequestOrResponse::Request(req) => req,
+        RequestOrResponse::Response(mut res) => {
+            sanitize_response_for_client(&mut res, client_version);
+            return Ok(res);
+        }
+    };
+
+    let upstream_req = if is_ws {
+        prepare_upstream_upgrade_request(req)
+    } else {
+        prepare_upstream_request(req)
+    };
+
+    match client.request(upstream_req).await {
+        Ok(res) => {
+            if is_ws && res.status() == hyper::StatusCode::SWITCHING_PROTOCOLS {
+                return Ok(upgrade_websocket_response(res, handler, client_on_upgrade));
             }
-            Err(e) => {
-                tracing::warn!("Failed to join cookies, removing header: {e}");
-                cookies.remove();
-            }
+
+            let mut res = handler.handle_upstream_response(res).await;
+            sanitize_response_for_client(&mut res, client_version);
+            Ok(res)
+        }
+        Err(e) => {
+            tracing::error!("Client request error: {e}");
+            let mut res = handler.synthetic_response(
+                http::StatusCode::BAD_GATEWAY,
+                http::HeaderMap::new(),
+                Bytes::from_static(b"Bad Gateway"),
+            );
+            sanitize_response_for_client(&mut res, client_version);
+            Ok(res)
         }
     }
+}
 
-    *req.version_mut() = hyper::Version::HTTP_11;
-    req
+fn upgrade_websocket_response(
+    mut res: Response<hyper::body::Incoming>,
+    mut handler: CapturingHandler,
+    client_on_upgrade: Option<hyper::upgrade::OnUpgrade>,
+) -> Response<ProxyBody> {
+    let server_on_upgrade = hyper::upgrade::on(&mut res);
+    let (parts, _body) = res.into_parts();
+
+    let ws_response = ProxiedResponse::new(
+        parts.status,
+        parts.version,
+        parts.headers.clone(),
+        Bytes::new(),
+        now_millis(),
+    );
+
+    let conn_id = handler
+        .take_pending_id()
+        .unwrap_or_else(crate::event::next_id);
+    if let Some(captured_req) = handler.take_captured_request() {
+        handler.send_event(ProxyEvent::WebSocketConnected {
+            id: conn_id,
+            request: Box::new(captured_req),
+            response: Box::new(ws_response),
+        });
+    }
+
+    if let Some(client_fut) = client_on_upgrade {
+        let event_tx = handler.event_tx_clone();
+        tokio::spawn(async move {
+            pump_websocket_frames(conn_id, client_fut, server_on_upgrade, event_tx).await;
+        });
+    }
+
+    Response::from_parts(parts, body::empty())
+}
+
+fn reconstruct_tunnel_uri(
+    req: Request<hyper::body::Incoming>,
+    scheme: Scheme,
+) -> Result<Request<hyper::body::Incoming>, TunnelRequestError> {
+    let (mut parts, body) = req.into_parts();
+    let authority = tunnel_authority(&parts)?;
+
+    let mut uri_parts = parts.uri.into_parts();
+    uri_parts.scheme = Some(scheme);
+    uri_parts.authority = Some(authority);
+    parts.uri = Uri::from_parts(uri_parts).map_err(|e| {
+        tracing::warn!("Failed to build URI: {e}");
+        TunnelRequestError::InvalidUri
+    })?;
+
+    Ok(Request::from_parts(parts, body))
+}
+
+fn tunnel_authority(parts: &http::request::Parts) -> Result<Authority, TunnelRequestError> {
+    if let Some(authority) = parts.uri.authority() {
+        return Ok(authority.clone());
+    }
+
+    let Some(host) = parts.headers.get(hyper::header::HOST) else {
+        tracing::warn!("Request missing Host header");
+        return Err(TunnelRequestError::MissingHost);
+    };
+
+    Authority::try_from(host.as_bytes()).map_err(|e| {
+        tracing::warn!("Failed to parse authority from Host header: {e}");
+        TunnelRequestError::InvalidHost
+    })
+}
+
+impl TunnelRequestError {
+    fn into_response(self) -> Response<ProxyBody> {
+        Response::builder()
+            .status(http::StatusCode::BAD_REQUEST)
+            .body(body::full(Bytes::from_static(self.message().as_bytes())))
+            .unwrap_or_else(|_| Response::new(body::empty()))
+    }
+
+    const fn message(self) -> &'static str {
+        match self {
+            Self::MissingHost => "Bad Request: missing Host header",
+            Self::InvalidHost => "Bad Request: invalid Host header",
+            Self::InvalidUri => "Bad Request: invalid URI",
+        }
+    }
+}
+
+async fn sniff_stream_protocol<I>(stream: &mut I) -> std::io::Result<(StreamProtocol, Bytes)>
+where
+    I: AsyncRead + Unpin,
+{
+    let mut buffer = [0u8; H2_PREFACE.len()];
+    let mut filled = 0;
+
+    loop {
+        let bytes_read = stream.read(&mut buffer[filled..]).await?;
+        if bytes_read == 0 {
+            break;
+        }
+
+        filled += bytes_read;
+        let prefix = &buffer[..filled];
+
+        if is_tls_handshake(prefix) {
+            return Ok((StreamProtocol::Tls, Bytes::copy_from_slice(prefix)));
+        }
+        if is_h2_preface(prefix) || is_http1_request(prefix) {
+            return Ok((StreamProtocol::Http, Bytes::copy_from_slice(prefix)));
+        }
+        if filled < buffer.len() && could_be_known_protocol(prefix) {
+            continue;
+        }
+
+        return Ok((StreamProtocol::Unknown, Bytes::copy_from_slice(prefix)));
+    }
+
+    Ok((
+        classify_buffered_protocol(&buffer[..filled]),
+        Bytes::copy_from_slice(&buffer[..filled]),
+    ))
+}
+
+fn classify_buffered_protocol(buffered: &[u8]) -> StreamProtocol {
+    if is_tls_handshake(buffered) {
+        StreamProtocol::Tls
+    } else if is_h2_preface(buffered) || is_http1_request(buffered) {
+        StreamProtocol::Http
+    } else {
+        StreamProtocol::Unknown
+    }
+}
+
+fn is_tls_handshake(buffered: &[u8]) -> bool {
+    buffered.len() >= 2 && buffered[0] == TLS_RECORD_HANDSHAKE && buffered[1] == TLS_VERSION_MAJOR
+}
+
+fn is_h2_preface(buffered: &[u8]) -> bool {
+    buffered == H2_PREFACE
+}
+
+fn is_http1_request(buffered: &[u8]) -> bool {
+    HTTP1_METHOD_PREFIXES
+        .iter()
+        .any(|method| buffered.starts_with(method))
+}
+
+fn could_be_known_protocol(buffered: &[u8]) -> bool {
+    is_partial_tls_handshake(buffered)
+        || H2_PREFACE.starts_with(buffered)
+        || HTTP1_METHOD_PREFIXES
+            .iter()
+            .any(|method| method.starts_with(buffered))
+}
+
+fn is_partial_tls_handshake(buffered: &[u8]) -> bool {
+    buffered == [TLS_RECORD_HANDSHAKE]
 }
 
 /// Await both WebSocket upgrade futures, wrap the raw streams in tungstenite
@@ -565,7 +600,7 @@ pub(crate) async fn handle_replay(
     let Some(fwd_req) = handler.handle_replayed_request(req).await else {
         return;
     };
-    match client.request(normalize_request(fwd_req)).await {
+    match client.request(prepare_upstream_request(fwd_req)).await {
         Ok(res) => {
             handler.record_upstream_response(res).await;
         }
@@ -612,7 +647,7 @@ mod tests {
     }
 
     #[test]
-    fn normalize_request_removes_host_joins_cookies_and_pins_http11() {
+    fn prepare_upstream_request_removes_host_joins_cookies_and_pins_http11() {
         let req = Request::builder()
             .method(Method::GET)
             .uri("http://upstream.test/path")
@@ -623,7 +658,7 @@ mod tests {
             .body(body::empty())
             .unwrap();
 
-        let req = normalize_request(req);
+        let req = prepare_upstream_request(req);
 
         assert!(!req.headers().contains_key(hyper::header::HOST));
         assert_eq!(
@@ -635,6 +670,35 @@ mod tests {
             1
         );
         assert_eq!(req.version(), hyper::Version::HTTP_11);
+    }
+
+    #[test]
+    fn classify_buffered_protocol_detects_http2_preface() {
+        assert_eq!(classify_buffered_protocol(H2_PREFACE), StreamProtocol::Http);
+    }
+
+    #[test]
+    fn classify_buffered_protocol_detects_http1_methods_and_tls() {
+        assert_eq!(
+            classify_buffered_protocol(b"POST /upload HTTP/1.1\r\n"),
+            StreamProtocol::Http
+        );
+        assert_eq!(
+            classify_buffered_protocol(&[TLS_RECORD_HANDSHAKE, TLS_VERSION_MAJOR, 0x03, 0x00]),
+            StreamProtocol::Tls
+        );
+        assert_eq!(
+            classify_buffered_protocol(b"\x01\x02\x03"),
+            StreamProtocol::Unknown
+        );
+    }
+
+    #[test]
+    fn could_be_known_protocol_waits_for_partial_prefixes() {
+        assert!(could_be_known_protocol(b"P"));
+        assert!(could_be_known_protocol(b"PRI * HTTP/2.0\r\n"));
+        assert!(could_be_known_protocol(&[TLS_RECORD_HANDSHAKE]));
+        assert!(!could_be_known_protocol(b"NOPE"));
     }
 
     #[tokio::test]

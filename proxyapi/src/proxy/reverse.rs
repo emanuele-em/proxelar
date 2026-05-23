@@ -11,7 +11,10 @@ use crate::body::ProxyBody;
 use crate::handler::CapturingHandler;
 use crate::{HttpContext, HttpHandler, RequestOrResponse};
 
-use super::{is_benign_shutdown_error, Client};
+use super::{
+    is_benign_shutdown_error, prepare_upstream_request, sanitize_response_for_client,
+    serve_auto_connection, Client,
+};
 
 pub async fn handle_connection(
     stream: TcpStream,
@@ -28,11 +31,15 @@ pub async fn handle_connection(
         let target = target.clone();
 
         async move {
+            let client_version = req.version();
             let ctx = HttpContext { remote_addr };
 
             let req = match handler.handle_request(&ctx, req).await {
                 RequestOrResponse::Request(req) => req,
-                RequestOrResponse::Response(res) => return Ok::<_, hyper::Error>(res),
+                RequestOrResponse::Response(mut res) => {
+                    sanitize_response_for_client(&mut res, client_version);
+                    return Ok::<_, hyper::Error>(res);
+                }
             };
 
             // Rewrite URI to target, preserving path and query
@@ -48,28 +55,28 @@ pub async fn handle_connection(
                 }
             };
 
-            match client.request(req).await {
-                Ok(res) => Ok(handler.handle_upstream_response(res).await),
+            match client.request(prepare_upstream_request(req)).await {
+                Ok(res) => {
+                    let mut res = handler.handle_upstream_response(res).await;
+                    sanitize_response_for_client(&mut res, client_version);
+                    Ok(res)
+                }
                 Err(e) => {
                     tracing::error!("Reverse proxy error: {e}");
-                    Ok(handler.synthetic_response(
+                    let mut res = handler.synthetic_response(
                         http::StatusCode::BAD_GATEWAY,
                         http::HeaderMap::new(),
                         Bytes::from_static(b"Bad Gateway"),
-                    ))
+                    );
+                    sanitize_response_for_client(&mut res, client_version);
+                    Ok(res)
                 }
             }
         }
     });
 
-    if let Err(e) = hyper::server::conn::http1::Builder::new()
-        .preserve_header_case(true)
-        .title_case_headers(true)
-        .serve_connection(io, service)
-        .with_upgrades()
-        .await
-    {
-        if !is_benign_shutdown_error(&e) {
+    if let Err(e) = serve_auto_connection(io, service).await {
+        if !is_benign_shutdown_error(e.as_ref()) {
             tracing::debug!("Reverse proxy connection error: {e}");
         }
     }
