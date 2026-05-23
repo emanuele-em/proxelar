@@ -3,7 +3,7 @@ use http_body_util::{BodyExt, Full};
 use hyper::body::Incoming;
 use hyper::service::service_fn;
 use hyper::{Request, Response};
-use hyper_util::rt::TokioIo;
+use hyper_util::rt::{TokioExecutor, TokioIo};
 use proxyapi::{
     InterceptConfig, InterceptDecision, Proxy, ProxyConfig, ProxyEvent, ProxyMode,
     DEFAULT_BODY_CAPTURE_LIMIT,
@@ -123,6 +123,89 @@ async fn reverse_proxy_forwards_http_and_emits_request_complete() {
     let _ = shutdown_tx.send(());
     let _ = upstream_shutdown.send(());
 
+    assert!(handle.await.unwrap().is_ok());
+}
+
+#[tokio::test]
+async fn reverse_proxy_forwards_h2c_post_and_emits_http2_capture() {
+    let _ = rustls::crypto::ring::default_provider().install_default();
+    let (upstream_addr, upstream_shutdown) = start_echo_request_body_server().await;
+    let proxy_addr = reserve_loopback_addr().await;
+    let ca_dir = tempfile::tempdir().unwrap();
+
+    let (event_tx, mut event_rx) = mpsc::channel::<ProxyEvent>(100);
+    let config = ProxyConfig {
+        addr: proxy_addr,
+        mode: ProxyMode::Reverse {
+            target: format!("http://{upstream_addr}").parse().unwrap(),
+        },
+        event_tx,
+        ca_dir: ca_dir.path().to_path_buf(),
+        intercept: None,
+        body_capture_limit: DEFAULT_BODY_CAPTURE_LIMIT,
+        #[cfg(feature = "scripting")]
+        script_path: None,
+        replay_rx: None,
+    };
+
+    let proxy = Proxy::new(config);
+    let (shutdown_tx, shutdown_rx) = tokio::sync::oneshot::channel();
+    let handle = tokio::spawn(async move {
+        proxy
+            .start(async {
+                shutdown_rx.await.ok();
+            })
+            .await
+    });
+
+    wait_for_tcp(proxy_addr).await;
+
+    let mut sender = connect_h2(proxy_addr).await;
+    let request = Request::builder()
+        .method(http::Method::POST)
+        .version(http::Version::HTTP_2)
+        .uri(format!("http://{proxy_addr}/echo?via=h2c"))
+        .header("x-client-test", "reverse-h2c")
+        .body(Full::new(Bytes::from_static(b"reverse h2 body")))
+        .unwrap();
+    let response = sender.send_request(request).await.unwrap();
+
+    assert_eq!(response.version(), http::Version::HTTP_2);
+    assert_eq!(response.status(), http::StatusCode::CREATED);
+    assert_eq!(response.headers()["x-upstream-version"], "HTTP/1.1");
+    assert_eq!(
+        response
+            .into_body()
+            .collect()
+            .await
+            .unwrap()
+            .to_bytes()
+            .as_ref(),
+        b"reverse h2 body"
+    );
+
+    let event = tokio::time::timeout(EVENT_TIMEOUT, event_rx.recv())
+        .await
+        .unwrap()
+        .unwrap();
+    match event {
+        ProxyEvent::RequestComplete {
+            request, response, ..
+        } => {
+            assert_eq!(request.version(), http::Version::HTTP_2);
+            assert_eq!(request.method(), http::Method::POST);
+            assert_eq!(request.uri().path(), "/echo");
+            assert_eq!(request.uri().query(), Some("via=h2c"));
+            assert_eq!(request.headers()["x-client-test"], "reverse-h2c");
+            assert_eq!(request.body().as_ref(), b"reverse h2 body");
+            assert_eq!(response.status(), http::StatusCode::CREATED);
+            assert_eq!(response.body().as_ref(), b"reverse h2 body");
+        }
+        other => panic!("expected RequestComplete event, got {other:?}"),
+    }
+
+    let _ = shutdown_tx.send(());
+    let _ = upstream_shutdown.send(());
     assert!(handle.await.unwrap().is_ok());
 }
 
@@ -541,6 +624,18 @@ async fn wait_for_tcp(addr: SocketAddr) {
     }
 }
 
+async fn connect_h2(addr: SocketAddr) -> hyper::client::conn::http2::SendRequest<Full<Bytes>> {
+    let stream = tokio::net::TcpStream::connect(addr).await.unwrap();
+    let (sender, connection) = hyper::client::conn::http2::Builder::new(TokioExecutor::new())
+        .handshake(TokioIo::new(stream))
+        .await
+        .unwrap();
+    tokio::spawn(async move {
+        let _ = connection.await;
+    });
+    sender
+}
+
 async fn start_upstream_server() -> (SocketAddr, tokio::sync::oneshot::Sender<()>) {
     let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
     let addr = listener.local_addr().unwrap();
@@ -611,9 +706,12 @@ async fn echo_request_body_response(
 ) -> Result<Response<Full<Bytes>>, hyper::Error> {
     let script_header = req.headers().get("x-script").cloned();
     let intercept_header = req.headers().get("x-intercept").cloned();
+    let upstream_version = format!("{:?}", req.version());
     let body = req.into_body().collect().await?.to_bytes();
 
-    let mut builder = Response::builder().status(http::StatusCode::CREATED);
+    let mut builder = Response::builder()
+        .status(http::StatusCode::CREATED)
+        .header("x-upstream-version", upstream_version);
     if let Some(value) = script_header {
         builder = builder.header("x-seen-script", value);
     }
