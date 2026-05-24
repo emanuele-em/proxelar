@@ -17,6 +17,9 @@ proxelar [OPTIONS]
 | `--gui-port` | | `8081` | Web GUI port (only used with `-i gui`) |
 | `--ca-dir` | | `~/.proxelar` | Directory for CA certificate and key files |
 | `--body-capture-limit` | | `free` | Maximum body bytes buffered for capture/editing; use `free`, `unlimited`, or `none` for unlimited |
+| `--upstream-trust` | | `default` | Upstream TLS trust policy: `default`, `default+ca:/path/ca.pem`, `ca-only:/path/ca.pem`, or `insecure` |
+
+`--upstream-trust insecure` disables upstream certificate and hostname verification. Use it only for controlled debugging; it makes upstream HTTPS traffic vulnerable to MITM.
 
 ## Environment variables
 
@@ -44,4 +47,10 @@ proxelar --script log_traffic.lua
 
 # Capture only the first 1 MiB of large bodies while streaming traffic through
 proxelar --body-capture-limit 1048576
+
+# Trust a private upstream CA in addition to the default Mozilla roots
+proxelar --upstream-trust default+ca:/path/to/ca.pem
+
+# Trust only a private upstream CA
+proxelar --upstream-trust ca-only:/path/to/ca.pem
 ```

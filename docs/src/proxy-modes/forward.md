@@ -38,4 +38,9 @@ proxelar --script block_ads.lua
 # Test with curl
 curl -x http://127.0.0.1:8080 http://httpbin.org/get
 curl -x http://127.0.0.1:8080 https://httpbin.org/get
+
+# Trust an extra private CA when Proxelar connects to upstream HTTPS servers
+proxelar --upstream-trust default+ca:/path/to/ca.pem
 ```
+
+For upstream HTTPS, Proxelar uses bundled Mozilla/WebPKI roots by default. `--upstream-trust ca-only:/path/to/ca.pem` trusts only a supplied CA file, and `--upstream-trust insecure` disables upstream certificate and hostname verification for controlled debugging. `insecure` makes upstream HTTPS traffic vulnerable to MITM.

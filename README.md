@@ -110,6 +110,7 @@ proxelar -m reverse --target http://localhost:3000   # reverse proxy
 proxelar -b 0.0.0.0 -p 9090                         # custom bind/port
 proxelar --script examples/scripts/block_domain.lua  # with a Lua script
 proxelar --body-capture-limit 1048576                # cap captured/editable body bytes
+proxelar --upstream-trust default+ca:/path/ca.pem    # trust an extra upstream CA
 ```
 
 <details>
@@ -126,8 +127,11 @@ proxelar --body-capture-limit 1048576                # cap captured/editable bod
 | `--ca-dir` | CA certificate directory | `~/.proxelar` |
 | `-s, --script` | Lua script for request/response hooks | — |
 | `--body-capture-limit` | Maximum body bytes buffered for capture/editing; use `free`, `unlimited`, or `none` for unlimited | `free` |
+| `--upstream-trust` | Upstream TLS trust policy: `default`, `default+ca:/path/ca.pem`, `ca-only:/path/ca.pem`, or `insecure` | `default` |
 
 </details>
+
+`--upstream-trust insecure` disables upstream certificate and hostname verification. Use it only for controlled debugging; it makes upstream HTTPS traffic vulnerable to MITM.
 
 <details>
 <summary><strong>TUI key bindings</strong></summary>
