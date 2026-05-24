@@ -81,3 +81,5 @@ To make the web GUI accessible from other machines:
 ```bash
 proxelar -i gui -b 0.0.0.0
 ```
+
+The current web GUI is designed for local use. Its WebSocket connection is token-protected and accepts localhost origins, so remote browser access should be done through a local tunnel such as SSH port forwarding until remote GUI access is explicitly hardened and documented.

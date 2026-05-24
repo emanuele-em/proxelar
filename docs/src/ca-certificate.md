@@ -66,6 +66,12 @@ Use `--ca-dir` to store the CA files in a different location:
 proxelar --ca-dir /path/to/certs
 ```
 
+## Removing the CA
+
+When you are done, remove the Proxelar CA from every trust store where you installed it. The generated files live in `~/.proxelar/` by default, but deleting those files does not remove trust from your OS, browser, or mobile device.
+
+See [CA trust and uninstall](./guides/ca-trust.md) for platform-specific uninstall notes and limitations such as certificate pinning.
+
 ## Per-host certificate caching
 
 Leaf certificates are cached in memory (up to 1,000 hosts). Repeated connections to the same host reuse the cached certificate instead of generating a new one.
