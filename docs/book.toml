@@ -1,6 +1,7 @@
 [book]
 title = "Proxelar Documentation"
 authors = ["Emanuele Micheletti"]
+description = "Proxelar is a scriptable Rust-native MITM proxy for inspecting, intercepting, replaying, and rewriting HTTP, HTTPS, and WebSocket traffic."
 language = "en"
 src = "src"
 

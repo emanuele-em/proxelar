@@ -1,0 +1,21 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<urlset xmlns="http://www.sitemaps.org/schemas/sitemap/0.9">
+  <url><loc>https://proxelar.micheletti.io/</loc><lastmod>2026-05-24</lastmod></url>
+  <url><loc>https://proxelar.micheletti.io/installation.html</loc><lastmod>2026-05-24</lastmod></url>
+  <url><loc>https://proxelar.micheletti.io/quick-start.html</loc><lastmod>2026-05-24</lastmod></url>
+  <url><loc>https://proxelar.micheletti.io/ca-certificate.html</loc><lastmod>2026-05-24</lastmod></url>
+  <url><loc>https://proxelar.micheletti.io/guides/browser-curl.html</loc><lastmod>2026-05-24</lastmod></url>
+  <url><loc>https://proxelar.micheletti.io/guides/reverse-proxy-mocking.html</loc><lastmod>2026-05-24</lastmod></url>
+  <url><loc>https://proxelar.micheletti.io/guides/lua-recipes.html</loc><lastmod>2026-05-24</lastmod></url>
+  <url><loc>https://proxelar.micheletti.io/guides/ca-trust.html</loc><lastmod>2026-05-24</lastmod></url>
+  <url><loc>https://proxelar.micheletti.io/proxy-modes/forward.html</loc><lastmod>2026-05-24</lastmod></url>
+  <url><loc>https://proxelar.micheletti.io/proxy-modes/reverse.html</loc><lastmod>2026-05-24</lastmod></url>
+  <url><loc>https://proxelar.micheletti.io/intercept.html</loc><lastmod>2026-05-24</lastmod></url>
+  <url><loc>https://proxelar.micheletti.io/scripting/overview.html</loc><lastmod>2026-05-24</lastmod></url>
+  <url><loc>https://proxelar.micheletti.io/scripting/api-reference.html</loc><lastmod>2026-05-24</lastmod></url>
+  <url><loc>https://proxelar.micheletti.io/scripting/examples.html</loc><lastmod>2026-05-24</lastmod></url>
+  <url><loc>https://proxelar.micheletti.io/cli-reference.html</loc><lastmod>2026-05-24</lastmod></url>
+  <url><loc>https://proxelar.micheletti.io/interfaces.html</loc><lastmod>2026-05-24</lastmod></url>
+  <url><loc>https://proxelar.micheletti.io/reference/limitations.html</loc><lastmod>2026-05-24</lastmod></url>
+  <url><loc>https://proxelar.micheletti.io/reference/comparison.html</loc><lastmod>2026-05-24</lastmod></url>
+</urlset>
