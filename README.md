@@ -1,8 +1,8 @@
 <div align="center">
 <img src="assets/logo.png" width="80"><br><br>
 <h1>Proxelar</h1>
-<p><strong>A Man-in-the-Middle proxy written in Rust.</strong><br>
-Intercept, inspect, and modify HTTP/HTTPS traffic with Lua scripting, a TUI, and a web interface.</p>
+<p><strong>A scriptable local traffic workbench for HTTP, HTTPS, and WebSocket debugging.</strong><br>
+Capture, inspect, intercept, replay, and rewrite traffic from your terminal or browser.</p>
 
 <p>
 <a href="https://crates.io/crates/proxelar"><img src="https://img.shields.io/crates/v/proxelar" alt="Crates.io"></a>
@@ -14,34 +14,35 @@ Intercept, inspect, and modify HTTP/HTTPS traffic with Lua scripting, a TUI, and
 
 <img src="assets/screenshots/tui.gif" alt="TUI demo" width="800"><br><br>
 <img src="assets/screenshots/gui.gif" alt="Web GUI demo" width="800">
-
 </div>
 
 ---
 
 ## What is Proxelar?
 
-Proxelar sits between your application and the internet, giving you full visibility into every HTTP/HTTPS request — and the power to transform it on the fly with Lua.
+Proxelar is a single-binary MITM proxy for developers who need to see and change what an app is doing on the wire without running a full security suite.
 
 ```
-Your App  ──►  Proxelar :8080  ──►  Internet
+Your app  ──►  Proxelar :8080  ──►  Upstream service
                     │
-              Inspect · Modify · Mock
+              Inspect · Intercept · Rewrite · Mock
 ```
 
-Useful for debugging APIs, reverse engineering third-party services, testing mobile apps, injecting headers, mocking responses, or automating any request/response transform without touching your source code.
+It is useful for debugging APIs, inspecting browser or mobile traffic, testing WebSocket clients, injecting headers, mocking local services, replaying captured requests, and automating request/response transforms with Lua.
+
+Proxelar is intentionally developer-oriented: terminal-first, scriptable, Rust-native, and usable as a CLI tool or as the `proxyapi` library.
 
 ---
 
-## Features
+## Why use it?
 
-- **Lua scripting** — write `on_request` / `on_response` hooks to modify, block, or mock traffic at runtime
-- **HTTPS interception** — automatic CA generation and per-host certificate minting
-- **Forward & reverse proxy** — CONNECT tunneling or upstream URI rewriting
-- **Three interfaces** — terminal (stdout), interactive TUI (ratatui), web GUI (axum + WebSocket)
-- **WebSocket inspection** — connections captured alongside HTTP traffic; browse frames by direction, opcode, and payload
-- **Column-scoped filtering** — `time:14:`, `proto:https`, `method:POST`, `host:github`, `path:/api`, `status:404`, `type:json`, `size:1KB`, `duration:slow` or plain text search
-- **Easy CA install** — visit `http://proxel.ar` through the proxy to download and install the root cert
+- **One local binary** — install with Homebrew, Cargo, Docker/Podman, or GitHub releases.
+- **Three interfaces** — TUI by default, plain terminal output, or a browser GUI.
+- **Lua scripting** — `on_request` and `on_response` hooks can rewrite, block, short-circuit, or mock traffic.
+- **Interactive intercept** — pause requests, edit method/URI/headers/body, forward, drop, or replay.
+- **HTTPS MITM** — local CA generation, per-host certificates, and a built-in certificate install page.
+- **Forward and reverse modes** — inspect configured clients or put Proxelar in front of a local service.
+- **WebSocket inspection** — capture connections and browse frames by direction, opcode, and payload preview.
 
 ---
 
@@ -69,27 +70,61 @@ docker run --rm -it -v ~/.proxelar:/root/.proxelar -p 8080:8080 -p 127.0.0.1:808
 docker run --rm -it -v ~/.proxelar:/root/.proxelar -p 8080:8080 ghcr.io/emanuele-em/proxelar --interface terminal --addr 0.0.0.0
 ```
 
-The `-v ~/.proxelar:/root/.proxelar` mount reuses your existing trusted CA certificate so you won't get browser warnings.
+The `-v ~/.proxelar:/root/.proxelar` mount reuses your existing trusted CA certificate so you do not get browser warnings after trusting the CA once.
 
 ---
 
 ## Quick Start
 
 **1. Start the proxy**
+
 ```bash
 proxelar
 ```
 
-**2. Install the CA certificate**
+**2. Configure a client**
 
-Visit `http://proxel.ar` while routing traffic through the proxy — it serves the cert with install instructions.  
-Or install it manually: `~/.proxelar/proxelar-ca.pem`
+Set HTTP and HTTPS proxy to `127.0.0.1:8080` in your browser, OS, mobile device, app, or tool.
 
-**3. Configure your system proxy**
+**3. Install the CA certificate for HTTPS**
 
-Set HTTP and HTTPS proxy to `127.0.0.1:8080` in your OS, browser, or tool of choice.
+Visit `http://proxel.ar` while routing traffic through Proxelar. It serves the generated root certificate and install instructions.
 
-Traffic will start appearing in the TUI immediately.
+Traffic appears in the TUI immediately.
+
+```bash
+# quick smoke test
+curl -x http://127.0.0.1:8080 http://httpbin.org/get
+curl -x http://127.0.0.1:8080 https://httpbin.org/get
+```
+
+---
+
+## Example: mock an API response
+
+Create `mock_user.lua`:
+
+```lua
+function on_request(request)
+    if request.method == "GET" and string.find(request.url, "/api/user/me") then
+        return {
+            status = 200,
+            headers = { ["Content-Type"] = "application/json" },
+            body = '{"id":1,"name":"Local Test User"}',
+        }
+    end
+end
+```
+
+Run Proxelar in front of a local service:
+
+```bash
+proxelar -m reverse --target http://localhost:3000 --script mock_user.lua
+```
+
+Then call `http://127.0.0.1:8080/api/user/me` to receive the mocked response.
+
+More scripts are in [`examples/scripts/`](examples/scripts/), including auth injection, CORS headers, HTML rewriting, cookie stripping, redirects, traffic logging, and JSON body edits.
 
 ---
 
@@ -101,9 +136,7 @@ proxelar -i terminal  # plain terminal output
 proxelar -i gui       # web GUI at http://localhost:8081
 ```
 
----
-
-## Usage
+Common options:
 
 ```bash
 proxelar -m reverse --target http://localhost:3000   # reverse proxy
@@ -131,113 +164,52 @@ proxelar --upstream-trust default+ca:/path/ca.pem    # trust an extra upstream C
 
 </details>
 
-`--upstream-trust insecure` disables upstream certificate and hostname verification. Use it only for controlled debugging; it makes upstream HTTPS traffic vulnerable to MITM.
-
-<details>
-<summary><strong>TUI key bindings</strong></summary>
-
-| Key | Action |
-|-----|--------|
-| `j` / `k` / arrows | Navigate |
-| `Enter` | Open detail panel; press again to focus and scroll |
-| `Tab` | Switch Request / Response / Frames tabs |
-| `/` | Filter (plain text or `column:value`) |
-| `r` | Replay selected request |
-| `Esc` | Close panel / clear filter |
-| `g` / `G` | Top / bottom |
-| `c` | Clear requests |
-| `?` | Keybinding help |
-| `q` / `Ctrl+C` | Quit |
-
-</details>
+`--upstream-trust insecure` disables upstream certificate and hostname verification. Use it only for controlled debugging.
 
 ---
 
-## Scripting
+## How it compares
 
-Write Lua scripts to intercept and transform traffic. Define `on_request` and/or `on_response` hooks:
+| Tool | Best fit | Proxelar tradeoff |
+|------|----------|-------------------|
+| mitmproxy | Mature general-purpose MITM proxy with a large addon ecosystem, transparent/local capture modes, rich flow formats, and years of protocol hardening. | Proxelar is smaller and Rust-native, with Lua scripting and TUI/web interfaces, but it does not yet match mitmproxy's depth. |
+| proxyfor | Lightweight Rust proxy with TUI/WebUI and export-oriented workflows. | Proxelar emphasizes Lua transforms, interactive intercept, replay, and an embeddable core; proxyfor currently has stronger export ergonomics. |
+| Burp Suite / Caido | Professional web security testing, scanning, collaboration, and deep manual testing workflows. | Proxelar is not a security suite. It is better suited to local debugging, scripting, and development workflows. |
+| Charles / Proxyman / HTTP Toolkit | Polished desktop app experience for inspecting app traffic. | Proxelar is terminal-first and scriptable, with less desktop polish but a simpler open-source CLI workflow. |
 
-```lua
-function on_request(request)
-    -- request.method, request.url, request.headers, request.body
-    -- Return the request to forward it (modified or not)
-    -- Return a response table to short-circuit: { status = 403, headers = {}, body = "Blocked" }
-    -- Return nil to pass through unchanged
-end
+See the [full comparison](https://proxelar.micheletti.io/reference/comparison.html) for details.
 
-function on_response(request, response)
-    -- response.status, response.headers, response.body
-    -- Return the response (modified or not), or nil to pass through
-end
-```
+---
 
-<details>
-<summary><strong>Example: block domains</strong></summary>
+## Current limitations
 
-```lua
-local blocked = { "ads%.example%.com", "tracker%.example%.com" }
+Proxelar is usable today, but some mature proxy workflows are still on the roadmap:
 
-function on_request(request)
-    for _, pattern in ipairs(blocked) do
-        if string.find(request.url, pattern) then
-            return { status = 403, headers = {}, body = "Blocked" }
-        end
-    end
-end
-```
+- Captured sessions are in memory; HAR, curl, raw-flow export, and session reload are not implemented yet.
+- Body views and editors are byte-oriented; gzip/br/zstd decoding, charset handling, and richer pretty views are limited.
+- Transparent/local capture, SOCKS5 mode, upstream proxy chaining, and DNS inspection are not implemented.
+- HTTPS interception requires trusting Proxelar's local CA. Certificate-pinned apps and many Android apps will not trust user-installed CAs.
+- Remote web GUI use is not a hardened multi-user deployment mode; keep it local or tunnel it carefully.
 
-</details>
-
-<details>
-<summary><strong>Example: add CORS headers</strong></summary>
-
-```lua
-function on_response(request, response)
-    response.headers["Access-Control-Allow-Origin"] = "*"
-    response.headers["Access-Control-Allow-Methods"] = "GET, POST, PUT, DELETE, OPTIONS"
-    return response
-end
-```
-
-</details>
-
-<details>
-<summary><strong>Example: mock API endpoints</strong></summary>
-
-```lua
-function on_request(request)
-    if request.method == "GET" and string.find(request.url, "/api/user/me") then
-        return {
-            status = 200,
-            headers = { ["Content-Type"] = "application/json" },
-            body = '{"id": 1, "name": "Test User"}',
-        }
-    end
-end
-```
-
-</details>
-
-More examples in [`examples/scripts/`](examples/scripts/) — header injection, cookie stripping, HTML rewriting, request body modification, traffic logging, and more. Full scripting API reference at [proxelar.micheletti.io](https://proxelar.micheletti.io/scripting/api-reference.html).
+See [Known limitations](https://proxelar.micheletti.io/reference/limitations.html) and the [roadmap](ROADMAP.md).
 
 ---
 
 ## Documentation
 
-Latest release: **[Proxelar 0.4.4 — Body Capture Limits for Large Traffic](https://github.com/emanuele-em/proxelar/releases/tag/v0.4.4)**
+Full documentation: **[proxelar.micheletti.io](https://proxelar.micheletti.io)**
 
-Full documentation at **[proxelar.micheletti.io](https://proxelar.micheletti.io)**:
-
-- [Getting started](https://proxelar.micheletti.io/quick-start.html)
-- [Forward & reverse proxy modes](https://proxelar.micheletti.io/proxy-modes/forward.html)
-- [Lua scripting API reference](https://proxelar.micheletti.io/scripting/api-reference.html)
-- [CA certificate installation](https://proxelar.micheletti.io/ca-certificate.html)
+- [Quick start](https://proxelar.micheletti.io/quick-start.html)
+- [Inspect browser and curl traffic](https://proxelar.micheletti.io/guides/browser-curl.html)
+- [Mock or modify a local API](https://proxelar.micheletti.io/guides/reverse-proxy-mocking.html)
+- [Lua scripting API](https://proxelar.micheletti.io/scripting/api-reference.html)
+- [CA trust and uninstall](https://proxelar.micheletti.io/guides/ca-trust.html)
 
 ---
 
 ## Contributing
 
-Contributions are welcome. Open an issue or submit a pull request.
+Contributions are welcome. See [CONTRIBUTING.md](CONTRIBUTING.md) and [ROADMAP.md](ROADMAP.md).
 
 ## License
 
