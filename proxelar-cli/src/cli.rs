@@ -1,4 +1,5 @@
 use clap::{Parser, ValueEnum};
+use proxyapi::UpstreamTlsConfig;
 use std::net::IpAddr;
 use std::path::PathBuf;
 use std::str::FromStr;
@@ -49,6 +50,14 @@ pub struct Args {
         default_value = "free"
     )]
     pub body_capture_limit: BodyCaptureLimit,
+
+    /// Upstream HTTPS trust policy: default, default+ca:/path/to/ca.pem, ca-only:/path/to/ca.pem, or insecure
+    #[arg(
+        long = "upstream-trust",
+        value_name = "POLICY",
+        default_value = "default"
+    )]
+    pub upstream_trust: UpstreamTlsConfig,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -108,6 +117,7 @@ mod tests {
             args.body_capture_limit.into_option(),
             proxyapi::DEFAULT_BODY_CAPTURE_LIMIT
         );
+        assert_eq!(args.upstream_trust, UpstreamTlsConfig::Default);
     }
 
     #[test]
@@ -135,5 +145,56 @@ mod tests {
         let args = Args::parse_from(["proxelar", "--body-capture-limit", "free"]);
 
         assert_eq!(args.body_capture_limit, BodyCaptureLimit::Unlimited);
+    }
+
+    #[test]
+    fn test_upstream_trust_default_arg() {
+        let args = Args::parse_from(["proxelar", "--upstream-trust", "default"]);
+
+        assert_eq!(args.upstream_trust, UpstreamTlsConfig::Default);
+    }
+
+    #[test]
+    fn test_upstream_trust_default_with_ca_arg() {
+        let args = Args::parse_from(["proxelar", "--upstream-trust", "default+ca:/tmp/ca.pem"]);
+
+        assert_eq!(
+            args.upstream_trust,
+            UpstreamTlsConfig::DefaultWithCaFile(PathBuf::from("/tmp/ca.pem"))
+        );
+    }
+
+    #[test]
+    fn test_upstream_trust_ca_only_arg() {
+        let args = Args::parse_from(["proxelar", "--upstream-trust", "ca-only:/tmp/ca.pem"]);
+
+        assert_eq!(
+            args.upstream_trust,
+            UpstreamTlsConfig::CaFileOnly(PathBuf::from("/tmp/ca.pem"))
+        );
+    }
+
+    #[test]
+    fn test_upstream_trust_insecure_arg() {
+        let args = Args::parse_from(["proxelar", "--upstream-trust", "insecure"]);
+
+        assert_eq!(args.upstream_trust, UpstreamTlsConfig::Insecure);
+    }
+
+    #[test]
+    fn test_upstream_trust_rejects_malformed_values() {
+        for value in [
+            "default+ca:",
+            "default+ca:   ",
+            "ca-only:",
+            "ca-only:   ",
+            "default+ca",
+            "ca-only",
+            "unknown",
+            "",
+        ] {
+            let result = Args::try_parse_from(["proxelar", "--upstream-trust", value]);
+            assert!(result.is_err(), "{value:?} should be rejected");
+        }
     }
 }

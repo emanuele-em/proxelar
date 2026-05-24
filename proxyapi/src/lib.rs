@@ -24,7 +24,7 @@ pub use error::Error;
 pub use event::ProxyEvent;
 pub use handler::{CapturingHandler, DEFAULT_BODY_CAPTURE_LIMIT};
 pub use intercept::{InterceptConfig, InterceptDecision};
-pub use proxy::{Proxy, ProxyConfig, ProxyMode};
+pub use proxy::{Proxy, ProxyConfig, ProxyMode, UpstreamTlsConfig};
 
 /// Returned by [`HttpHandler::handle_request`] to either forward or short-circuit.
 pub enum RequestOrResponse {

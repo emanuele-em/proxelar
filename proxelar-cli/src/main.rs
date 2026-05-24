@@ -54,6 +54,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         mode: proxy_mode,
         event_tx,
         ca_dir,
+        upstream_tls: args.upstream_trust,
         intercept: Some(Arc::clone(&intercept)),
         body_capture_limit: args.body_capture_limit.into_option(),
         #[cfg(feature = "scripting")]
