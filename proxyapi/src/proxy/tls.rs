@@ -1,6 +1,4 @@
 use std::{
-    fs::File,
-    io::BufReader,
     path::{Path, PathBuf},
     str::FromStr,
     sync::Arc,
@@ -13,6 +11,7 @@ use rustls::{
     ClientConfig, ConfigBuilder, DigitallySignedStruct, RootCertStore, SignatureScheme,
     WantsVerifier,
 };
+use rustls_pki_types::pem::{self, PemObject};
 
 use crate::error::Error;
 
@@ -113,9 +112,10 @@ fn append_ca_file_roots(roots: &mut RootCertStore, path: &Path) -> Result<(), Er
 }
 
 fn load_ca_file_roots(path: &Path) -> Result<RootCertStore, Error> {
-    let file = File::open(path)?;
-    let mut reader = BufReader::new(file);
-    let certs = rustls_pemfile::certs(&mut reader).collect::<Result<Vec<_>, _>>()?;
+    let certs = CertificateDer::pem_file_iter(path)
+        .map_err(map_pem_error)?
+        .collect::<Result<Vec<_>, _>>()
+        .map_err(map_pem_error)?;
 
     let mut roots = RootCertStore::empty();
     let (valid_count, invalid_count) = roots.add_parsable_certificates(certs);
@@ -133,6 +133,13 @@ fn load_ca_file_roots(path: &Path) -> Result<RootCertStore, Error> {
     }
 
     Ok(roots)
+}
+
+fn map_pem_error(err: pem::Error) -> Error {
+    match err {
+        pem::Error::Io(err) => Error::Io(err),
+        err => Error::Other(format!("failed to parse PEM certificate: {err}")),
+    }
 }
 
 /// Skips certificate chain and hostname checks while retaining Rustls handshake signature checks.
