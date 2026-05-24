@@ -1041,7 +1041,6 @@ mod tests {
     fn draw_renders_complete_response_detail_and_websocket_frames() {
         let mut state = AppState::new();
         state.entries.push_back(FlowEntry::Complete {
-            id: 1,
             request: request(
                 Method::GET,
                 "https://api.test/items?q=1",

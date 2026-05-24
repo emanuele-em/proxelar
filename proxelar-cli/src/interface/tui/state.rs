@@ -19,7 +19,6 @@ pub enum DetailTab {
 /// and a response received.
 pub enum FlowEntry {
     Complete {
-        id: u64,
         request: Box<ProxiedRequest>,
         response: Box<ProxiedResponse>,
     },
@@ -40,16 +39,6 @@ pub enum FlowEntry {
 }
 
 impl FlowEntry {
-    #[allow(dead_code)]
-    pub fn id(&self) -> Option<u64> {
-        match self {
-            FlowEntry::Complete { id, .. }
-            | FlowEntry::Pending { id, .. }
-            | FlowEntry::WebSocket { id, .. } => Some(*id),
-            FlowEntry::Error { .. } => None,
-        }
-    }
-
     pub fn is_pending(&self) -> bool {
         matches!(self, FlowEntry::Pending { .. })
     }
@@ -453,17 +442,10 @@ impl AppState {
                     .iter_mut()
                     .find(|e| matches!(e, FlowEntry::Pending { id: eid, .. } if *eid == id))
                 {
-                    *entry = FlowEntry::Complete {
-                        id,
-                        request,
-                        response,
-                    };
+                    *entry = FlowEntry::Complete { request, response };
                 } else {
-                    self.entries.push_back(FlowEntry::Complete {
-                        id,
-                        request,
-                        response,
-                    });
+                    self.entries
+                        .push_back(FlowEntry::Complete { request, response });
                 }
             }
             ProxyEvent::Error { message } => {
@@ -772,14 +754,13 @@ mod tests {
         assert_eq!(state.selected_request().unwrap().uri().path(), "/done");
         assert!(matches!(
             state.entries.front().unwrap(),
-            FlowEntry::Complete { id: 7, .. }
+            FlowEntry::Complete { .. }
         ));
     }
 
     #[test]
     fn app_state_filters_complete_and_websocket_entries_by_column() {
         let complete = FlowEntry::Complete {
-            id: 1,
             request: request(Method::GET, "https://api.example.test/items?q=one", 1000),
             response: response(
                 StatusCode::CREATED,
