@@ -34,7 +34,12 @@ proxelar -m reverse --target http://localhost:3000 --script auth_dev.lua
 
 # With web GUI
 proxelar -m reverse --target http://localhost:3000 -i gui
+
+# HTTPS upstream with a private CA
+proxelar -m reverse --target https://localhost:3000 --upstream-trust default+ca:/path/to/ca.pem
 ```
+
+For upstream HTTPS, Proxelar uses bundled Mozilla/WebPKI roots by default. Use `--upstream-trust default+ca:/path/to/ca.pem` to add a private CA, `--upstream-trust ca-only:/path/to/ca.pem` to trust only that CA, or `--upstream-trust insecure` for temporary debugging without certificate or hostname verification. `insecure` makes upstream HTTPS traffic vulnerable to MITM.
 
 ## Common use cases with scripting
 

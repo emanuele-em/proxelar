@@ -1,5 +1,6 @@
 pub(crate) mod forward;
 pub(crate) mod reverse;
+mod tls;
 
 use std::{error::Error as StdError, future::Future, net::SocketAddr, path::PathBuf, sync::Arc};
 
@@ -26,6 +27,8 @@ use crate::handler::CapturingHandler;
 use crate::intercept::InterceptConfig;
 #[cfg(feature = "scripting")]
 use crate::scripting::ScriptEngine;
+
+pub use tls::UpstreamTlsConfig;
 
 /// Shared HTTP(S) client type used by both forward and reverse proxy.
 pub(crate) type Client =
@@ -153,6 +156,8 @@ pub struct ProxyConfig {
     pub event_tx: mpsc::Sender<ProxyEvent>,
     /// Directory for CA certificate and key files.
     pub ca_dir: PathBuf,
+    /// Upstream HTTPS server trust policy.
+    pub upstream_tls: UpstreamTlsConfig,
     /// Optional intercept controller for interactive request/response editing.
     pub intercept: Option<Arc<InterceptConfig>>,
     /// Maximum body bytes buffered for capture/editing before streaming passthrough.
@@ -210,8 +215,15 @@ impl Proxy {
         let ca =
             Arc::new(tokio::task::spawn_blocking(move || Ssl::load_or_generate(&ca_dir)).await??);
 
+        if self.config.upstream_tls.is_insecure() {
+            tracing::warn!(
+                "Upstream TLS certificate verification is disabled; traffic is vulnerable to upstream MITM"
+            );
+        }
+
+        let tls_config = tls::build_client_config(&self.config.upstream_tls)?;
         let https = hyper_rustls::HttpsConnectorBuilder::new()
-            .with_webpki_roots()
+            .with_tls_config(tls_config)
             .https_or_http()
             .enable_http1()
             .build();
@@ -324,6 +336,7 @@ mod tests {
             },
             event_tx,
             ca_dir: PathBuf::from("."),
+            upstream_tls: UpstreamTlsConfig::Default,
             intercept: None,
             body_capture_limit: DEFAULT_BODY_CAPTURE_LIMIT,
             #[cfg(feature = "scripting")]

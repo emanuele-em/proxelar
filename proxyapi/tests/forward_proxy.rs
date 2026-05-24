@@ -5,7 +5,9 @@ use hyper::body::Incoming;
 use hyper::service::service_fn;
 use hyper::{Request, Response};
 use hyper_util::rt::{TokioExecutor, TokioIo};
-use proxyapi::{Proxy, ProxyConfig, ProxyEvent, ProxyMode, DEFAULT_BODY_CAPTURE_LIMIT};
+use proxyapi::{
+    Proxy, ProxyConfig, ProxyEvent, ProxyMode, UpstreamTlsConfig, DEFAULT_BODY_CAPTURE_LIMIT,
+};
 use proxyapi_models::ProxiedRequest;
 use std::net::SocketAddr;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
@@ -30,6 +32,7 @@ async fn test_forward_proxy_starts_and_shuts_down() {
         mode: ProxyMode::Forward,
         event_tx,
         ca_dir: ca_dir.path().to_path_buf(),
+        upstream_tls: UpstreamTlsConfig::Default,
         intercept: None,
         body_capture_limit: DEFAULT_BODY_CAPTURE_LIMIT,
         #[cfg(feature = "scripting")]
@@ -686,6 +689,7 @@ async fn start_forward_proxy() -> (
         mode: ProxyMode::Forward,
         event_tx,
         ca_dir: ca_dir.path().to_path_buf(),
+        upstream_tls: UpstreamTlsConfig::Default,
         intercept: None,
         body_capture_limit: DEFAULT_BODY_CAPTURE_LIMIT,
         #[cfg(feature = "scripting")]
@@ -725,6 +729,7 @@ async fn start_forward_proxy_with_replay() -> (
         mode: ProxyMode::Forward,
         event_tx,
         ca_dir: ca_dir.path().to_path_buf(),
+        upstream_tls: UpstreamTlsConfig::Default,
         intercept: None,
         body_capture_limit: DEFAULT_BODY_CAPTURE_LIMIT,
         #[cfg(feature = "scripting")]

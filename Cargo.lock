@@ -2065,6 +2065,7 @@ dependencies = [
  "tokio-test",
  "tokio-tungstenite",
  "tracing",
+ "webpki-roots",
 ]
 
 [[package]]
