@@ -58,6 +58,12 @@ Prints each request/response as a colored line to stdout. Useful for quick inspe
 
 Output includes timestamp, HTTP method (color-coded), URL, status code, and response size.
 
+Pass `--quiet` (`-q`) to suppress the per-request lines; errors still go to stderr. This is useful with a [Lua script](scripting/overview.md) that produces its own output via `print()`:
+
+```bash
+proxelar -i terminal -q --script log_traffic.lua
+```
+
 ## Web GUI
 
 ```bash

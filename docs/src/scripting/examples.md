@@ -83,6 +83,8 @@ function on_response(request, response)
 end
 ```
 
+Run with `proxelar -i terminal -q --script log.lua` to see only the script's output, without the proxy's own per-request lines.
+
 ## Inject authentication
 
 ```lua
