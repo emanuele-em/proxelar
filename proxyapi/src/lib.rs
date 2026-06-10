@@ -3,7 +3,9 @@
 //! Provides HTTP/HTTPS forward and reverse proxy functionality with
 //! request/response interception via the [`HttpHandler`] trait.
 
-#![forbid(unsafe_code)]
+// `deny` rather than `forbid` so the single audited block in `scripting`
+// (mlua's `unsafe_new`, gated behind --allow-c-modules) can opt in locally.
+#![deny(unsafe_code)]
 
 pub mod body;
 pub mod ca;

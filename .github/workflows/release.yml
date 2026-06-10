@@ -81,9 +81,65 @@ jobs:
           name: proxelar-${{ matrix.target }}
           path: proxelar-${{ github.ref_name }}-${{ matrix.target }}.*
 
+  # Windows build that links a shared lua54.dll instead of vendoring Lua, so
+  # scripts run with --allow-c-modules can `require` native modules (e.g.
+  # lua-protobuf). The DLL is bundled alongside the executable.
+  build-windows-cmodules:
+    name: Build (x86_64-pc-windows-msvc, C modules)
+    runs-on: windows-latest
+    env:
+      LUA_VERSION: "5.4.8"
+    steps:
+      - uses: actions/checkout@v6
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: x86_64-pc-windows-msvc
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: x86_64-pc-windows-msvc-cmodules
+
+      - uses: ilammy/msvc-dev-cmd@v1
+
+      - name: Build shared lua54.dll
+        shell: cmd
+        run: |
+          curl -L -o lua.tar.gz https://www.lua.org/ftp/lua-%LUA_VERSION%.tar.gz || exit /b 1
+          tar -xzf lua.tar.gz || exit /b 1
+          cd lua-%LUA_VERSION%\src
+          cl /nologo /MD /O2 /c /DLUA_BUILD_AS_DLL *.c || exit /b 1
+          del lua.obj luac.obj
+          link /nologo /DLL /IMPLIB:lua54.lib /OUT:lua54.dll *.obj || exit /b 1
+
+      - name: Build (native)
+        shell: cmd
+        run: |
+          rem mlua-sys links against LUA_LIB_NAME in LUA_LIB; the C glue finds
+          rem lua.h via cl.exe's INCLUDE path, so prepend the Lua source dir.
+          set INCLUDE=%CD%\lua-%LUA_VERSION%\src;%INCLUDE%
+          set LUA_LIB=%CD%\lua-%LUA_VERSION%\src
+          set LUA_LIB_NAME=lua54
+          cargo build --release --locked --no-default-features --features scripting --target x86_64-pc-windows-msvc
+
+      - name: Package
+        shell: pwsh
+        run: |
+          $staging = "proxelar-cmodules"
+          New-Item -ItemType Directory -Path $staging | Out-Null
+          Copy-Item "target/x86_64-pc-windows-msvc/release/proxelar.exe" $staging
+          Copy-Item "lua-$env:LUA_VERSION/src/lua54.dll" $staging
+          Compress-Archive -Path "$staging/*" -DestinationPath "proxelar-${{ github.ref_name }}-x86_64-pc-windows-msvc-cmodules.zip"
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v7
+        with:
+          name: proxelar-x86_64-pc-windows-msvc-cmodules
+          path: proxelar-${{ github.ref_name }}-x86_64-pc-windows-msvc-cmodules.zip
+
   release:
     name: Create release
-    needs: build
+    needs: [build, build-windows-cmodules]
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v6

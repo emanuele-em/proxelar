@@ -15,10 +15,14 @@ keywords = ["proxy", "mitm", "http", "https", "lua"]
 
 [features]
 default = []
-scripting = ["mlua"]
+scripting = ["dep:mlua"]
+# Statically link a vendored Lua 5.4. Disable (build the binary with
+# --no-default-features) to link a shared system Lua instead, which is required
+# to load native C modules on Windows.
+vendored-lua = ["mlua?/vendored"]
 
 [dependencies]
-mlua = { version = "0.11", features = ["lua54", "vendored", "send"], optional = true }
+mlua = { version = "0.11", features = ["lua54", "send"], optional = true }
 hyper = { version = "1.9", features = ["http1", "http2", "server", "client"] }
 hyper-util = { version = "0.1", features = ["tokio", "server-auto", "client-legacy", "http1", "http2"] }
 http = "1.2"

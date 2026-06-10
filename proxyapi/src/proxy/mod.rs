@@ -167,6 +167,12 @@ pub struct ProxyConfig {
     /// Optional path to a Lua script for request/response hooks.
     #[cfg(feature = "scripting")]
     pub script_path: Option<PathBuf>,
+    /// Allow the Lua script to load native C modules (e.g. `lua-protobuf`).
+    ///
+    /// This runs the VM in mlua's unsafe mode; see
+    /// [`ScriptEngine::new_allowing_c_modules`](crate::scripting::ScriptEngine::new_allowing_c_modules).
+    #[cfg(feature = "scripting")]
+    pub allow_c_modules: bool,
     /// Optional channel for receiving replay requests from the UI.
     pub replay_rx: Option<mpsc::Receiver<ProxiedRequest>>,
 }
@@ -207,7 +213,14 @@ impl Proxy {
             .as_ref()
             .map(|p| {
                 tracing::info!("Loading Lua script: {}", p.display());
-                ScriptEngine::new(p).map(Arc::new)
+                if self.config.allow_c_modules {
+                    tracing::warn!(
+                        "Lua C module loading is enabled; scripts run unsandboxed native code"
+                    );
+                    ScriptEngine::new_allowing_c_modules(p).map(Arc::new)
+                } else {
+                    ScriptEngine::new(p).map(Arc::new)
+                }
             })
             .transpose()?;
 
@@ -341,6 +354,8 @@ mod tests {
             body_capture_limit: DEFAULT_BODY_CAPTURE_LIMIT,
             #[cfg(feature = "scripting")]
             script_path: None,
+            #[cfg(feature = "scripting")]
+            allow_c_modules: false,
             replay_rx: None,
         };
 

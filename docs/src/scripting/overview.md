@@ -64,6 +64,18 @@ end
 
 Script errors are caught, logged, and the request passes through unchanged. A buggy script can never crash the proxy. Check the log output (set `RUST_LOG=debug` for details) to see script errors.
 
+## Native C modules
+
+By default the Lua VM runs in safe mode, which blocks native C modules — `require` of a C module fails with `can't load C modules in safe mode`. To use one (for example [`lua-protobuf`](https://github.com/starwing/lua-protobuf)), pass `--allow-c-modules`:
+
+```bash
+proxelar --script decode.lua --allow-c-modules
+```
+
+This runs the VM in unsafe mode: loaded modules execute unsandboxed native code in the proxy process, so only use it with scripts you trust. The module must target Lua 5.4 (the version proxelar embeds).
+
+On **Windows**, the standard release binary statically links Lua and cannot load C modules. Use the `…-cmodules` release archive instead, which links a shared `lua54.dll` bundled alongside the executable.
+
 ## Feature flag
 
 Lua scripting is behind the `scripting` feature flag, enabled by default. To build without it:
