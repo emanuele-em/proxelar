@@ -57,12 +57,25 @@ pub struct ScriptEngine {
 }
 
 impl ScriptEngine {
-    /// Create a new engine by loading and executing the given Lua script file.
+    /// Create a new engine, in mlua's safe mode, from the given Lua script file.
     ///
     /// The script should define `on_request(request)` and/or `on_response(request, response)`.
     pub fn new(script_path: &Path) -> Result<Self, crate::Error> {
-        let lua = Lua::new();
+        Self::load(script_path, Lua::new())
+    }
 
+    /// Like [`new`](Self::new), but the VM can load native Lua C modules
+    /// (e.g. `lua-protobuf`). This drops mlua's safety guarantees: a loaded
+    /// module runs unsandboxed native code in the proxy. Only use trusted scripts.
+    pub fn new_allowing_c_modules(script_path: &Path) -> Result<Self, crate::Error> {
+        // SAFETY: opt-in via `--allow-c-modules`; the operator accepts that
+        // scripts may load native modules that run outside Rust's guarantees.
+        #[allow(unsafe_code)]
+        let lua = unsafe { Lua::unsafe_new() };
+        Self::load(script_path, lua)
+    }
+
+    fn load(script_path: &Path, lua: Lua) -> Result<Self, crate::Error> {
         let script = std::fs::read_to_string(script_path).map_err(|e| {
             crate::Error::Script(format!(
                 "Failed to read script {}: {e}",
@@ -329,6 +342,39 @@ mod tests {
         f.write_all(script.as_bytes()).unwrap();
         f.flush().unwrap();
         ScriptEngine::new(f.path()).unwrap()
+    }
+
+    fn engine_from_script_with<F>(script: &str, build: F) -> Result<(), crate::Error>
+    where
+        F: FnOnce(&Path) -> Result<ScriptEngine, crate::Error>,
+    {
+        let mut f = NamedTempFile::new().unwrap();
+        f.write_all(script.as_bytes()).unwrap();
+        f.flush().unwrap();
+        build(f.path()).map(drop)
+    }
+
+    #[test]
+    fn test_safe_mode_blocks_c_modules() {
+        let err = engine_from_script_with(
+            r#"package.loadlib("whatever.so", "luaopen_whatever")"#,
+            ScriptEngine::new,
+        )
+        .unwrap_err()
+        .to_string();
+        assert!(err.contains("safe mode"), "got: {err}");
+    }
+
+    #[test]
+    fn test_allowing_c_modules_exposes_loadlib() {
+        // Unsafe mode: the missing library fails on the file, not on safe mode.
+        let err = engine_from_script_with(
+            r#"assert(package.loadlib("./does-not-exist.so", "luaopen_x"))"#,
+            ScriptEngine::new_allowing_c_modules,
+        )
+        .unwrap_err()
+        .to_string();
+        assert!(!err.contains("safe mode"), "got: {err}");
     }
 
     #[test]

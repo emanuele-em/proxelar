@@ -35,6 +35,8 @@ async fn test_reverse_proxy_starts_and_shuts_down() {
         body_capture_limit: DEFAULT_BODY_CAPTURE_LIMIT,
         #[cfg(feature = "scripting")]
         script_path: None,
+        #[cfg(feature = "scripting")]
+        allow_c_modules: false,
         replay_rx: None,
     };
 
@@ -77,6 +79,8 @@ async fn reverse_proxy_forwards_http_and_emits_request_complete() {
         body_capture_limit: DEFAULT_BODY_CAPTURE_LIMIT,
         #[cfg(feature = "scripting")]
         script_path: None,
+        #[cfg(feature = "scripting")]
+        allow_c_modules: false,
         replay_rx: None,
     };
 
@@ -148,6 +152,8 @@ async fn reverse_proxy_forwards_h2c_post_and_emits_http2_capture() {
         body_capture_limit: DEFAULT_BODY_CAPTURE_LIMIT,
         #[cfg(feature = "scripting")]
         script_path: None,
+        #[cfg(feature = "scripting")]
+        allow_c_modules: false,
         replay_rx: None,
     };
 
@@ -232,6 +238,8 @@ async fn reverse_proxy_returns_502_when_target_is_unreachable() {
         body_capture_limit: DEFAULT_BODY_CAPTURE_LIMIT,
         #[cfg(feature = "scripting")]
         script_path: None,
+        #[cfg(feature = "scripting")]
+        allow_c_modules: false,
         replay_rx: None,
     };
 
@@ -362,6 +370,8 @@ async fn reverse_proxy_intercepts_oversized_request_before_streaming_original() 
         body_capture_limit: Some(4),
         #[cfg(feature = "scripting")]
         script_path: None,
+        #[cfg(feature = "scripting")]
+        allow_c_modules: false,
         replay_rx: None,
     };
 
@@ -447,6 +457,8 @@ async fn reverse_proxy_intercept_drop_emits_request_complete() {
         body_capture_limit: DEFAULT_BODY_CAPTURE_LIMIT,
         #[cfg(feature = "scripting")]
         script_path: None,
+        #[cfg(feature = "scripting")]
+        allow_c_modules: false,
         replay_rx: None,
     };
 
@@ -562,6 +574,7 @@ async fn reverse_proxy_runs_scripts_for_oversized_request_and_response() {
         intercept: None,
         body_capture_limit: Some(4),
         script_path: Some(script.path().to_path_buf()),
+        allow_c_modules: false,
         replay_rx: None,
     };
 
@@ -631,6 +644,7 @@ async fn reverse_proxy_lua_short_circuit_emits_request_complete() {
         intercept: None,
         body_capture_limit: DEFAULT_BODY_CAPTURE_LIMIT,
         script_path: Some(script.path().to_path_buf()),
+        allow_c_modules: false,
         replay_rx: None,
     };
 
@@ -729,6 +743,8 @@ async fn request_private_ca_https_upstream(
         body_capture_limit: DEFAULT_BODY_CAPTURE_LIMIT,
         #[cfg(feature = "scripting")]
         script_path: None,
+        #[cfg(feature = "scripting")]
+        allow_c_modules: false,
         replay_rx: None,
     };
 

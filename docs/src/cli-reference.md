@@ -14,6 +14,7 @@ proxelar [OPTIONS]
 | `--addr` | `-b` | `127.0.0.1` | Bind address |
 | `--target` | `-t` | — | Upstream target URI (required for reverse mode) |
 | `--script` | `-s` | — | Path to a Lua script for request/response hooks |
+| `--allow-c-modules` | | off | Let scripts load native Lua C modules (e.g. `lua-protobuf`); runs the VM in unsafe mode |
 | `--gui-port` | | `8081` | Web GUI port (only used with `-i gui`) |
 | `--ca-dir` | | `~/.proxelar` | Directory for CA certificate and key files |
 | `--body-capture-limit` | | `free` | Maximum body bytes buffered for capture/editing; use `free`, `unlimited`, or `none` for unlimited |

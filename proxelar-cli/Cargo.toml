@@ -14,8 +14,9 @@ categories = ["command-line-utilities", "development-tools", "network-programmin
 keywords = ["proxy", "mitm", "http", "https", "lua"]
 
 [features]
-default = ["scripting"]
+default = ["scripting", "vendored-lua"]
 scripting = ["proxyapi/scripting"]
+vendored-lua = ["proxyapi/vendored-lua"]
 
 [dependencies]
 proxyapi = { version = "0.4.5", path = "../proxyapi" }

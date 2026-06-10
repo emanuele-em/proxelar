@@ -43,6 +43,14 @@ pub struct Args {
     #[arg(short = 's', long = "script", value_name = "FILE")]
     pub script: Option<PathBuf>,
 
+    /// Allow Lua scripts to load native C modules (e.g. lua-protobuf).
+    ///
+    /// Runs the Lua VM in unsafe mode: loaded modules execute unsandboxed native
+    /// code in the proxy process. Only use with trusted scripts.
+    #[cfg(feature = "scripting")]
+    #[arg(long = "allow-c-modules")]
+    pub allow_c_modules: bool,
+
     /// Maximum body bytes buffered for capture/editing before passthrough (`free` for unlimited)
     #[arg(
         long = "body-capture-limit",

@@ -59,6 +59,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         body_capture_limit: args.body_capture_limit.into_option(),
         #[cfg(feature = "scripting")]
         script_path: args.script,
+        #[cfg(feature = "scripting")]
+        allow_c_modules: args.allow_c_modules,
         replay_rx: Some(replay_rx),
     };
 

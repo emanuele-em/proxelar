@@ -37,6 +37,8 @@ async fn test_forward_proxy_starts_and_shuts_down() {
         body_capture_limit: DEFAULT_BODY_CAPTURE_LIMIT,
         #[cfg(feature = "scripting")]
         script_path: None,
+        #[cfg(feature = "scripting")]
+        allow_c_modules: false,
         replay_rx: None,
     };
 
@@ -694,6 +696,8 @@ async fn start_forward_proxy() -> (
         body_capture_limit: DEFAULT_BODY_CAPTURE_LIMIT,
         #[cfg(feature = "scripting")]
         script_path: None,
+        #[cfg(feature = "scripting")]
+        allow_c_modules: false,
         replay_rx: None,
     };
 
@@ -734,6 +738,8 @@ async fn start_forward_proxy_with_replay() -> (
         body_capture_limit: DEFAULT_BODY_CAPTURE_LIMIT,
         #[cfg(feature = "scripting")]
         script_path: None,
+        #[cfg(feature = "scripting")]
+        allow_c_modules: false,
         replay_rx: Some(replay_rx),
     };
 

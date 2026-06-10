@@ -76,7 +76,7 @@ jobs:
       - name: Test without default features
         run: cargo test --workspace --locked --no-default-features
       - name: Test proxyapi scripting explicitly
-        run: cargo test -p proxyapi --locked --features scripting -- scripting
+        run: cargo test -p proxyapi --locked --features scripting,vendored-lua -- scripting
 
   coverage:
     name: Coverage
