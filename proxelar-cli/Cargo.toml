@@ -21,7 +21,7 @@ vendored-lua = ["proxyapi/vendored-lua"]
 [dependencies]
 proxyapi = { version = "0.4.6", path = "../proxyapi" }
 bytes = "1.9"
-http = "1.2"
+http = "1.4"
 proxyapi_models = { version = "0.4.6", path = "../proxyapi_models" }
 clap = { version = "4.6", features = ["derive"] }
 dirs = "6"
