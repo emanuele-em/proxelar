@@ -51,6 +51,10 @@ pub struct Args {
     #[arg(long = "allow-c-modules")]
     pub allow_c_modules: bool,
 
+    /// Suppress per-request output (only used with -i terminal)
+    #[arg(short, long)]
+    pub quiet: bool,
+
     /// Maximum body bytes buffered for capture/editing before passthrough (`free` for unlimited)
     #[arg(
         long = "body-capture-limit",
@@ -126,6 +130,13 @@ mod tests {
             proxyapi::DEFAULT_BODY_CAPTURE_LIMIT
         );
         assert_eq!(args.upstream_trust, UpstreamTlsConfig::Default);
+    }
+
+    #[test]
+    fn test_quiet_flag() {
+        assert!(!Args::parse_from(["proxelar"]).quiet);
+        assert!(Args::parse_from(["proxelar", "-q"]).quiet);
+        assert!(Args::parse_from(["proxelar", "--quiet"]).quiet);
     }
 
     #[test]

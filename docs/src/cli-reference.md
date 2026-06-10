@@ -15,6 +15,7 @@ proxelar [OPTIONS]
 | `--target` | `-t` | — | Upstream target URI (required for reverse mode) |
 | `--script` | `-s` | — | Path to a Lua script for request/response hooks |
 | `--allow-c-modules` | | off | Let scripts load native Lua C modules (e.g. `lua-protobuf`); runs the VM in unsafe mode |
+| `--quiet` | `-q` | | Suppress per-request output (only used with `-i terminal`) |
 | `--gui-port` | | `8081` | Web GUI port (only used with `-i gui`) |
 | `--ca-dir` | | `~/.proxelar` | Directory for CA certificate and key files |
 | `--body-capture-limit` | | `free` | Maximum body bytes buffered for capture/editing; use `free`, `unlimited`, or `none` for unlimited |
@@ -45,6 +46,9 @@ proxelar -m reverse --target http://localhost:3000 --script auth.lua
 
 # Forward proxy with logging script
 proxelar --script log_traffic.lua
+
+# Show only the script's print() output, no per-request lines
+proxelar -i terminal -q --script log_traffic.lua
 
 # Capture only the first 1 MiB of large bodies while streaming traffic through
 proxelar --body-capture-limit 1048576

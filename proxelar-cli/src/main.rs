@@ -92,7 +92,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     }
 
     match args.interface {
-        Interface::Terminal => interface::terminal::run(event_rx, cancel).await,
+        Interface::Terminal => interface::terminal::run(event_rx, args.quiet, cancel).await,
         Interface::Tui => {
             interface::tui::run(event_rx, Arc::clone(&intercept), replay_tx, cancel).await
         }

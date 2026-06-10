@@ -11,9 +11,11 @@ enum TerminalOutput {
     Ignore,
 }
 
-pub async fn run(mut event_rx: mpsc::Receiver<ProxyEvent>, cancel: CancellationToken) {
-    println!("{}", "Proxelar proxy running. Press Ctrl+C to stop.".bold());
-    println!();
+pub async fn run(mut event_rx: mpsc::Receiver<ProxyEvent>, quiet: bool, cancel: CancellationToken) {
+    if !quiet {
+        println!("{}", "Proxelar proxy running. Press Ctrl+C to stop.".bold());
+        println!();
+    }
 
     loop {
         let event = tokio::select! {
@@ -25,7 +27,8 @@ pub async fn run(mut event_rx: mpsc::Receiver<ProxyEvent>, cancel: CancellationT
         };
 
         match render_event(&event) {
-            TerminalOutput::Stdout(line) => println!("{line}"),
+            TerminalOutput::Stdout(line) if !quiet => println!("{line}"),
+            TerminalOutput::Stdout(_) => {}
             TerminalOutput::Stderr(line) => eprintln!("{line}"),
             TerminalOutput::Ignore => {}
         }
@@ -243,7 +246,7 @@ mod tests {
         .unwrap();
         drop(tx);
 
-        tokio::time::timeout(std::time::Duration::from_secs(1), run(rx, cancel))
+        tokio::time::timeout(std::time::Duration::from_secs(1), run(rx, false, cancel))
             .await
             .unwrap();
     }
