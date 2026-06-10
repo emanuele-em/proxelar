@@ -10,6 +10,7 @@
 - Add upstream HTTPS trust policy configuration for default roots, extra CA files, CA-only trust, and insecure debugging.
 - Accept HTTP/2 client connections in forward and reverse proxy modes while preserving HTTP/1.1 upstream forwarding invariants.
 - Emit visible flow events for Lua short-circuits, intercept drops, replay failures, and upstream proxy errors.
+- Add `--allow-c-modules` to let Lua scripts load native C modules such as lua-protobuf (unsafe mode, off by default); Windows ships a separate `-cmodules` release archive bundling `lua54.dll`.
 
 ## [0.4.4] - 2026-05-01
 
