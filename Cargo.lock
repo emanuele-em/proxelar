@@ -522,12 +522,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "critical-section"
-version = "1.2.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "790eea4361631c5e7d22598ecd5723ff611904e3344ce8720784c93e3d83d40b"
-
-[[package]]
 name = "crc32fast"
 version = "1.5.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -535,6 +529,12 @@ checksum = "9481c1c90cbf2ac953f07c8d4a58aa3945c425b7185c9154d67a65e4230da511"
 dependencies = [
  "cfg-if",
 ]
+
+[[package]]
+name = "critical-section"
+version = "1.2.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "790eea4361631c5e7d22598ecd5723ff611904e3344ce8720784c93e3d83d40b"
 
 [[package]]
 name = "crossbeam-channel"
@@ -2151,7 +2151,7 @@ dependencies = [
 
 [[package]]
 name = "proxelar"
-version = "0.4.6"
+version = "0.4.7"
 dependencies = [
  "axum",
  "bytes",
@@ -2177,7 +2177,7 @@ dependencies = [
 
 [[package]]
 name = "proxyapi"
-version = "0.4.6"
+version = "0.4.7"
 dependencies = [
  "async-trait",
  "brotli",
@@ -2210,7 +2210,7 @@ dependencies = [
 
 [[package]]
 name = "proxyapi_models"
-version = "0.4.6"
+version = "0.4.7"
 dependencies = [
  "bytes",
  "http",

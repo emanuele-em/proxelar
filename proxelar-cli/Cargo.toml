@@ -1,6 +1,6 @@
 [package]
 name = "proxelar"
-version = "0.4.6"
+version = "0.4.7"
 edition = "2021"
 rust-version.workspace = true
 authors = ["Emanuele Micheletti <micheletti.emanuele@hotmail.com>"]
@@ -19,10 +19,10 @@ scripting = ["proxyapi/scripting"]
 vendored-lua = ["proxyapi/vendored-lua"]
 
 [dependencies]
-proxyapi = { version = "0.4.6", path = "../proxyapi" }
+proxyapi = { version = "0.4.7", path = "../proxyapi" }
 bytes = "1.9"
 http = "1.4"
-proxyapi_models = { version = "0.4.6", path = "../proxyapi_models" }
+proxyapi_models = { version = "0.4.7", path = "../proxyapi_models" }
 clap = { version = "4.6", features = ["derive"] }
 dirs = "6"
 tokio = { version = "1.52", features = ["rt-multi-thread", "macros", "sync", "signal", "time", "net"] }
