@@ -17,7 +17,7 @@ keywords = ["proxy", "http", "models", "serde", "traffic"]
 serde = { version = "1.0", features = ["derive"] }
 bytes = { version = "1.9", features = ["serde"] }
 http-serde = "2.1"
-http = "1.2"
+http = "1.4"
 
 [dev-dependencies]
 serde_json = "1.0"
