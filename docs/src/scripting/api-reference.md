@@ -13,6 +13,13 @@ The `on_request` function receives a table with these fields:
 
 All fields are readable and writable. Modify them in place and return the table to forward the modified request.
 
+`body` is always plaintext: if the message uses a supported `Content-Encoding`
+(`gzip`, `deflate`, or `br`), the proxy decompresses it before calling the hook
+and re-compresses your result to the same encoding on the way out, refreshing
+`Content-Length`. Remove the `Content-Encoding` header to forward the body
+uncompressed instead. Any other encoding is passed through untouched. See
+[Content encoding](#content-encoding) below.
+
 ## Response table
 
 The `on_response` function receives two arguments:
@@ -24,7 +31,7 @@ The `on_response` function receives two arguments:
 |-------|------|-------------|
 | `status` | number | HTTP status code (`200`, `404`, `500`, etc.) |
 | `headers` | table | Response headers |
-| `body` | string | Response body |
+| `body` | string | Response body (plaintext — see [Content encoding](#content-encoding)) |
 
 ## Short-circuit response
 
@@ -69,6 +76,31 @@ response.headers["set-cookie"] = {"a=1", "b=2"}
 -- Remove a header
 request.headers["cookie"] = nil
 ```
+
+## Content encoding
+
+Scripts work on decompressed bodies. When a request or response carries a
+`Content-Encoding` the proxy understands, the body is decoded before your hook
+runs and re-encoded to the same scheme afterward, with `Content-Length` updated
+to match.
+
+| `Content-Encoding` | Behavior |
+|--------------------|----------|
+| `gzip` / `deflate` / `br` | Decoded for the hook, re-encoded on output |
+| absent / `identity` | Passed through as-is |
+| anything else (e.g. `zstd`) | Passed through compressed, untouched |
+
+To change the wire encoding, edit the `Content-Encoding` header in your hook:
+
+```lua
+-- Forward the response uncompressed
+response.headers["content-encoding"] = nil
+response.body = "now plaintext on the wire"
+```
+
+If re-encoding fails, the proxy strips `Content-Encoding` and sends the body
+uncompressed rather than corrupting it. Bodies larger than
+`--body-capture-limit` stream through unchanged and are never decoded.
 
 ## Return values
 

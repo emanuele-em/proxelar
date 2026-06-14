@@ -9,6 +9,8 @@
 
 pub mod body;
 pub mod ca;
+#[cfg(feature = "scripting")]
+pub(crate) mod encoding;
 pub mod error;
 pub mod event;
 pub(crate) mod handler;

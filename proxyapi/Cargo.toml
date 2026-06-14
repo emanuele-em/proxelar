@@ -15,7 +15,7 @@ keywords = ["proxy", "mitm", "http", "https", "lua"]
 
 [features]
 default = []
-scripting = ["dep:mlua"]
+scripting = ["dep:mlua", "dep:flate2", "dep:brotli"]
 # Statically link a vendored Lua 5.4. Disable (build the binary with
 # --no-default-features) to link a shared system Lua instead, which is required
 # to load native C modules on Windows.
@@ -23,6 +23,12 @@ vendored-lua = ["mlua?/vendored"]
 
 [dependencies]
 mlua = { version = "0.11", features = ["lua54", "send"], optional = true }
+# Body (de)compression for the Lua scripting hooks (gzip/deflate + brotli).
+# Note: Cargo.lock pins alloc-stdlib to 0.2.2; 0.2.3 pulls alloc-no-stdlib 3.0
+# alongside brotli's 2.0.4 and fails to compile. Re-pin after `cargo update`:
+#   cargo update -p alloc-stdlib --precise 0.2.2
+flate2 = { version = "1.1", optional = true }
+brotli = { version = "8", optional = true }
 hyper = { version = "1.10", features = ["http1", "http2", "server", "client"] }
 hyper-util = { version = "0.1", features = ["tokio", "server-auto", "client-legacy", "http1", "http2"] }
 http = "1.4"

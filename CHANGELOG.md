@@ -7,6 +7,8 @@
 
 ## [Unreleased]
 
+- Lua hooks now receive decompressed `gzip`, `deflate`, and `br` bodies and re-encode the result to the original `Content-Encoding` on the way out (with `Content-Length` refreshed), so scripts always work on plaintext. Removing or changing the `Content-Encoding` header in a hook now rewrites the wire body correctly even when the Lua-visible body is unchanged.
+
 ## [0.4.6] - 2026-06-10
 
 - Add `--allow-c-modules` to let Lua scripts load native C modules such as lua-protobuf (unsafe mode, off by default); Windows ships a separate `-cmodules` release archive bundling `lua54.dll`.

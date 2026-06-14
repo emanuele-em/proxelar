@@ -629,12 +629,18 @@ impl CapturingHandler {
                 .map(CapturedRequest::request_line)
                 .unwrap_or_default();
 
+            // Decompress for the script if the body uses a codec we support;
+            // the script always works on plaintext (Bytes clones are cheap).
+            let decoded = crate::encoding::decode_for_hook(&parts.headers, &captured_body);
+            let decoded_headers = decoded.as_ref().map(|_| parts.headers.clone());
+            let hook_body = decoded.clone().unwrap_or_else(|| captured_body.clone());
+
             match engine.on_response(
                 &req_method,
                 &req_url,
                 parts.status.as_u16(),
                 &parts.headers,
-                &captured_body,
+                &hook_body,
             ) {
                 Ok(crate::scripting::ScriptResponseAction::Modified {
                     status,
@@ -645,12 +651,35 @@ impl CapturingHandler {
                         parts.status = s;
                     }
                     parts.headers = headers;
-                    let body = if body == captured_body {
-                        HookedResponseBody::Original(captured_body)
+                    if body == hook_body {
+                        if decoded_headers.as_ref().is_some_and(|headers| {
+                            !crate::encoding::can_reuse_wire_body(headers, &parts.headers)
+                        }) {
+                            let wire = crate::encoding::encode_from_hook(&mut parts.headers, body);
+                            return HookedResponse {
+                                parts,
+                                body: HookedResponseBody::Replaced(wire),
+                            };
+                        }
+
+                        // Unchanged and the wire encoding still matches: keep
+                        // the original bytes to avoid needless recompression.
+                        return HookedResponse {
+                            parts,
+                            body: HookedResponseBody::Original(captured_body),
+                        };
+                    }
+                    // Re-encode the script's plaintext back to the wire encoding
+                    // (only when we decoded it in the first place).
+                    let wire = if decoded.is_some() {
+                        crate::encoding::encode_from_hook(&mut parts.headers, body)
                     } else {
-                        HookedResponseBody::Replaced(body)
+                        body
                     };
-                    return HookedResponse { parts, body };
+                    return HookedResponse {
+                        parts,
+                        body: HookedResponseBody::Replaced(wire),
+                    };
                 }
                 Ok(crate::scripting::ScriptResponseAction::PassThrough) => {}
                 Err(e) => {
@@ -773,7 +802,11 @@ impl HttpHandler for CapturingHandler {
         // This runs synchronously with the complete body or the capped snapshot.
         #[cfg(feature = "scripting")]
         if let Some(ref engine) = self.script_engine {
-            let hook_body = request_body.hook_bytes().clone();
+            let raw = request_body.hook_bytes().clone();
+            // Decompress for the script if the body uses a codec we support.
+            let decoded = crate::encoding::decode_for_hook(&parts.headers, &raw);
+            let decoded_headers = decoded.as_ref().map(|_| parts.headers.clone());
+            let hook_body = decoded.clone().unwrap_or_else(|| raw.clone());
             match engine.on_request(
                 parts.method.as_str(),
                 &parts.uri.to_string(),
@@ -793,7 +826,22 @@ impl HttpHandler for CapturingHandler {
                         parts.uri = u;
                     }
                     parts.headers = headers;
-                    request_body.apply_modified_body(&hook_body, body);
+                    // Re-encode the script's plaintext back to the wire encoding
+                    // (only when we decoded it in the first place).
+                    let wire = if body == hook_body {
+                        if decoded_headers.as_ref().is_some_and(|headers| {
+                            !crate::encoding::can_reuse_wire_body(headers, &parts.headers)
+                        }) {
+                            crate::encoding::encode_from_hook(&mut parts.headers, body)
+                        } else {
+                            raw.clone()
+                        }
+                    } else if decoded.is_some() {
+                        crate::encoding::encode_from_hook(&mut parts.headers, body)
+                    } else {
+                        body
+                    };
+                    request_body.apply_modified_body(&raw, wire);
                 }
                 Ok(crate::scripting::ScriptRequestAction::ShortCircuit {
                     status,
@@ -933,6 +981,13 @@ mod tests {
 
     async fn body_bytes(response: Response<ProxyBody>) -> Bytes {
         response.into_body().collect().await.unwrap().to_bytes()
+    }
+
+    #[cfg(feature = "scripting")]
+    fn encode_test_body(encoding: &str, body: &'static [u8]) -> Bytes {
+        let mut headers = HeaderMap::new();
+        headers.insert(http::header::CONTENT_ENCODING, encoding.parse().unwrap());
+        crate::encoding::encode_from_hook(&mut headers, Bytes::from_static(body))
     }
 
     #[test]
@@ -1452,6 +1507,151 @@ mod tests {
             }
             other => panic!("expected RequestComplete, got {other:?}"),
         }
+    }
+
+    #[cfg(feature = "scripting")]
+    #[tokio::test]
+    async fn finish_buffered_response_decodes_and_reencodes_compressed_body() {
+        use std::io::Write;
+        use tempfile::NamedTempFile;
+
+        // The script must see the decoded plaintext, not the brotli bytes.
+        let mut file = NamedTempFile::new().unwrap();
+        file.write_all(
+            br#"
+            function on_response(req, res)
+                assert(res.body == "original plaintext",
+                    "expected decoded body, got: " .. res.body)
+                res.body = "scripted body"
+                return res
+            end
+            "#,
+        )
+        .unwrap();
+        file.flush().unwrap();
+
+        // Brotli-compress the upstream body the handler will receive.
+        let mut enc_headers = http::HeaderMap::new();
+        enc_headers.insert(http::header::CONTENT_ENCODING, "br".parse().unwrap());
+        let compressed = crate::encoding::encode_from_hook(
+            &mut enc_headers,
+            Bytes::from_static(b"original plaintext"),
+        );
+
+        let engine = Arc::new(crate::scripting::ScriptEngine::new(file.path()).unwrap());
+        let (event_tx, _event_rx) = mpsc::channel(1);
+        let mut handler = CapturingHandler::new(event_tx).with_script_engine(engine);
+        handler.captured_request = Some(CapturedRequest::buffered(proxied_request()));
+
+        let (parts, _) = Response::builder()
+            .status(StatusCode::OK)
+            .header("content-encoding", "br")
+            .body(())
+            .unwrap()
+            .into_parts();
+
+        let response = handler.finish_buffered_response(parts, compressed);
+
+        // Output stays brotli-encoded with a refreshed content-length.
+        assert_eq!(response.headers()["content-encoding"], "br");
+        let wire = body_bytes(response).await;
+        assert!(
+            !wire.as_ref().starts_with(b"scripted"),
+            "body was not re-encoded"
+        );
+
+        let mut dec_headers = http::HeaderMap::new();
+        dec_headers.insert(http::header::CONTENT_ENCODING, "br".parse().unwrap());
+        let decoded = crate::encoding::decode_for_hook(&dec_headers, &wire).unwrap();
+        assert_eq!(decoded.as_ref(), b"scripted body");
+    }
+
+    #[cfg(feature = "scripting")]
+    #[tokio::test]
+    async fn finish_buffered_response_serves_plaintext_when_encoding_removed() {
+        use std::io::Write;
+        use tempfile::NamedTempFile;
+
+        let mut file = NamedTempFile::new().unwrap();
+        file.write_all(
+            br#"
+            function on_response(req, res)
+                assert(res.body == "original plaintext")
+                res.headers["content-encoding"] = nil
+                return res
+            end
+            "#,
+        )
+        .unwrap();
+        file.flush().unwrap();
+
+        let compressed = encode_test_body("br", b"original plaintext");
+        let engine = Arc::new(crate::scripting::ScriptEngine::new(file.path()).unwrap());
+        let (event_tx, mut event_rx) = mpsc::channel(1);
+        let mut handler = CapturingHandler::new(event_tx).with_script_engine(engine);
+        handler.captured_request = Some(CapturedRequest::buffered(proxied_request()));
+
+        let (parts, _) = Response::builder()
+            .status(StatusCode::OK)
+            .header("content-encoding", "br")
+            .body(())
+            .unwrap()
+            .into_parts();
+
+        let response = handler.finish_buffered_response(parts, compressed);
+
+        assert!(response.headers().get("content-encoding").is_none());
+        assert_eq!(response.headers()["content-length"], "18");
+        assert_eq!(body_bytes(response).await.as_ref(), b"original plaintext");
+        match event_rx.recv().await.unwrap() {
+            ProxyEvent::RequestComplete { response, .. } => {
+                assert!(response.headers().get("content-encoding").is_none());
+                assert_eq!(response.body().as_ref(), b"original plaintext");
+            }
+            other => panic!("expected RequestComplete, got {other:?}"),
+        }
+    }
+
+    #[cfg(feature = "scripting")]
+    #[tokio::test]
+    async fn finish_buffered_response_reencodes_when_encoding_changes_without_body_change() {
+        use std::io::Write;
+        use tempfile::NamedTempFile;
+
+        let mut file = NamedTempFile::new().unwrap();
+        file.write_all(
+            br#"
+            function on_response(req, res)
+                assert(res.body == "original plaintext")
+                res.headers["content-encoding"] = "gzip"
+                return res
+            end
+            "#,
+        )
+        .unwrap();
+        file.flush().unwrap();
+
+        let compressed = encode_test_body("br", b"original plaintext");
+        let engine = Arc::new(crate::scripting::ScriptEngine::new(file.path()).unwrap());
+        let (event_tx, _event_rx) = mpsc::channel(1);
+        let mut handler = CapturingHandler::new(event_tx).with_script_engine(engine);
+        handler.captured_request = Some(CapturedRequest::buffered(proxied_request()));
+
+        let (parts, _) = Response::builder()
+            .status(StatusCode::OK)
+            .header("content-encoding", "br")
+            .body(())
+            .unwrap()
+            .into_parts();
+
+        let response = handler.finish_buffered_response(parts, compressed);
+
+        assert_eq!(response.headers()["content-encoding"], "gzip");
+        let wire = body_bytes(response).await;
+        let mut headers = HeaderMap::new();
+        headers.insert(http::header::CONTENT_ENCODING, "gzip".parse().unwrap());
+        let decoded = crate::encoding::decode_for_hook(&headers, &wire).unwrap();
+        assert_eq!(decoded.as_ref(), b"original plaintext");
     }
 
     #[cfg(feature = "scripting")]
