@@ -22,7 +22,7 @@ scripting = ["dep:mlua", "dep:flate2", "dep:brotli"]
 vendored-lua = ["mlua?/vendored"]
 
 [dependencies]
-mlua = { version = "0.11", features = ["lua54", "send"], optional = true }
+mlua = { version = "0.12", features = ["lua54", "send"], optional = true }
 # Body (de)compression for the Lua scripting hooks (gzip/deflate + brotli).
 # Note: Cargo.lock pins alloc-stdlib to 0.2.2; 0.2.3 pulls alloc-no-stdlib 3.0
 # alongside brotli's 2.0.4 and fails to compile. Re-pin after `cargo update`:
