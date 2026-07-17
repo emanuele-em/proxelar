@@ -22,7 +22,7 @@ scripting = ["dep:mlua", "dep:flate2", "dep:brotli"]
 vendored-lua = ["mlua?/vendored"]
 
 [dependencies]
-mlua = { version = "0.11", features = ["lua54", "send"], optional = true }
+mlua = { version = "0.12", features = ["lua54", "send"], optional = true }
 # Body (de)compression for the Lua scripting hooks (gzip/deflate + brotli).
 # Note: Cargo.lock pins alloc-stdlib to 0.2.2; 0.2.3 pulls alloc-no-stdlib 3.0
 # alongside brotli's 2.0.4 and fails to compile. Re-pin after `cargo update`:
@@ -48,7 +48,7 @@ chrono = "0.4"
 thiserror = "2.0"
 tracing = "0.1"
 serde = { version = "1.0", features = ["derive"] }
-tokio-tungstenite = { version = "0.29", default-features = false }
+tokio-tungstenite = { version = "0.30", default-features = false }
 futures-util = { version = "0.3", default-features = false, features = ["sink"] }
 proxyapi_models = { version = "0.4.7", path = "../proxyapi_models" }
 
