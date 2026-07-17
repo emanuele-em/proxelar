@@ -40,7 +40,7 @@ jobs:
             cross: false
             archive: zip
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@v7
 
       - uses: dtolnay/rust-toolchain@stable
         with:
@@ -90,7 +90,7 @@ jobs:
     env:
       LUA_VERSION: "5.4.8"
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@v7
 
       - uses: dtolnay/rust-toolchain@stable
         with:
@@ -142,7 +142,7 @@ jobs:
     needs: [build, build-windows-cmodules]
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@v7
         with:
           fetch-depth: 0
 
@@ -172,7 +172,7 @@ jobs:
     needs: release
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@v7
 
       - uses: dtolnay/rust-toolchain@stable
 
@@ -197,7 +197,7 @@ jobs:
     runs-on: ubuntu-latest
     if: "!contains(github.ref_name, '-')"
     steps:
-      - uses: mislav/bump-homebrew-formula-action@v4.1
+      - uses: mislav/bump-homebrew-formula-action@v4.2
         with:
           formula-name: proxelar
           homebrew-tap: Homebrew/homebrew-core
