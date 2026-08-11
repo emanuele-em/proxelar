@@ -42,26 +42,22 @@ vendored-lua = ["proxyapi/vendored-lua"]
 
 [dependencies]
 proxyapi = { version = "0.5.1", path = "../proxyapi" }
-bytes = "1.9"
-http = "1.4"
 proxyapi_models = { version = "0.5.1", path = "../proxyapi_models" }
+# HTTP types + the web GUI/REST/WebSocket server (replaces axum and the `http`
+# hyperium crate). No TLS on the GUI socket, so no backend feature is needed here.
+rama = { workspace = true, features = ["http-full"] }
 clap = { version = "4.6", features = ["derive"] }
 dirs = "6"
 tokio = { version = "1.52", features = ["rt-multi-thread", "macros", "sync", "signal", "time", "net"] }
 tokio-util = "0.7"
 chrono = "0.4"
-tracing = "0.1"
-tracing-subscriber = { version = "0.3", features = ["env-filter"] }
-rustls = { version = "0.23", default-features = false, features = ["ring"] }
 open = "5"
 
 # TUI
 ratatui = "0.30"
 crossterm = { version = "0.29", features = ["event-stream"] }
-futures = "0.3"
 
 # Web GUI
-axum = { version = "0.8", features = ["ws"] }
 serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
 rand = "0.10"

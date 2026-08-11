@@ -1,7 +1,8 @@
-use bytes::Bytes;
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use proxyapi::{InterceptConfig, InterceptDecision};
 use proxyapi_models::ProxiedRequest;
+use rama::bytes::Bytes;
+use rama::telemetry::tracing;
 use std::sync::Arc;
 use tokio::sync::mpsc;
 
@@ -247,7 +248,9 @@ fn request_to_text(req: &proxyapi_models::ProxiedRequest) -> (String, bool) {
 /// Parse a raw HTTP request text into (method, uri, headers, body).
 ///
 /// Both `\r\n` and `\n` line endings are accepted.
-fn parse_raw_http_request(text: &str) -> Result<(String, String, http::HeaderMap, Bytes), String> {
+fn parse_raw_http_request(
+    text: &str,
+) -> Result<(String, String, rama::http::HeaderMap, Bytes), String> {
     let normalised = text.replace("\r\n", "\n");
     let mut parts = normalised.splitn(2, "\n\n");
 
@@ -268,12 +271,12 @@ fn parse_raw_http_request(text: &str) -> Result<(String, String, http::HeaderMap
         return Err("Request line must end with HTTP/1.0 or HTTP/1.1".to_owned());
     }
     method
-        .parse::<http::Method>()
+        .parse::<rama::http::Method>()
         .map_err(|error| format!("Invalid method: {error}"))?;
-    uri.parse::<http::Uri>()
+    uri.parse::<rama::net::uri::Uri>()
         .map_err(|error| format!("Invalid URI: {error}"))?;
 
-    let mut headers = http::HeaderMap::new();
+    let mut headers = rama::http::HeaderMap::new();
     for line in header_lines {
         let line = line.trim_end();
         if line.is_empty() {
@@ -282,9 +285,9 @@ fn parse_raw_http_request(text: &str) -> Result<(String, String, http::HeaderMap
         let (name, value) = line
             .split_once(':')
             .ok_or_else(|| format!("Invalid header line: {line}"))?;
-        let name = http::header::HeaderName::from_bytes(name.trim().as_bytes())
+        let name = rama::http::header::HeaderName::from_bytes(name.trim().as_bytes())
             .map_err(|error| format!("Invalid header name: {error}"))?;
-        let value = http::header::HeaderValue::from_str(value.trim())
+        let value = rama::http::header::HeaderValue::from_str(value.trim())
             .map_err(|error| format!("Invalid header value: {error}"))?;
         headers.append(name, value);
     }
@@ -296,7 +299,7 @@ fn parse_raw_http_request(text: &str) -> Result<(String, String, http::HeaderMap
 fn parse_edited_http_request(
     text: &str,
     binary_body: bool,
-) -> Result<(String, String, http::HeaderMap, Bytes), String> {
+) -> Result<(String, String, rama::http::HeaderMap, Bytes), String> {
     let (method, uri, headers, body) = parse_raw_http_request(text)?;
     if !binary_body {
         return Ok((method, uri, headers, body));
@@ -337,9 +340,9 @@ fn parse_edited_http_request(
 mod tests {
     use super::*;
     use crossterm::event::KeyModifiers;
-    use http::{HeaderMap, Method, Version};
     use proxyapi::ProxyEvent;
     use proxyapi_models::{ProxiedRequest, ProxiedResponse};
+    use rama::http::{HeaderMap, Method, Version};
 
     fn key(code: KeyCode) -> KeyEvent {
         KeyEvent::new(code, KeyModifiers::NONE)
@@ -408,7 +411,7 @@ mod tests {
     fn request_to_text_roundtrips_structured_protobuf_fields() {
         let mut headers = HeaderMap::new();
         headers.insert(
-            http::header::CONTENT_TYPE,
+            rama::http::header::CONTENT_TYPE,
             "application/x-protobuf".parse().unwrap(),
         );
         let request = ProxiedRequest::new(
@@ -462,7 +465,7 @@ mod tests {
             id: 1,
             request: Box::new(request(Bytes::from_static(b"body"))),
             response: Box::new(ProxiedResponse::new(
-                http::StatusCode::OK,
+                rama::http::StatusCode::OK,
                 Version::HTTP_11,
                 HeaderMap::new(),
                 Bytes::new(),
@@ -474,7 +477,7 @@ mod tests {
         handle_key_event(key(KeyCode::Char('r')), &mut state, &intercept, &replay_tx);
 
         let replayed = replay_rx.try_recv().unwrap();
-        assert_eq!(replayed.uri().path(), "/path");
+        assert_eq!(replayed.uri().path().unwrap(), "/path");
         assert_eq!(replayed.body().as_ref(), b"body");
     }
 }

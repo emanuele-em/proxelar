@@ -168,9 +168,9 @@ fn render_event(event: &ProxyEvent) -> TerminalOutput {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use bytes::Bytes;
-    use http::{HeaderMap, Method, StatusCode, Version};
     use proxyapi_models::{ProxiedRequest, ProxiedResponse, WsDirection, WsFrame, WsOpcode};
+    use rama::bytes::Bytes;
+    use rama::http::{HeaderMap, Method, StatusCode, Version};
 
     #[test]
     fn test_format_size() {

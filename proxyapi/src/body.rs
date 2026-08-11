@@ -1,16 +1,16 @@
-use bytes::{Bytes, BytesMut};
-use http_body_util::{combinators::BoxBody, BodyExt, Empty, Full};
-use hyper::body::{Body as HttpBody, Frame, SizeHint};
-use std::collections::VecDeque;
+use rama::bytes::{Bytes, BytesMut};
+use rama::error::BoxError;
+use rama::http::body::{Frame, SizeHint};
+use rama::http::{Body, StreamingBody};
 use std::pin::Pin;
 use std::sync::{Arc, Mutex};
 use std::task::{Context, Poll};
 
 /// Boxed HTTP body type used throughout the proxy.
 ///
-/// Erases the concrete body type so that both `Full` (captured) and `Empty`
-/// bodies can be returned in the same position.
-pub type ProxyBody = BoxBody<Bytes, hyper::Error>;
+/// rama exposes a single unified [`Body`] for both requests and responses, so
+/// this alias keeps the existing call sites readable while pointing at it.
+pub type ProxyBody = Body;
 
 #[derive(Clone, Debug)]
 pub(crate) struct BodyCapture {
@@ -72,6 +72,14 @@ impl BodyCapture {
     }
 }
 
+/// A streaming body that taps every data frame into a [`BodyCapture`] and runs
+/// a completion callback exactly once — on normal EOF, on error, or on drop.
+///
+/// rama ships the two disjoint halves of this behaviour (`BodyExt::inspect_frame`
+/// for the per-frame tap and `Body::on_drop` which fires only on early drop and
+/// is disarmed at EOF), but no single combinator that fires on *any* terminal
+/// event, which is exactly what the `RequestComplete` event emission requires.
+/// So we keep a small bespoke [`StreamingBody`] built on rama's public body API.
 struct CaptureBody<B, F: FnOnce()> {
     inner: Pin<Box<B>>,
     capture: BodyCapture,
@@ -89,12 +97,7 @@ where
             on_complete: Some(on_complete),
         }
     }
-}
 
-impl<B, F> CaptureBody<B, F>
-where
-    F: FnOnce(),
-{
     fn complete(&mut self) {
         if let Some(on_complete) = self.on_complete.take() {
             on_complete();
@@ -104,13 +107,14 @@ where
 
 impl<B, F> Unpin for CaptureBody<B, F> where F: FnOnce() {}
 
-impl<B, F> HttpBody for CaptureBody<B, F>
+impl<B, F> StreamingBody for CaptureBody<B, F>
 where
-    B: HttpBody<Data = Bytes, Error = hyper::Error>,
+    B: StreamingBody<Data = Bytes>,
+    B::Error: Into<BoxError>,
     F: FnOnce(),
 {
     type Data = Bytes;
-    type Error = hyper::Error;
+    type Error = BoxError;
 
     fn poll_frame(
         self: Pin<&mut Self>,
@@ -133,7 +137,7 @@ where
             }
             Poll::Ready(Some(Err(e))) => {
                 this.complete();
-                Poll::Ready(Some(Err(e)))
+                Poll::Ready(Some(Err(e.into())))
             }
             Poll::Pending => Poll::Pending,
         }
@@ -159,99 +163,27 @@ where
 
 pub(crate) fn capture<B, F>(body: B, capture: BodyCapture, on_complete: F) -> ProxyBody
 where
-    B: HttpBody<Data = Bytes, Error = hyper::Error> + Send + Sync + 'static,
+    B: StreamingBody<Data = Bytes> + Send + Sync + 'static,
+    B::Error: Into<BoxError>,
     F: FnOnce() + Send + Sync + 'static,
 {
-    CaptureBody::new(body, capture, on_complete).boxed()
-}
-
-struct PrefixBody<B> {
-    prefixes: VecDeque<Bytes>,
-    inner: Pin<Box<B>>,
-}
-
-impl<B> PrefixBody<B> {
-    fn new<I>(prefixes: I, body: B) -> Self
-    where
-        I: IntoIterator<Item = Bytes>,
-    {
-        Self {
-            prefixes: prefixes
-                .into_iter()
-                .filter(|bytes| !bytes.is_empty())
-                .collect(),
-            inner: Box::pin(body),
-        }
-    }
-}
-
-impl<B> Unpin for PrefixBody<B> {}
-
-impl<B> HttpBody for PrefixBody<B>
-where
-    B: HttpBody<Data = Bytes, Error = hyper::Error>,
-{
-    type Data = Bytes;
-    type Error = hyper::Error;
-
-    fn poll_frame(
-        self: Pin<&mut Self>,
-        cx: &mut Context<'_>,
-    ) -> Poll<Option<Result<Frame<Self::Data>, Self::Error>>> {
-        let this = self.get_mut();
-        if let Some(prefix) = this.prefixes.pop_front() {
-            return Poll::Ready(Some(Ok(Frame::data(prefix))));
-        }
-
-        this.inner.as_mut().poll_frame(cx)
-    }
-
-    fn is_end_stream(&self) -> bool {
-        self.prefixes.is_empty() && self.inner.is_end_stream()
-    }
-
-    fn size_hint(&self) -> SizeHint {
-        let mut hint = self.inner.size_hint();
-        let prefix_len = self
-            .prefixes
-            .iter()
-            .fold(0_u64, |acc, bytes| acc.saturating_add(bytes.len() as u64));
-
-        let lower = hint.lower().saturating_add(prefix_len);
-        if let Some(upper) = hint.upper() {
-            hint.set_upper(upper.saturating_add(prefix_len));
-        }
-        hint.set_lower(lower);
-
-        hint
-    }
-}
-
-pub(crate) fn prefix<B, I>(prefixes: I, body: B) -> ProxyBody
-where
-    B: HttpBody<Data = Bytes, Error = hyper::Error> + Send + Sync + 'static,
-    I: IntoIterator<Item = Bytes>,
-{
-    PrefixBody::new(prefixes, body).boxed()
+    Body::new(CaptureBody::new(body, capture, on_complete))
 }
 
 /// Create a body from the given bytes.
 pub fn full(bytes: Bytes) -> ProxyBody {
-    Full::new(bytes).map_err(|never| match never {}).boxed()
+    Body::from(bytes)
 }
 
 /// Create an empty body.
-#[must_use]
 pub fn empty() -> ProxyBody {
-    Empty::<Bytes>::new()
-        .map_err(|never| match never {})
-        .boxed()
+    Body::empty()
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use http_body_util::BodyExt;
+    use rama::http::body::util::BodyExt;
 
     #[tokio::test]
     async fn test_full_body() {
@@ -336,21 +268,5 @@ mod tests {
         drop(body);
 
         assert_eq!(completed.load(Ordering::SeqCst), 1);
-    }
-
-    #[tokio::test]
-    async fn prefix_body_replays_prefixes_before_inner_body() {
-        let body = prefix(
-            [
-                Bytes::from_static(b"hello "),
-                Bytes::new(),
-                Bytes::from_static(b"from "),
-            ],
-            full(Bytes::from_static(b"inner")),
-        );
-
-        let collected = body.collect().await.unwrap().to_bytes();
-
-        assert_eq!(collected.as_ref(), b"hello from inner");
     }
 }

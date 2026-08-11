@@ -1,7 +1,7 @@
 use std::io;
 
-use bytes::Bytes;
 use proxyapi_models::{StreamDirection, TcpChunk};
+use rama::bytes::Bytes;
 use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
 use tokio::sync::mpsc;
 

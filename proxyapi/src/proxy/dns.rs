@@ -1,3 +1,4 @@
+use rama::telemetry::tracing;
 use std::collections::HashMap;
 use std::future::Future;
 use std::net::{IpAddr, SocketAddr};

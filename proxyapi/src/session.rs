@@ -7,13 +7,14 @@ use std::io::Write as _;
 use std::path::Path;
 
 use base64::Engine as _;
-use bytes::Bytes;
 use chrono::{TimeZone as _, Utc};
-use http::{HeaderMap, HeaderName, HeaderValue, Method, StatusCode, Uri, Version};
 use proxyapi_models::{
     BodyMetadata, CapturedDnsExchange, CapturedFlow, CapturedTcpStream, CapturedWebSocket,
     ProxiedRequest, ProxiedResponse, TrafficSession, SESSION_FORMAT_VERSION,
 };
+use rama::bytes::Bytes;
+use rama::http::{HeaderMap, HeaderName, HeaderValue, Method, StatusCode, Version};
+use rama::net::uri::Uri;
 use serde_json::{json, Value};
 use thiserror::Error;
 
@@ -106,11 +107,12 @@ impl RedactionPolicy {
     }
 
     fn redact_uri(&self, uri: &Uri) -> Uri {
-        let Some(query) = uri.query() else {
+        let query = uri.query_or_empty();
+        if query.is_empty() {
             return uri.clone();
-        };
+        }
         let mut changed = false;
-        let query = query
+        let redacted_query = query
             .split('&')
             .map(|pair| {
                 let (name, value) = pair.split_once('=').unwrap_or((pair, ""));
@@ -129,10 +131,7 @@ impl RedactionPolicy {
             return uri.clone();
         }
 
-        let mut parts = uri.clone().into_parts();
-        let path = uri.path();
-        parts.path_and_query = format!("{path}?{query}").parse().ok();
-        Uri::from_parts(parts).unwrap_or_else(|_| uri.clone())
+        uri.clone().with_query_from_bytes(redacted_query)
     }
 
     fn redact_request(&self, request: &ProxiedRequest) -> ProxiedRequest {
@@ -538,19 +537,18 @@ fn har_entry(flow: &CapturedFlow, redaction: Option<&RedactionPolicy>) -> Value 
         response.headers(),
         response.body_metadata(),
     );
-    let query = request
-        .uri()
-        .query()
-        .map(|query| {
-            query
-                .split('&')
-                .map(|pair| {
-                    let (name, value) = pair.split_once('=').unwrap_or((pair, ""));
-                    json!({"name": name, "value": value})
-                })
-                .collect::<Vec<_>>()
-        })
-        .unwrap_or_default();
+    let raw_query = request.uri().query_or_empty();
+    let query = if raw_query.is_empty() {
+        Vec::new()
+    } else {
+        raw_query
+            .split('&')
+            .map(|pair| {
+                let (name, value) = pair.split_once('=').unwrap_or((pair, ""));
+                json!({"name": name, "value": value})
+            })
+            .collect::<Vec<_>>()
+    };
 
     json!({
         "startedDateTime": started,
@@ -574,7 +572,7 @@ fn har_entry(flow: &CapturedFlow, redaction: Option<&RedactionPolicy>) -> Value 
             "headers": har_headers(response.headers()),
             "cookies": [],
             "content": response_body,
-            "redirectURL": response.headers().get(http::header::LOCATION)
+            "redirectURL": response.headers().get(rama::http::header::LOCATION)
                 .and_then(|value| value.to_str().ok()).unwrap_or(""),
             "headersSize": -1,
             "bodySize": response.body_metadata().total_seen,
@@ -599,7 +597,7 @@ fn har_headers(headers: &HeaderMap) -> Vec<Value> {
 
 fn har_content(body: &Bytes, headers: &HeaderMap, metadata: BodyMetadata) -> Value {
     let mime = headers
-        .get(http::header::CONTENT_TYPE)
+        .get(rama::http::header::CONTENT_TYPE)
         .and_then(|value| value.to_str().ok())
         .unwrap_or("application/octet-stream");
     if let Ok(text) = std::str::from_utf8(body) {
@@ -702,10 +700,13 @@ pub fn export_raw(
 }
 
 fn raw_request(request: &ProxiedRequest) -> Vec<u8> {
-    let target = request
-        .uri()
-        .path_and_query()
-        .map_or("/", |value| value.as_str());
+    let path = request.uri().path_or_root();
+    let raw_query = request.uri().query_or_empty();
+    let target = if raw_query.is_empty() {
+        path.into_owned()
+    } else {
+        format!("{path}?{raw_query}")
+    };
     let mut output = format!(
         "{} {} {}\r\n",
         request.method(),
@@ -751,7 +752,6 @@ fn version_string(version: Version) -> &'static str {
         Version::HTTP_11 => "HTTP/1.1",
         Version::HTTP_2 => "HTTP/2",
         Version::HTTP_3 => "HTTP/3",
-        _ => "HTTP/1.1",
     }
 }
 
@@ -1211,17 +1211,20 @@ mod tests {
                 .unwrap(),
             Version::HTTP_11,
             HeaderMap::from_iter([(
-                http::header::AUTHORIZATION,
+                rama::http::header::AUTHORIZATION,
                 HeaderValue::from_static("Bearer secret"),
             )]),
             Bytes::new(),
             1,
         );
         let redacted = policy.redact_request(&request);
-        assert_eq!(redacted.headers()[http::header::AUTHORIZATION], "hidden");
         assert_eq!(
-            redacted.uri().query(),
-            Some("secret=hidden&flag&other=visible")
+            redacted.headers()[rama::http::header::AUTHORIZATION],
+            "hidden"
+        );
+        assert_eq!(
+            redacted.uri().query().unwrap(),
+            "secret=hidden&flag&other=visible"
         );
 
         let unchanged: Uri = "https://example.test/no-query".parse().unwrap();
@@ -1233,7 +1236,8 @@ mod tests {
             RedactionPolicy::new(["authorization"], std::iter::empty::<&str>())
                 .with_replacement("bad\nvalue");
         assert_eq!(
-            invalid_replacement.redact_headers(request.headers())[http::header::AUTHORIZATION],
+            invalid_replacement.redact_headers(request.headers())
+                [rama::http::header::AUTHORIZATION],
             "[REDACTED]"
         );
     }

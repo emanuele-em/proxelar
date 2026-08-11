@@ -237,8 +237,8 @@ impl Term {
             } else {
                 request.method().as_str()
             }),
-            Field::Host => contains(request.uri().host().unwrap_or("")),
-            Field::Path => contains(request.uri().path()),
+            Field::Host => contains(request.uri().host_str().as_deref().unwrap_or("")),
+            Field::Path => contains(request.uri().path_or_root().as_ref()),
             Field::Url => contains(&request.uri().to_string()),
             Field::Status => {
                 response.is_some_and(|response| contains(&response.status().as_u16().to_string()))
@@ -246,7 +246,7 @@ impl Term {
             Field::ContentType => response.is_some_and(|response| {
                 response
                     .headers()
-                    .get(http::header::CONTENT_TYPE)
+                    .get(rama::http::header::CONTENT_TYPE)
                     .and_then(|value| value.to_str().ok())
                     .is_some_and(contains)
             }),
@@ -409,7 +409,7 @@ fn protocol(request: &ProxiedRequest, websocket: bool) -> &'static str {
     }
 }
 
-fn headers_contain(headers: &http::HeaderMap, needle: &str) -> bool {
+fn headers_contain(headers: &rama::http::HeaderMap, needle: &str) -> bool {
     headers.iter().any(|(name, value)| {
         name.as_str().to_ascii_lowercase().contains(needle)
             || String::from_utf8_lossy(value.as_bytes())
@@ -680,8 +680,8 @@ fn tokenize(input: &str) -> Result<Vec<Token>, FilterParseError> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use bytes::Bytes;
-    use http::{HeaderMap, Method, StatusCode, Version};
+    use rama::bytes::Bytes;
+    use rama::http::{HeaderMap, Method, StatusCode, Version};
 
     fn exchange() -> (ProxiedRequest, ProxiedResponse) {
         let mut request_headers = HeaderMap::new();

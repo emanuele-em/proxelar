@@ -1,5 +1,5 @@
-use bytes::Bytes;
-use http::HeaderMap;
+use rama::bytes::Bytes;
+use rama::http::HeaderMap;
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};

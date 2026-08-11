@@ -7,10 +7,11 @@ use std::path::{Path, PathBuf};
 use std::sync::{Mutex, MutexGuard};
 use std::time::SystemTime;
 
-use bytes::Bytes;
-use http::header::{HeaderName, HeaderValue};
-use http::HeaderMap;
 use mlua::{Lua, Result as LuaResult, Value};
+use rama::bytes::Bytes;
+use rama::http::header::{HeaderName, HeaderValue};
+use rama::http::HeaderMap;
+use rama::telemetry::tracing;
 
 /// Action returned by the Lua `on_request` hook.
 #[derive(Debug)]

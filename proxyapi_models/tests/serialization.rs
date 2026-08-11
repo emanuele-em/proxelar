@@ -1,9 +1,10 @@
-use bytes::Bytes;
-use http::{HeaderMap, Method, StatusCode, Uri, Version};
 use proxyapi_models::{
     BodyMetadata, CapturedDnsExchange, CapturedUdpExchange, ProxiedRequest, ProxiedResponse,
     TrafficSession, WsDirection, WsFrame, WsOpcode, SESSION_FORMAT_VERSION,
 };
+use rama::bytes::Bytes;
+use rama::http::{HeaderMap, Method, StatusCode, Version};
+use rama::net::uri::Uri;
 
 #[test]
 fn test_proxied_request_serialization() {
@@ -93,7 +94,7 @@ fn test_proxied_request_accessors() {
     );
 
     assert_eq!(req.method(), Method::PUT);
-    assert_eq!(req.uri().path(), "/path");
+    assert_eq!(req.uri().path_or_root(), "/path");
     assert_eq!(req.version(), Version::HTTP_11);
     assert_eq!(req.body().as_ref(), b"request body");
     assert_eq!(req.time(), 42);

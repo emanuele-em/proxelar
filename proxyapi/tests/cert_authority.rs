@@ -1,9 +1,4 @@
-use http::uri::Authority;
-use proxyapi::ca::{CertificateAuthority, Ssl};
-
-fn install_crypto_provider() {
-    let _ = rustls::crypto::ring::default_provider().install_default();
-}
+use proxyapi::ca::Ssl;
 
 #[test]
 fn test_ssl_load_or_generate_creates_valid_ca() {
@@ -21,31 +16,6 @@ fn test_ssl_load_or_generate_reloads_existing() {
     let pem2 = ssl2.ca_cert_pem();
 
     assert_eq!(pem1, pem2, "Reloaded cert should match the original");
-}
-
-#[tokio::test]
-async fn test_gen_server_config_creates_cert() {
-    install_crypto_provider();
-    let dir = tempfile::tempdir().unwrap();
-    let ssl = Ssl::load_or_generate(dir.path()).unwrap();
-    let authority: Authority = "example.com:443".parse().unwrap();
-    let config = ssl.gen_server_config(&authority).await.unwrap();
-    assert_eq!(
-        config.alpn_protocols,
-        vec![b"h2".to_vec(), b"http/1.1".to_vec()]
-    );
-}
-
-#[tokio::test]
-async fn test_cert_caching() {
-    install_crypto_provider();
-    let dir = tempfile::tempdir().unwrap();
-    let ssl = Ssl::load_or_generate(dir.path()).unwrap();
-    let authority: Authority = "cached.example.com:443".parse().unwrap();
-    let config1 = ssl.gen_server_config(&authority).await.unwrap();
-    let config2 = ssl.gen_server_config(&authority).await.unwrap();
-    // Both should return the same Arc (cached)
-    assert!(std::sync::Arc::ptr_eq(&config1, &config2));
 }
 
 #[test]

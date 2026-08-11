@@ -1,7 +1,7 @@
 #[cfg(feature = "scripting")]
 use clap::Subcommand;
 use clap::{Parser, ValueEnum};
-use proxyapi::{UpstreamProxyConfig, UpstreamTlsConfig};
+use proxyapi::{UpstreamHttpVersion, UpstreamProxyConfig, UpstreamTlsConfig};
 use std::net::IpAddr;
 use std::path::PathBuf;
 use std::str::FromStr;
@@ -90,6 +90,14 @@ pub struct Args {
     /// Upstream proxy credentials (`USERNAME:PASSWORD`)
     #[arg(long, value_name = "USERNAME:PASSWORD", requires = "upstream_proxy")]
     pub upstream_proxy_auth: Option<String>,
+
+    /// Upstream HTTP version: `auto` (preserve the client's negotiated version), `http1`, or `http2`
+    #[arg(
+        long = "upstream-http-version",
+        value_name = "VERSION",
+        default_value = "auto"
+    )]
+    pub upstream_http_version: UpstreamHttpVersion,
 
     /// Load a native Proxelar session before capture starts
     #[arg(long, value_name = "FILE", conflicts_with = "import_har")]

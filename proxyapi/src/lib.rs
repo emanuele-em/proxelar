@@ -1,7 +1,7 @@
 //! `proxyapi` — core library for the Proxelar MITM proxy.
 //!
 //! Provides HTTP/HTTPS, WireGuard, SOCKS5, DNS, and fixed-target UDP proxy
-//! functionality with request/response interception via [`HttpHandler`].
+//! functionality with request/response interception via [`CapturingHandler`].
 
 #![forbid(unsafe_code)]
 
@@ -18,15 +18,10 @@ pub mod filter;
 pub(crate) mod handler;
 pub mod intercept;
 pub mod proxy;
-mod rewind;
 pub mod rules;
 #[cfg(feature = "scripting")]
 pub mod scripting;
 pub mod session;
-
-use body::ProxyBody;
-use hyper::{Request, Response};
-use std::net::SocketAddr;
 
 #[cfg(feature = "scripting")]
 pub use addon::{
@@ -39,39 +34,8 @@ pub use filter::{FilterParseError, FlowFilter};
 pub use handler::{CapturingHandler, DEFAULT_BODY_CAPTURE_LIMIT};
 pub use intercept::{InterceptConfig, InterceptDecision};
 pub use proxy::{
-    DnsConfig, Proxy, ProxyConfig, ProxyMode, UpstreamProxyConfig, UpstreamTlsConfig,
-    WireGuardConfig,
+    DnsConfig, Proxy, ProxyConfig, ProxyMode, UpstreamHttpVersion, UpstreamProxyConfig,
+    UpstreamTlsConfig, WireGuardConfig,
 };
 pub use rules::{RouteRule, RouteRules, RuleError, RuleHeader, RuleOutcome};
 pub use session::{RedactionPolicy, SessionError, SessionRecorder};
-
-/// Returned by [`HttpHandler::handle_request`] to either forward or short-circuit.
-pub enum RequestOrResponse {
-    Request(Request<ProxyBody>),
-    Response(Response<ProxyBody>),
-}
-
-/// Metadata about the incoming connection.
-#[derive(Clone, Debug, Eq, Hash, PartialEq)]
-pub struct HttpContext {
-    pub remote_addr: SocketAddr,
-}
-
-/// Trait for intercepting and modifying proxied HTTP traffic.
-///
-/// Implementations must be `Clone` because the proxy clones the handler
-/// for each connection/request pair.
-#[async_trait::async_trait]
-pub trait HttpHandler: Clone + Send + Sync + 'static {
-    async fn handle_request(
-        &mut self,
-        ctx: &HttpContext,
-        req: Request<hyper::body::Incoming>,
-    ) -> RequestOrResponse;
-
-    async fn handle_response(
-        &mut self,
-        ctx: &HttpContext,
-        res: Response<hyper::body::Incoming>,
-    ) -> Response<ProxyBody>;
-}

@@ -5,10 +5,11 @@
 //! out, mirroring mitmproxy. Only the codecs below are handled; any other
 //! `content-encoding` is left untouched and passed through verbatim.
 
+use rama::telemetry::tracing;
 use std::io::{self, Read, Write};
 
-use bytes::Bytes;
-use http::header::{HeaderMap, HeaderValue, CONTENT_ENCODING, CONTENT_LENGTH};
+use rama::bytes::Bytes;
+use rama::http::header::{HeaderMap, HeaderValue, CONTENT_ENCODING, CONTENT_LENGTH};
 
 /// A `content-encoding` the proxy can both decode and re-encode.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]

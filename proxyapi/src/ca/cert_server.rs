@@ -1,5 +1,6 @@
-use bytes::Bytes;
-use hyper::{Request, Response};
+use rama::bytes::Bytes;
+use rama::http::{Request, Response};
+use rama::telemetry::tracing;
 
 use crate::body::{self, ProxyBody};
 
@@ -382,7 +383,7 @@ sudo update-ca-trust</pre>
 </html>"#;
 
 pub fn is_cert_request<T>(req: &Request<T>) -> bool {
-    req.uri().host().is_some_and(|h| h == "proxel.ar")
+    req.uri().host_str().is_some_and(|h| h == "proxel.ar")
         || req
             .headers()
             .get("host")
@@ -395,7 +396,7 @@ pub fn handle<T>(
     ca_cert_pem: &[u8],
     proxy_addr: Option<std::net::SocketAddr>,
 ) -> Response<ProxyBody> {
-    match req.uri().path() {
+    match req.uri().path_or_root().as_ref() {
         "/cert/pem" => {
             let len = ca_cert_pem.len();
             Response::builder()
@@ -454,7 +455,8 @@ pub fn handle<T>(
 }
 
 fn pem_to_der(pem: &[u8]) -> Vec<u8> {
-    match openssl::x509::X509::from_pem(pem).and_then(|cert| cert.to_der()) {
+    use rama::crypto::dep::boring::x509::X509;
+    match X509::from_pem(pem).and_then(|cert| cert.to_der()) {
         Ok(der) => der,
         Err(e) => {
             tracing::error!("Failed to convert PEM to DER: {e}");

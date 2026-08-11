@@ -6,6 +6,11 @@ default-members = ["proxelar-cli"]
 [workspace.package]
 rust-version = "1.97.1"
 
+[workspace.dependencies.rama]
+git = "https://github.com/plabayo/rama"
+rev = "53ef56f4bed691599cd3ecc5a6b6351e024bdde8"
+default-features = false
+
 [profile.release]
 codegen-units = 1
 lto = true
