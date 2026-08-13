@@ -144,6 +144,90 @@ async fn reverse_proxy_forwards_http_and_emits_request_complete() {
 }
 
 #[tokio::test]
+async fn reverse_proxy_strips_proxy_and_hop_by_hop_headers_before_forwarding() {
+    // Regression: the reverse path must sanitize per-hop / proxy-only headers
+    // before forwarding upstream (it once forwarded them verbatim). A raw
+    // request lets us put the exact headers on the wire.
+    let (upstream_addr, upstream_shutdown) = start_sanitize_probe_server().await;
+    let proxy_addr = reserve_loopback_addr().await;
+    let ca_dir = tempfile::tempdir().unwrap();
+
+    let (event_tx, _event_rx) = mpsc::channel::<ProxyEvent>(100);
+    let config = ProxyConfig {
+        addr: proxy_addr,
+        mode: ProxyMode::Reverse {
+            target: format!("http://{upstream_addr}").parse().unwrap(),
+        },
+        event_tx,
+        ca_dir: ca_dir.path().to_path_buf(),
+        upstream_tls: UpstreamTlsConfig::Default,
+        upstream_http_version: UpstreamHttpVersion::default(),
+        intercept: None,
+        body_capture_limit: DEFAULT_BODY_CAPTURE_LIMIT,
+        #[cfg(feature = "scripting")]
+        script_path: None,
+        replay_rx: None,
+    };
+    let proxy = Proxy::new(config);
+    let (shutdown_tx, shutdown_rx) = tokio::sync::oneshot::channel();
+    let handle = tokio::spawn(async move {
+        proxy
+            .start(async {
+                shutdown_rx.await.ok();
+            })
+            .await
+    });
+    wait_for_tcp(proxy_addr).await;
+
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+    let mut stream = tokio::net::TcpStream::connect(proxy_addr).await.unwrap();
+    stream
+        .write_all(
+            format!(
+                "GET /probe HTTP/1.1\r\n\
+                 Host: {proxy_addr}\r\n\
+                 Proxy-Authorization: Basic Zm9vOmJhcg==\r\n\
+                 TE: trailers\r\n\
+                 Cookie: a=1\r\n\
+                 Cookie: b=2\r\n\
+                 Connection: close\r\n\
+                 \r\n"
+            )
+            .as_bytes(),
+        )
+        .await
+        .unwrap();
+    let mut raw = String::new();
+    stream.read_to_string(&mut raw).await.unwrap();
+
+    assert!(
+        raw.starts_with("HTTP/1.1 200"),
+        "unexpected response:\n{raw}"
+    );
+    let header = |name: &str| -> Option<String> {
+        raw.lines()
+            .filter_map(|line| line.split_once(':'))
+            .find(|(key, _)| key.trim().eq_ignore_ascii_case(name))
+            .map(|(_, value)| value.trim().to_owned())
+    };
+    // A plain origin server passes Proxy-Authorization through, so its absence
+    // upstream proves the reverse path's sanitizer ran; joining the two Cookie
+    // headers into one is behaviour only the sanitizer performs.
+    assert_eq!(header("x-had-proxy-auth").as_deref(), Some("no"));
+    assert_eq!(header("x-had-te").as_deref(), Some("no"));
+    assert_eq!(header("x-cookie-count").as_deref(), Some("1"));
+    let cookie = header("x-cookie").unwrap_or_default();
+    assert!(
+        cookie.contains("a=1") && cookie.contains("b=2"),
+        "cookies were not coalesced: {cookie}"
+    );
+
+    let _ = shutdown_tx.send(());
+    let _ = upstream_shutdown.send(());
+    assert!(handle.await.unwrap().is_ok());
+}
+
+#[tokio::test]
 async fn reverse_proxy_forwards_h2c_post_and_emits_http2_capture() {
     let (upstream_addr, upstream_shutdown) = start_echo_request_body_server().await;
     let proxy_addr = reserve_loopback_addr().await;
@@ -975,6 +1059,54 @@ async fn upstream_response(req: Request) -> Result<Response, Infallible> {
         .status(StatusCode::CREATED)
         .header("x-upstream-path", path)
         .body(Body::from(Bytes::from_static(b"upstream response")))
+        .unwrap())
+}
+
+async fn start_sanitize_probe_server() -> (SocketAddr, tokio::sync::oneshot::Sender<()>) {
+    let exec = Executor::default();
+    let listener = RamaTcpListener::bind_address("127.0.0.1:0", exec.clone())
+        .await
+        .unwrap();
+    let addr = listener.local_addr().unwrap();
+    let (shutdown_tx, shutdown_rx) = tokio::sync::oneshot::channel::<()>();
+    let service = HttpServer::auto(exec).service(service_fn(sanitize_probe_response));
+    tokio::spawn(async move {
+        tokio::select! {
+            () = listener.serve(service) => {}
+            _ = shutdown_rx => {}
+        }
+    });
+    (addr, shutdown_tx)
+}
+
+/// Reflects which sensitive request headers the upstream actually received, so a
+/// test can assert the proxy sanitized them before forwarding.
+async fn sanitize_probe_response(req: Request) -> Result<Response, Infallible> {
+    let seen = |name: &str| {
+        if req.headers().contains_key(name) {
+            "yes"
+        } else {
+            "no"
+        }
+    };
+    let cookie_count = req
+        .headers()
+        .get_all(rama::http::header::COOKIE)
+        .iter()
+        .count();
+    let cookie = req
+        .headers()
+        .get(rama::http::header::COOKIE)
+        .and_then(|value| value.to_str().ok())
+        .unwrap_or("none")
+        .to_owned();
+    Ok(Response::builder()
+        .status(StatusCode::OK)
+        .header("x-had-proxy-auth", seen("proxy-authorization"))
+        .header("x-had-te", seen("te"))
+        .header("x-cookie-count", cookie_count.to_string())
+        .header("x-cookie", cookie)
+        .body(Body::empty())
         .unwrap())
 }
 

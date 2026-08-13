@@ -596,14 +596,8 @@ fn prepare_upstream_request(
         // WebSocket upgrades only speak HTTP/1.1.
         *req.version_mut() = Version::HTTP_11;
     } else {
-        super::strip_hop_by_hop_headers(req.headers_mut());
+        super::sanitize_forwarded_request_headers(req.headers_mut());
         req.headers_mut().remove(rama::http::header::HOST);
-        req.headers_mut()
-            .remove(rama::http::header::PROXY_AUTHORIZATION);
-        req.headers_mut().remove(rama::http::header::TE);
-        super::join_cookie_headers(req.headers_mut());
-        // NOTE: the client-negotiated HTTP version is preserved end-to-end; the
-        // previous forced HTTP/1.1 downgrade is intentionally gone.
     }
 
     if let Some(authority) = tunnel_authority {

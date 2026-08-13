@@ -17,8 +17,8 @@ use rama::extensions::ExtensionsRef;
 use rama::http::client::EasyHttpWebClient;
 use rama::http::conn::TargetHttpVersion;
 use rama::http::header::{
-    Entry, HeaderName, CONNECTION, COOKIE, KEEP_ALIVE, PROXY_AUTHENTICATE, PROXY_CONNECTION, TE,
-    TRANSFER_ENCODING, UPGRADE,
+    Entry, HeaderName, CONNECTION, COOKIE, KEEP_ALIVE, PROXY_AUTHENTICATE, PROXY_AUTHORIZATION,
+    PROXY_CONNECTION, TE, TRANSFER_ENCODING, UPGRADE,
 };
 use rama::http::server::HttpServer;
 use rama::http::{HeaderMap, Request, Response, Version};
@@ -166,6 +166,16 @@ pub(super) fn join_cookie_headers(headers: &mut HeaderMap) {
             }
         }
     }
+}
+
+/// Sanitize a request's headers before it is forwarded upstream: drop per-hop
+/// and proxy-only headers and coalesce duplicate `Cookie`s. Shared by the
+/// forward and reverse paths so they cannot drift on what reaches the origin.
+pub(super) fn sanitize_forwarded_request_headers(headers: &mut HeaderMap) {
+    strip_hop_by_hop_headers(headers);
+    headers.remove(PROXY_AUTHORIZATION);
+    headers.remove(TE);
+    join_cookie_headers(headers);
 }
 
 pub(super) fn strip_hop_by_hop_headers(headers: &mut HeaderMap) {

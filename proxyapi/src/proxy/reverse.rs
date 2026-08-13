@@ -10,7 +10,7 @@ use rama::Service;
 
 use crate::handler::{CapturingHandler, RequestOrResponse};
 
-use super::{sanitize_response_for_client, UpstreamClient};
+use super::{sanitize_forwarded_request_headers, sanitize_response_for_client, UpstreamClient};
 
 /// Reverse-proxy service: rewrites every request to the configured target,
 /// forwards it, and captures the exchange.
@@ -47,7 +47,7 @@ impl Service<Request> for ReverseProxyService {
             }
         };
 
-        let req = match rewrite_uri(req, &self.target) {
+        let mut req = match rewrite_uri(req, &self.target) {
             Ok(req) => req,
             Err(()) => {
                 tracing::error!("Failed to rewrite URI to reverse-proxy target");
@@ -60,6 +60,9 @@ impl Service<Request> for ReverseProxyService {
                 return Ok(res);
             }
         };
+        // Strip per-hop / proxy-only headers before forwarding, exactly as the
+        // forward path does — `rewrite_uri` has already set the target `Host`.
+        sanitize_forwarded_request_headers(req.headers_mut());
 
         match self.client.serve(req).await {
             Ok(res) => {
@@ -85,7 +88,6 @@ impl Service<Request> for ReverseProxyService {
 /// original path and query, and update the `Host` header to match.
 fn rewrite_uri(mut req: Request, target: &Uri) -> Result<Request, ()> {
     let Some(host) = target.host_str() else {
-        // No authority to rewrite to: leave the request untouched.
         return Ok(req);
     };
     let scheme = target.scheme_str().unwrap_or("http");
