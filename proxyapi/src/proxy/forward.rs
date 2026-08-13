@@ -64,6 +64,12 @@ const TLS_RECORD_HANDSHAKE: u8 = 0x16;
 /// so any method it routed to HTTP still does (no standard/WebDAV method comes
 /// close — `BASELINE-CONTROL` is 16).
 const RAW_PEEK_LEN: usize = 256;
+/// Upper bound on how long each protocol peeker waits for a client to reveal its
+/// protocol. A real client sends its opener (request-line, TLS ClientHello, or
+/// h2 preface) immediately, and a non-HTTP opener fails fast to the raw tunnel,
+/// so this only fires on a client that begins an HTTP-looking request-line and
+/// then stalls (a slowloris-style half-open), bounding the resources it can hold.
+const PEEK_TIMEOUT: Duration = Duration::from_secs(10);
 
 /// Per-tunnel context injected into every request served over an intercepted
 /// stream, so the MITM service can rebuild absolute URIs and pin the upstream
@@ -276,8 +282,14 @@ where
     let router = RawFirstPeekRouter::new(
         raw_service.clone(),
         TlsPeekRouter::new(https_service)
-            .with_fallback(HttpPeekRouter::new(http_service).with_fallback(raw_service)),
-    );
+            .with_peek_timeout(PEEK_TIMEOUT)
+            .with_fallback(
+                HttpPeekRouter::new(http_service)
+                    .with_peek_timeout(PEEK_TIMEOUT)
+                    .with_fallback(raw_service),
+            ),
+    )
+    .with_peek_timeout(PEEK_TIMEOUT);
 
     router.serve(io).await
 }
@@ -340,6 +352,11 @@ impl<R, F> RawFirstPeekRouter<R, F> {
             fallback,
             peek_timeout: None,
         }
+    }
+
+    fn with_peek_timeout(mut self, peek_timeout: Duration) -> Self {
+        self.peek_timeout = Some(peek_timeout);
+        self
     }
 }
 
