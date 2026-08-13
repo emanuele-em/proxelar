@@ -16,9 +16,9 @@ use rama::error::BoxError;
 use rama::extensions::ExtensionsRef;
 use rama::http::client::EasyHttpWebClient;
 use rama::http::conn::TargetHttpVersion;
-use rama::http::header::{
-    Entry, HeaderName, CONNECTION, COOKIE, KEEP_ALIVE, PROXY_AUTHENTICATE, PROXY_AUTHORIZATION,
-    PROXY_CONNECTION, TE, TRANSFER_ENCODING, UPGRADE,
+use rama::http::header::{Entry, COOKIE};
+use rama::http::layer::remove_header::{
+    remove_hop_by_hop_request_headers, remove_hop_by_hop_response_headers,
 };
 use rama::http::server::HttpServer;
 use rama::http::{HeaderMap, Request, Response, Version};
@@ -151,9 +151,7 @@ impl UpstreamClient {
 
 pub(crate) fn sanitize_response_for_client<B>(res: &mut Response<B>, version: Version) {
     if version == Version::HTTP_2 {
-        strip_hop_by_hop_headers(res.headers_mut());
-        res.headers_mut().remove(PROXY_AUTHENTICATE);
-        res.headers_mut().remove(TE);
+        remove_hop_by_hop_response_headers(res.headers_mut());
     }
 }
 
@@ -173,37 +171,12 @@ pub(super) fn join_cookie_headers(headers: &mut HeaderMap) {
 }
 
 /// Sanitize a request's headers before it is forwarded upstream: drop per-hop
-/// and proxy-only headers and coalesce duplicate `Cookie`s. Shared by the
-/// forward and reverse paths so they cannot drift on what reaches the origin.
+/// and proxy-only headers (via rama's RFC 9110 helper) and coalesce duplicate
+/// `Cookie`s. Shared by the forward and reverse paths so they cannot drift on
+/// what reaches the origin.
 pub(super) fn sanitize_forwarded_request_headers(headers: &mut HeaderMap) {
-    strip_hop_by_hop_headers(headers);
-    headers.remove(PROXY_AUTHORIZATION);
-    headers.remove(TE);
+    remove_hop_by_hop_request_headers(headers);
     join_cookie_headers(headers);
-}
-
-pub(super) fn strip_hop_by_hop_headers(headers: &mut HeaderMap) {
-    let connection_tokens = connection_tokens(headers);
-    headers.remove(CONNECTION);
-
-    for name in connection_tokens {
-        headers.remove(name);
-    }
-
-    headers.remove(KEEP_ALIVE);
-    headers.remove(PROXY_CONNECTION);
-    headers.remove(TRANSFER_ENCODING);
-    headers.remove(UPGRADE);
-}
-
-fn connection_tokens(headers: &HeaderMap) -> Vec<HeaderName> {
-    headers
-        .get_all(CONNECTION)
-        .iter()
-        .filter_map(|value| value.to_str().ok())
-        .flat_map(|value| value.split(','))
-        .filter_map(|token| HeaderName::from_bytes(token.trim().as_bytes()).ok())
-        .collect()
 }
 
 /// Configuration for creating a [`Proxy`].
