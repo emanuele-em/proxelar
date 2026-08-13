@@ -255,6 +255,66 @@ async fn forward_proxy_connect_plain_http_reconstructs_uri_and_emits_request_com
 }
 
 #[tokio::test]
+async fn forward_proxy_connect_plain_http_captures_long_method_request() {
+    // Regression: a request whose method token is >= 5 bytes (here DELETE) must
+    // still be routed to the HTTP MITM, not the raw byte tunnel. The raw
+    // fast-fail peeker runs first over the whole opener; a narrower peek window
+    // (e.g. only the bytes rama's 5-byte TLS peeker consumed) would hide the
+    // request-line space and misroute these methods to raw, silently dropping
+    // HTTP capture. A captured RequestComplete proves HTTP routing.
+    let (upstream_addr, upstream_shutdown) = start_upstream_server().await;
+    let (proxy_addr, shutdown_tx, handle, mut event_rx, _ca_dir) = start_forward_proxy().await;
+
+    let mut stream = TcpStream::connect(proxy_addr).await.unwrap();
+    stream
+        .write_all(
+            format!(
+                "CONNECT {upstream_addr} HTTP/1.1\r\n\
+                 Host: {upstream_addr}\r\n\
+                 \r\n"
+            )
+            .as_bytes(),
+        )
+        .await
+        .unwrap();
+    let connect_response = read_headers(&mut stream).await;
+    assert!(connect_response.starts_with("HTTP/1.1 200 OK"));
+
+    stream
+        .write_all(
+            format!(
+                "DELETE /resource/42 HTTP/1.1\r\n\
+                 Host: {upstream_addr}\r\n\
+                 Connection: close\r\n\
+                 \r\n"
+            )
+            .as_bytes(),
+        )
+        .await
+        .unwrap();
+    let raw_response = read_to_string_until_eof(&mut stream).await;
+    assert!(
+        raw_response.starts_with("HTTP/1.1 200 OK"),
+        "long-method request was not served as HTTP:\n{raw_response}"
+    );
+
+    match recv_request_complete(&mut event_rx).await {
+        ProxyEvent::RequestComplete {
+            request, response, ..
+        } => {
+            assert_eq!(request.method(), &Method::DELETE);
+            assert_eq!(request.uri().path().unwrap(), "/resource/42");
+            assert_eq!(response.status(), StatusCode::OK);
+        }
+        other => panic!("expected RequestComplete event, got {other:?}"),
+    }
+
+    let _ = shutdown_tx.send(());
+    let _ = upstream_shutdown.send(());
+    assert!(handle.await.unwrap().is_ok());
+}
+
+#[tokio::test]
 async fn forward_proxy_h2_connect_tunnels_h2c_requests() {
     let (upstream_addr, upstream_shutdown) = start_upstream_server().await;
     let (proxy_addr, shutdown_tx, handle, mut event_rx, _ca_dir) = start_forward_proxy().await;
