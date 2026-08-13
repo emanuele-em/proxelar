@@ -77,8 +77,10 @@ impl FromStr for UpstreamHttpVersion {
     }
 }
 
-/// Upstream HTTP(S) client: BoringSSL TLS, optional upstream proxy chaining, no
-/// connection pool. Built once and shared across every proxied request.
+/// Upstream HTTP(S) client — rama's `EasyHttpWebClient` configured with
+/// BoringSSL TLS, optional upstream-proxy chaining, and no connection pool.
+/// Built once and shared; the wrapper only applies proxelar's per-request
+/// version policy and proxy route.
 pub(crate) struct UpstreamClient {
     inner: BoxService<Request, Response, OpaqueError>,
     proxy: Option<ProxyAddress>,
@@ -106,6 +108,8 @@ impl UpstreamClient {
             .with_proxy_support()
             .with_tls_support_using_boringssl_and_default_http_version(tls_config, Version::HTTP_11)
             .with_default_http_connector(exec)
+            // No pooling: as an observability MITM we want a fresh upstream
+            // connection per request (1:1), not connection reuse.
             .without_connection_pool()
             .build_client();
 
