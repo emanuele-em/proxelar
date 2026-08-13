@@ -2,12 +2,10 @@
 //! capture paths.
 //!
 //! The whole pipeline is built on rama primitives: an HTTP/1+2 auto server, a
-//! BoringSSL TLS acceptor fed by the persistent CA, and a peek stack — a small
-//! custom raw peeker ahead of rama's `TlsPeekRouter` and `HttpPeekRouter` — so
-//! a non-HTTP tunnel opener such as `PING` is routed to the raw byte tunnel
-//! immediately (rama's HTTP peeker would treat a bare method token as an
-//! in-progress request and keep waiting), plus a forked WebSocket relay loop so
-//! every opcode — not just Text/Binary — is tapped and can be transformed.
+//! BoringSSL TLS acceptor fed by the persistent CA, a peek stack that routes
+//! each tunnel to TLS-MITM, HTTP-MITM, or a raw byte tunnel (see
+//! [`RawFirstPeekRouter`]), and a forked WebSocket relay loop so every opcode —
+//! not just Text/Binary — is tapped and can be transformed.
 
 use rama::telemetry::tracing;
 use std::convert::Infallible;
@@ -131,8 +129,8 @@ impl MitmConfig {
         let client_version = req.version();
         let mut handler = self.handler.clone();
 
-        // Extract the client-side upgrade future before `handle_request` rebuilds
-        // the request, mirroring the previous hyper flow.
+        // Capture the client-side upgrade future before `handle_request` consumes
+        // and rebuilds the request.
         let is_ws = is_http_req_websocket_handshake(&req);
         let ingress_upgrade = if is_ws {
             Some(handle_upgrade(&req))
@@ -271,14 +269,9 @@ where
         event_tx: cfg.handler.event_tx_clone(),
     };
 
-    // Peek stack: our raw fast-fail peeker runs first, over the raw stream, so
-    // its first read sees the whole opener (a downstream peeker would only see
-    // the bytes the upstream one consumed — e.g. rama's TLS peeker hands on just
-    // its ≤5-byte record-header window, which would hide the request-line space
-    // of a ≥5-char method like `OPTIONS`/`DELETE` and misroute it to raw). It
-    // routes a definitively non-HTTP opener (`PING`) to the raw tunnel and hands
-    // everything else to rama's TLS peeker, then rama's HTTP peeker (h1/h2), with
-    // the raw tunnel as that peeker's own fallback for malformed input.
+    // Raw fast-fail peeker first (it must run over the raw stream — see its
+    // doc), then rama's TLS peeker, then its HTTP peeker, falling back to the
+    // raw tunnel for anything non-HTTP.
     let router = RawFirstPeekRouter::new(
         raw_service.clone(),
         TlsPeekRouter::new(https_service)
@@ -576,12 +569,11 @@ fn bad_request(message: &'static str) -> Response {
         .unwrap_or_else(|_| StatusCode::BAD_REQUEST.into_response())
 }
 
-/// Normalize a captured request for upstream forwarding.
-///
-/// Keeps every proxelar invariant except the forced HTTP/1.1 downgrade: strip
-/// hop-by-hop metadata, remove `Host`/`Proxy-Authorization`/`TE`, join duplicate
-/// `Cookie` headers with `"; "`, and pin the upstream connector to the tunnel
-/// target (so a spoofed inner `Host` cannot re-route it).
+/// Normalize a captured request for upstream forwarding: sanitize forwarded
+/// headers (see [`super::sanitize_forwarded_request_headers`]), drop `Host`, and
+/// pin the upstream connector to the tunnel target so a spoofed inner `Host`
+/// cannot re-route it. WebSocket upgrades keep `Connection`/`Upgrade` and are
+/// forced to HTTP/1.1.
 fn prepare_upstream_request(
     mut req: Request,
     is_ws: bool,

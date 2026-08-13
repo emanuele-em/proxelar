@@ -28,7 +28,6 @@ use rama::ServiceInput;
 
 const EVENT_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(10);
 
-/// A pinned HTTP/2 request sender bound to a single upstream connection.
 type H2Sender = http2::SendRequest<Body>;
 
 #[tokio::test]
@@ -927,8 +926,6 @@ async fn start_websocket_upstream_server() -> (SocketAddr, tokio::sync::oneshot:
     (addr, shutdown_tx)
 }
 
-/// Upstream WebSocket peer: echoes the first text frame back prefixed with
-/// `echo:` and then closes.
 async fn websocket_upstream_response(mut ws: ServerWebSocket) -> Result<(), Infallible> {
     if let Ok(Message::Text(text)) = ws.recv_message().await {
         let _ = ws

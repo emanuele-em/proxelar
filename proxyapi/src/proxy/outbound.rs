@@ -15,9 +15,9 @@ enum ProxyKind {
 
 /// Upstream HTTP CONNECT or SOCKS5 proxy configuration.
 ///
-/// The chosen proxy is applied by the upstream [`super::UpstreamClient`], which
-/// inserts a [`rama::net::client::ProxyRoute`] into each request's extensions so
-/// rama's proxy connector chains through it.
+/// The chosen proxy is applied by the upstream client, which inserts a
+/// [`rama::net::client::ProxyRoute`] into each request's extensions so rama's
+/// proxy connector chains through it.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct UpstreamProxyConfig {
     kind: ProxyKind,

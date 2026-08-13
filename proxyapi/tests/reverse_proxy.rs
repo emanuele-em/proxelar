@@ -24,7 +24,6 @@ use rama::ServiceInput;
 
 const EVENT_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(10);
 
-/// A pinned HTTP/2 request sender bound to a single upstream connection.
 type H2Sender = http2::SendRequest<Body>;
 
 #[tokio::test]

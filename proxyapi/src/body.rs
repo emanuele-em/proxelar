@@ -1,10 +1,7 @@
 use rama::bytes::Bytes;
 use rama::http::Body;
 
-/// Boxed HTTP body type used throughout the proxy.
-///
-/// rama exposes a single unified [`Body`] for both requests and responses, so
-/// this alias keeps the existing call sites readable while pointing at it.
+/// HTTP body type used throughout the proxy, for both requests and responses.
 pub type ProxyBody = Body;
 
 /// Create a body from the given bytes.

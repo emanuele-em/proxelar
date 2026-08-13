@@ -30,20 +30,20 @@ use rama::tls::boring::server::{BoringServerConfigExt as _, CacheKind, ServerCer
 use rama::tls::client::ClientHello;
 use rama::tls::server::{DynamicCertIssuer, SelfSignedData, ServerAuthData, TlsServerConfig};
 
-/// Leaf certificate validity: one year.
 const LEAF_TTL_SECS: i64 = 365 * 24 * 60 * 60;
 /// Back-date the leaf `notBefore` slightly to tolerate client clock skew.
 const NOT_BEFORE_OFFSET: i64 = 60;
 
 /// Persistent CA material used to mint per-host MITM leaf certificates.
+///
+/// boring's `X509`/`PKey` are reference-counted OpenSSL-style handles that rama
+/// exposes from a thread-safe backend, so sharing this behind an `Arc` across
+/// connection tasks is sound.
 struct CaMaterial {
     cert: X509,
     key: PKey<Private>,
 }
 
-// SAFETY(soundness): boring's `X509`/`PKey` are internally reference-counted
-// OpenSSL-style handles that are safe to share across threads; rama exposes
-// them from a thread-safe backend. Wrapping in `Arc` keeps clones cheap.
 type LeafCache = Arc<Mutex<HashMap<String, ServerAuthData>>>;
 
 /// A persistent local certificate authority that mints per-host leaf
