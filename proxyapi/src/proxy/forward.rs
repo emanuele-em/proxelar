@@ -42,7 +42,6 @@ use rama::{Layer, Service};
 use proxyapi_models::{ProxiedResponse, WsDirection, WsFrame, WsOpcode};
 use tokio::sync::mpsc;
 
-use crate::body;
 use crate::ca::{cert_server, Ssl};
 use crate::event::ProxyEvent;
 use crate::handler::{now_millis, CapturingHandler, RequestOrResponse};
@@ -565,7 +564,7 @@ fn host_header_authority<B>(req: &Request<B>) -> Option<HostWithPort> {
 fn bad_request(message: &'static str) -> Response {
     Response::builder()
         .status(StatusCode::BAD_REQUEST)
-        .body(body::full(Bytes::from_static(message.as_bytes())))
+        .body(Body::from(Bytes::from_static(message.as_bytes())))
         .unwrap_or_else(|_| StatusCode::BAD_REQUEST.into_response())
 }
 

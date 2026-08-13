@@ -7,15 +7,14 @@ use rama::telemetry::tracing;
 use std::sync::Arc;
 use tokio::sync::mpsc;
 
-use crate::body::{self, ProxyBody};
 use crate::event::{next_id, ProxyEvent};
 use crate::intercept::{InterceptConfig, InterceptDecision};
 
 /// Returned by [`CapturingHandler::handle_request`] to either forward or
 /// short-circuit with a synthetic response.
 pub(crate) enum RequestOrResponse {
-    Request(Request<ProxyBody>),
-    Response(Response<ProxyBody>),
+    Request(Request<Body>),
+    Response(Response<Body>),
 }
 
 /// Default body capture limit.
@@ -26,12 +25,12 @@ pub const DEFAULT_BODY_CAPTURE_LIMIT: Option<usize> = None;
 
 enum BodyCollection {
     Complete(Bytes),
-    Exceeded { captured: Bytes, body: ProxyBody },
+    Exceeded { captured: Bytes, body: Body },
 }
 
 enum RequestBody {
     Buffered(Bytes),
-    Streaming { captured: Bytes, body: ProxyBody },
+    Streaming { captured: Bytes, body: Body },
 }
 
 impl RequestBody {
@@ -428,7 +427,7 @@ impl CapturingHandler {
     pub(crate) async fn handle_replayed_request(
         &mut self,
         req: ProxiedRequest,
-    ) -> Option<Request<ProxyBody>> {
+    ) -> Option<Request<Body>> {
         let id = next_id();
         self.pending_id = Some(id);
 
@@ -512,7 +511,7 @@ impl CapturingHandler {
             }
         }
 
-        let mut request = Request::new(body::full(body_bytes));
+        let mut request = Request::new(Body::from(body_bytes));
         *request.method_mut() = method;
         *request.uri_mut() = uri;
         *request.version_mut() = version;
@@ -529,10 +528,10 @@ impl CapturingHandler {
         status: rama::http::StatusCode,
         headers: rama::http::HeaderMap,
         body: Bytes,
-    ) -> Response<ProxyBody> {
+    ) -> Response<Body> {
         let (parts, body) = synthetic_response_parts(status, headers, body);
         self.emit_response_snapshot(&parts, body.clone());
-        Response::from_parts(parts, body::full(body))
+        Response::from_parts(parts, Body::from(body))
     }
 
     pub(crate) fn emit_synthetic_completion(
@@ -545,10 +544,7 @@ impl CapturingHandler {
         self.emit_response_snapshot(&parts, body);
     }
 
-    pub(crate) async fn handle_upstream_response(
-        &mut self,
-        res: Response<ProxyBody>,
-    ) -> Response<ProxyBody> {
+    pub(crate) async fn handle_upstream_response(&mut self, res: Response<Body>) -> Response<Body> {
         let (parts, body) = res.into_parts();
         if !self.should_buffer_response() {
             return self.stream_response(parts, body);
@@ -564,7 +560,7 @@ impl CapturingHandler {
         }
     }
 
-    pub(crate) async fn record_upstream_response(&mut self, res: Response<ProxyBody>) {
+    pub(crate) async fn record_upstream_response(&mut self, res: Response<Body>) {
         let (parts, body) = res.into_parts();
         match collect_body(body, self.body_capture_limit, "response").await {
             BodyCollection::Complete(body_bytes) => self.emit_captured_response(parts, body_bytes),
@@ -578,21 +574,21 @@ impl CapturingHandler {
         &mut self,
         parts: rama::http::response::Parts,
         body_bytes: Bytes,
-    ) -> Response<ProxyBody> {
+    ) -> Response<Body> {
         let hooked = self.apply_response_hook_to_snapshot(parts, body_bytes);
         let HookedResponse { parts, body } = hooked;
         let body_bytes = body.into_bytes();
         self.emit_response_snapshot(&parts, body_bytes.clone());
 
-        Response::from_parts(parts, body::full(body_bytes))
+        Response::from_parts(parts, Body::from(body_bytes))
     }
 
     fn finish_limited_response(
         &mut self,
         parts: rama::http::response::Parts,
         captured: Bytes,
-        body: ProxyBody,
-    ) -> Response<ProxyBody> {
+        body: Body,
+    ) -> Response<Body> {
         let hooked = self.apply_response_hook_to_snapshot(parts, captured);
         if hooked.body.is_original() {
             self.stream_response(hooked.parts, body)
@@ -600,7 +596,7 @@ impl CapturingHandler {
             let HookedResponse { parts, body } = hooked;
             let body_bytes = body.into_bytes();
             self.emit_response_snapshot(&parts, body_bytes.clone());
-            Response::from_parts(parts, body::full(body_bytes))
+            Response::from_parts(parts, Body::from(body_bytes))
         }
     }
 
@@ -613,8 +609,8 @@ impl CapturingHandler {
     fn stream_response(
         &mut self,
         parts: rama::http::response::Parts,
-        body: ProxyBody,
-    ) -> Response<ProxyBody> {
+        body: Body,
+    ) -> Response<Body> {
         let status = parts.status;
         let version = parts.version;
         let headers = parts.headers.clone();
@@ -787,7 +783,7 @@ impl CapturingHandler {
         &mut self,
         parts: rama::http::request::Parts,
         request_body: RequestBody,
-    ) -> Request<ProxyBody> {
+    ) -> Request<Body> {
         match request_body {
             RequestBody::Buffered(body_bytes) => {
                 self.captured_request = Some(CapturedRequest::buffered(ProxiedRequest::new(
@@ -798,7 +794,7 @@ impl CapturingHandler {
                     body_bytes.clone(),
                     now_millis(),
                 )));
-                Request::from_parts(parts, body::full(body_bytes))
+                Request::from_parts(parts, Body::from(body_bytes))
             }
             RequestBody::Streaming { captured, body } => {
                 debug_assert!(captured.len() <= self.body_capture_limit.unwrap_or(usize::MAX));
@@ -812,7 +808,7 @@ impl CapturingHandler {
 }
 
 impl CapturingHandler {
-    pub(crate) async fn handle_request(&mut self, req: Request<ProxyBody>) -> RequestOrResponse {
+    pub(crate) async fn handle_request(&mut self, req: Request<Body>) -> RequestOrResponse {
         // Assign a stable ID at request start so that RequestIntercepted and
         // RequestComplete events for the same flow share the same ID.
         let id = next_id();
@@ -1061,7 +1057,7 @@ mod tests {
         )
     }
 
-    async fn body_bytes(response: Response<ProxyBody>) -> Bytes {
+    async fn body_bytes(response: Response<Body>) -> Bytes {
         response.into_body().collect().await.unwrap().to_bytes()
     }
 
@@ -1069,7 +1065,7 @@ mod tests {
     /// at `limit`), mirroring how the proxy taps a fully-streamed request body.
     async fn resolved_capture(data: &'static [u8], limit: Option<usize>) -> CaptureHandle {
         let (body, handle) =
-            body::full(Bytes::from_static(data)).capture_buffered(capture_limit(limit));
+            Body::from(Bytes::from_static(data)).capture_buffered(capture_limit(limit));
         body.collect().await.unwrap();
         handle
     }
@@ -1226,7 +1222,7 @@ mod tests {
             .body(())
             .unwrap()
             .into_parts();
-        let response = handler.stream_response(parts, body::full(Bytes::from_static(b"uvwxyz")));
+        let response = handler.stream_response(parts, Body::from(Bytes::from_static(b"uvwxyz")));
 
         assert_eq!(body_bytes(response).await.as_ref(), b"uvwxyz");
         match event_rx.recv().await.unwrap() {
@@ -1256,7 +1252,7 @@ mod tests {
             .unwrap()
             .into_parts();
         let response =
-            handler.stream_response(parts, body::full(Bytes::from_static(b"not consumed")));
+            handler.stream_response(parts, Body::from(Bytes::from_static(b"not consumed")));
 
         drop(response);
 
@@ -1288,7 +1284,7 @@ mod tests {
             .unwrap()
             .into_parts();
 
-        let response = handler.stream_response(parts, body::empty());
+        let response = handler.stream_response(parts, Body::empty());
 
         assert!(body_bytes(response).await.is_empty());
         match event_rx.recv().await.unwrap() {
@@ -1321,7 +1317,7 @@ mod tests {
         // A request-body capture that is still streaming (handle unresolved
         // until we drive the wrapped body to completion below).
         let (request_body, request_handle) =
-            body::full(Bytes::from_static(b"abcdef")).capture_buffered(capture_limit(Some(10)));
+            Body::from(Bytes::from_static(b"abcdef")).capture_buffered(capture_limit(Some(10)));
         handler.captured_request = Some(CapturedRequest::streaming(&req_parts, request_handle, 10));
 
         let (parts, _) = Response::builder()
@@ -1329,7 +1325,7 @@ mod tests {
             .body(())
             .unwrap()
             .into_parts();
-        let response = handler.stream_response(parts, body::empty());
+        let response = handler.stream_response(parts, Body::empty());
 
         assert!(body_bytes(response).await.is_empty());
         tokio::task::yield_now().await;
@@ -1356,7 +1352,7 @@ mod tests {
     #[tokio::test]
     async fn collect_body_returns_streaming_body_when_limit_is_exceeded() {
         match collect_body(
-            body::full(Bytes::from_static(b"abcdef")),
+            Body::from(Bytes::from_static(b"abcdef")),
             Some(4),
             "response",
         )
@@ -1372,7 +1368,7 @@ mod tests {
 
     #[tokio::test]
     async fn collect_body_buffers_full_body_when_unlimited() {
-        match collect_body(body::full(Bytes::from_static(b"abcdef")), None, "response").await {
+        match collect_body(Body::from(Bytes::from_static(b"abcdef")), None, "response").await {
             BodyCollection::Complete(body) => assert_eq!(body.as_ref(), b"abcdef"),
             BodyCollection::Exceeded { .. } => panic!("expected complete body"),
         }

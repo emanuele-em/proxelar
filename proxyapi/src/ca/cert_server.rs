@@ -1,8 +1,6 @@
 use rama::bytes::Bytes;
-use rama::http::{Request, Response};
+use rama::http::{Body, Request, Response};
 use rama::telemetry::tracing;
-
-use crate::body::{self, ProxyBody};
 
 const CERT_PAGE_HTML: &str = r#"<!DOCTYPE html>
 <html lang="en">
@@ -395,7 +393,7 @@ pub fn handle<T>(
     req: &Request<T>,
     ca_cert_pem: &[u8],
     proxy_addr: Option<std::net::SocketAddr>,
-) -> Response<ProxyBody> {
+) -> Response<Body> {
     match req.uri().path_or_root().as_ref() {
         "/cert/pem" => {
             let len = ca_cert_pem.len();
@@ -406,10 +404,10 @@ pub fn handle<T>(
                     "content-disposition",
                     "attachment; filename=\"proxelar-ca-cert.pem\"",
                 )
-                .body(body::full(Bytes::from(ca_cert_pem.to_vec())))
+                .body(Body::from(Bytes::from(ca_cert_pem.to_vec())))
                 .unwrap_or_else(|e| {
                     tracing::error!("Failed to build PEM response: {e}");
-                    Response::new(body::empty())
+                    Response::new(Body::empty())
                 })
         }
         "/cert/cer" => {
@@ -422,10 +420,10 @@ pub fn handle<T>(
                     "content-disposition",
                     "attachment; filename=\"proxelar-ca-cert.cer\"",
                 )
-                .body(body::full(Bytes::from(der)))
+                .body(Body::from(Bytes::from(der)))
                 .unwrap_or_else(|e| {
                     tracing::error!("Failed to build DER response: {e}");
-                    Response::new(body::empty())
+                    Response::new(Body::empty())
                 })
         }
         _ => {
@@ -445,10 +443,10 @@ pub fn handle<T>(
             Response::builder()
                 .header("content-type", "text/html; charset=utf-8")
                 .header("content-length", len.to_string())
-                .body(body::full(Bytes::from(html)))
+                .body(Body::from(Bytes::from(html)))
                 .unwrap_or_else(|e| {
                     tracing::error!("Failed to build cert page response: {e}");
-                    Response::new(body::empty())
+                    Response::new(Body::empty())
                 })
         }
     }

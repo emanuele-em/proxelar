@@ -7,7 +7,6 @@
 
 #[cfg(feature = "scripting")]
 pub mod addon;
-pub mod body;
 pub mod ca;
 pub mod content;
 #[cfg(feature = "scripting")]
