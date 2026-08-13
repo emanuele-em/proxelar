@@ -1,13 +1,13 @@
 use proxyapi_models::{BodyMetadata, ProxiedRequest, ProxiedResponse};
 use rama::bytes::Bytes;
 use rama::http::body::util::{BodyExt, CollectOptions};
-use rama::http::{Body, Request, Response};
+use rama::http::{Body, CaptureHandle, CaptureLimit, Request, Response};
 use rama::net::uri::Uri;
 use rama::telemetry::tracing;
 use std::sync::Arc;
-use tokio::sync::{mpsc, Notify};
+use tokio::sync::mpsc;
 
-use crate::body::{self, BodyCapture, BodySnapshot, ProxyBody};
+use crate::body::{self, ProxyBody};
 use crate::event::{next_id, ProxyEvent};
 use crate::intercept::{InterceptConfig, InterceptDecision};
 
@@ -67,7 +67,14 @@ pub(crate) fn now_millis() -> i64 {
     chrono::Local::now().timestamp_millis()
 }
 
-#[derive(Clone)]
+/// Map proxelar's optional byte cap onto rama's [`CaptureLimit`].
+fn capture_limit(limit: Option<usize>) -> CaptureLimit {
+    match limit {
+        Some(max) => CaptureLimit::max_bytes(max),
+        None => CaptureLimit::unlimited(),
+    }
+}
+
 enum CapturedRequest {
     Buffered(ProxiedRequest),
     Streaming {
@@ -75,8 +82,7 @@ enum CapturedRequest {
         uri: Uri,
         version: rama::http::Version,
         headers: rama::http::HeaderMap,
-        body: BodyCapture,
-        done: Arc<Notify>,
+        handle: CaptureHandle,
         time: i64,
     },
 }
@@ -86,24 +92,20 @@ impl CapturedRequest {
         Self::Buffered(request)
     }
 
-    fn streaming(
-        parts: &rama::http::request::Parts,
-        body: BodyCapture,
-        done: Arc<Notify>,
-        time: i64,
-    ) -> Self {
+    fn streaming(parts: &rama::http::request::Parts, handle: CaptureHandle, time: i64) -> Self {
         Self::Streaming {
             method: parts.method.clone(),
             uri: parts.uri.clone(),
             version: parts.version,
             headers: parts.headers.clone(),
-            body,
-            done,
+            handle,
             time,
         }
     }
 
-    fn into_proxied_request(self) -> ProxiedRequest {
+    /// Resolve into a [`ProxiedRequest`], awaiting the streaming body's capture
+    /// handle so the recorded snapshot reflects the full (capped) body.
+    async fn into_proxied_request(self) -> ProxiedRequest {
         match self {
             Self::Buffered(request) => request,
             Self::Streaming {
@@ -111,52 +113,27 @@ impl CapturedRequest {
                 uri,
                 version,
                 headers,
-                body,
-                done: _,
+                handle,
                 time,
             } => {
-                let snapshot = body.snapshot();
-                log_truncated_capture("request", &snapshot);
+                let (bytes, truncated, total_seen) = match handle.wait().await {
+                    Ok(captured) => (
+                        captured.bytes().clone(),
+                        captured.is_truncated(),
+                        usize::try_from(captured.total_bytes()).unwrap_or(usize::MAX),
+                    ),
+                    Err(_canceled) => (Bytes::new(), false, 0),
+                };
+                log_truncated_capture("request", truncated, bytes.len(), total_seen);
                 ProxiedRequest::new_with_body_metadata(
                     method,
                     uri,
                     version,
                     headers,
-                    snapshot.bytes,
+                    bytes,
                     BodyMetadata {
-                        truncated: snapshot.truncated,
-                        total_seen: snapshot.total_seen,
-                    },
-                    time,
-                )
-            }
-        }
-    }
-
-    async fn into_proxied_request_after_capture(self) -> ProxiedRequest {
-        match self {
-            Self::Buffered(request) => request,
-            Self::Streaming {
-                method,
-                uri,
-                version,
-                headers,
-                body,
-                done,
-                time,
-            } => {
-                done.notified().await;
-                let snapshot = body.snapshot();
-                log_truncated_capture("request", &snapshot);
-                ProxiedRequest::new_with_body_metadata(
-                    method,
-                    uri,
-                    version,
-                    headers,
-                    snapshot.bytes,
-                    BodyMetadata {
-                        truncated: snapshot.truncated,
-                        total_seen: snapshot.total_seen,
+                        truncated,
+                        total_seen,
                     },
                     time,
                 )
@@ -176,12 +153,10 @@ impl CapturedRequest {
     }
 }
 
-fn log_truncated_capture(kind: &str, snapshot: &BodySnapshot) {
-    if snapshot.truncated {
+fn log_truncated_capture(kind: &str, truncated: bool, captured_len: usize, total_seen: usize) {
+    if truncated {
         tracing::warn!(
-            "Captured {kind} body truncated at {} bytes after seeing {} bytes; proxied traffic was streamed through unchanged",
-            snapshot.bytes.len(),
-            snapshot.total_seen
+            "Captured {kind} body truncated at {captured_len} bytes after seeing {total_seen} bytes; proxied traffic was streamed through unchanged"
         );
     }
 }
@@ -306,7 +281,6 @@ async fn collect_body(body: Body, limit: Option<usize>, kind: &'static str) -> B
 ///
 /// When the `scripting` feature is enabled and a script engine is attached,
 /// Lua `on_request` / `on_response` hooks are called for every request/response.
-#[derive(Clone)]
 pub struct CapturingHandler {
     event_tx: mpsc::Sender<ProxyEvent>,
     captured_request: Option<CapturedRequest>,
@@ -318,6 +292,24 @@ pub struct CapturingHandler {
     route_rules: Option<Arc<crate::rules::RouteRules>>,
     #[cfg(feature = "scripting")]
     script_engine: Option<Arc<crate::scripting::ScriptEngine>>,
+}
+
+impl Clone for CapturingHandler {
+    fn clone(&self) -> Self {
+        Self {
+            event_tx: self.event_tx.clone(),
+            // Handlers are cloned as per-connection templates before any request
+            // is captured; the transient capture state (which now holds a
+            // non-cloneable capture handle) never carries across a clone.
+            captured_request: None,
+            pending_id: self.pending_id,
+            intercept: self.intercept.clone(),
+            body_capture_limit: self.body_capture_limit,
+            route_rules: self.route_rules.clone(),
+            #[cfg(feature = "scripting")]
+            script_engine: self.script_engine.clone(),
+        }
+    }
 }
 
 impl std::fmt::Debug for CapturingHandler {
@@ -379,9 +371,11 @@ impl CapturingHandler {
         self
     }
 
-    pub(crate) fn take_captured_request(&mut self) -> Option<ProxiedRequest> {
-        self.take_captured_request_state()
-            .map(CapturedRequest::into_proxied_request)
+    pub(crate) async fn take_captured_request(&mut self) -> Option<ProxiedRequest> {
+        match self.take_captured_request_state() {
+            Some(request) => Some(request.into_proxied_request().await),
+            None => None,
+        }
     }
 
     fn take_captured_request_state(&mut self) -> Option<CapturedRequest> {
@@ -444,22 +438,19 @@ impl CapturingHandler {
         let mut headers = req.headers().clone();
         let mut body_bytes = req.body().clone();
 
-        self.captured_request = Some(CapturedRequest::buffered(ProxiedRequest::new(
+        let proxied = ProxiedRequest::new(
             method.clone(),
             uri.clone(),
             version,
             headers.clone(),
             body_bytes.clone(),
             now_millis(),
-        )));
+        );
+        self.captured_request = Some(CapturedRequest::buffered(proxied.clone()));
 
         if let Some(ref cfg) = self.intercept {
             if cfg.is_enabled() {
-                let snapshot = self
-                    .captured_request
-                    .clone()
-                    .unwrap()
-                    .into_proxied_request();
+                let snapshot = proxied;
                 let rx = cfg.register(id);
                 if self
                     .event_tx
@@ -630,39 +621,32 @@ impl CapturingHandler {
         let request = self.take_captured_request_state();
         let id = self.pending_id.take().unwrap_or_else(next_id);
         let event_tx = self.event_tx_clone();
-        let response_capture = BodyCapture::new(self.body_capture_limit);
-        let response_capture_for_body = response_capture.clone();
+        let (body, handle) = body.capture_buffered(capture_limit(self.body_capture_limit));
 
-        let body = body::capture(body, response_capture, move || {
+        tokio::spawn(async move {
             let Some(request) = request else {
                 return;
             };
-
-            let response_snapshot = response_capture_for_body.snapshot();
-            log_truncated_capture("response", &response_snapshot);
+            let Ok(captured) = handle.wait().await else {
+                return;
+            };
+            let truncated = captured.is_truncated();
+            let total_seen = usize::try_from(captured.total_bytes()).unwrap_or(usize::MAX);
+            let bytes = captured.bytes().clone();
+            log_truncated_capture("response", truncated, bytes.len(), total_seen);
             let response = ProxiedResponse::new_with_body_metadata(
                 status,
                 version,
                 headers,
-                response_snapshot.bytes,
+                bytes,
                 BodyMetadata {
-                    truncated: response_snapshot.truncated,
-                    total_seen: response_snapshot.total_seen,
+                    truncated,
+                    total_seen,
                 },
                 now_millis(),
             );
-
-            match request {
-                CapturedRequest::Buffered(request) => {
-                    send_request_complete(&event_tx, id, request, response);
-                }
-                request => {
-                    tokio::spawn(async move {
-                        let request = request.into_proxied_request_after_capture().await;
-                        send_request_complete(&event_tx, id, request, response);
-                    });
-                }
-            }
+            let request = request.into_proxied_request().await;
+            send_request_complete(&event_tx, id, request, response);
         });
 
         Response::from_parts(parts, body)
@@ -771,17 +755,31 @@ impl CapturingHandler {
             now_millis(),
         );
 
-        if let Some(request) = self.take_captured_request() {
-            // Use the ID assigned at the start of handle_request (intercept flow)
-            // so that RequestIntercepted and RequestComplete share the same ID.
-            // Fall back to next_id() for the normal (non-intercept) path.
-            let id = self.pending_id.take().unwrap_or_else(next_id);
-            let event = ProxyEvent::RequestComplete {
-                id,
-                request: Box::new(request),
-                response: Box::new(proxied_response),
-            };
-            self.send_event(event);
+        let Some(request) = self.take_captured_request_state() else {
+            return;
+        };
+        // Use the ID assigned at the start of handle_request (intercept flow)
+        // so that RequestIntercepted and RequestComplete share the same ID.
+        // Fall back to next_id() for the normal (non-intercept) path.
+        let id = self.pending_id.take().unwrap_or_else(next_id);
+        match request {
+            CapturedRequest::Buffered(request) => {
+                self.send_event(ProxyEvent::RequestComplete {
+                    id,
+                    request: Box::new(request),
+                    response: Box::new(proxied_response),
+                });
+            }
+            // The request body is still streaming: defer completion to a task
+            // that awaits its capture handle so the recorded request body is
+            // whole, matching the streamed-response path.
+            streaming => {
+                let event_tx = self.event_tx_clone();
+                tokio::spawn(async move {
+                    let request = streaming.into_proxied_request().await;
+                    send_request_complete(&event_tx, id, request, proxied_response);
+                });
+            }
         }
     }
 
@@ -803,19 +801,11 @@ impl CapturingHandler {
                 Request::from_parts(parts, body::full(body_bytes))
             }
             RequestBody::Streaming { captured, body } => {
-                let capture = BodyCapture::new(self.body_capture_limit);
-                let done = Arc::new(Notify::new());
-                self.captured_request = Some(CapturedRequest::streaming(
-                    &parts,
-                    capture.clone(),
-                    Arc::clone(&done),
-                    now_millis(),
-                ));
                 debug_assert!(captured.len() <= self.body_capture_limit.unwrap_or(usize::MAX));
-                Request::from_parts(
-                    parts,
-                    body::capture(body, capture, move || done.notify_one()),
-                )
+                let (body, handle) = body.capture_buffered(capture_limit(self.body_capture_limit));
+                self.captured_request =
+                    Some(CapturedRequest::streaming(&parts, handle, now_millis()));
+                Request::from_parts(parts, body)
             }
         }
     }
@@ -875,18 +865,9 @@ impl CapturingHandler {
             }
         }
         if !self.should_buffer_request() {
-            let capture = BodyCapture::new(self.body_capture_limit);
-            let done = Arc::new(Notify::new());
-            self.captured_request = Some(CapturedRequest::streaming(
-                &parts,
-                capture.clone(),
-                Arc::clone(&done),
-                now_millis(),
-            ));
-            let req = Request::from_parts(
-                parts,
-                body::capture(incoming, capture, move || done.notify_one()),
-            );
+            let (body, handle) = incoming.capture_buffered(capture_limit(self.body_capture_limit));
+            self.captured_request = Some(CapturedRequest::streaming(&parts, handle, now_millis()));
+            let req = Request::from_parts(parts, body);
             return RequestOrResponse::Request(req);
         }
 
@@ -1084,6 +1065,15 @@ mod tests {
         response.into_body().collect().await.unwrap().to_bytes()
     }
 
+    /// Build a request-body capture handle already resolved with `data` (capped
+    /// at `limit`), mirroring how the proxy taps a fully-streamed request body.
+    async fn resolved_capture(data: &'static [u8], limit: Option<usize>) -> CaptureHandle {
+        let (body, handle) =
+            body::full(Bytes::from_static(data)).capture_buffered(capture_limit(limit));
+        body.collect().await.unwrap();
+        handle
+    }
+
     #[cfg(feature = "scripting")]
     fn encode_test_body(encoding: &str, body: &'static [u8]) -> Bytes {
         let mut headers = HeaderMap::new();
@@ -1228,16 +1218,8 @@ mod tests {
             .body(())
             .unwrap()
             .into_parts();
-        let request_capture = BodyCapture::new(Some(4));
-        request_capture.append(&Bytes::from_static(b"abcdef"));
-        let request_done = Arc::new(Notify::new());
-        request_done.notify_one();
-        handler.captured_request = Some(CapturedRequest::streaming(
-            &req_parts,
-            request_capture,
-            request_done,
-            10,
-        ));
+        let handle = resolved_capture(b"abcdef", Some(4)).await;
+        handler.captured_request = Some(CapturedRequest::streaming(&req_parts, handle, 10));
 
         let (parts, _) = Response::builder()
             .status(StatusCode::OK)
@@ -1278,7 +1260,7 @@ mod tests {
 
         drop(response);
 
-        match event_rx.try_recv().unwrap() {
+        match event_rx.recv().await.unwrap() {
             ProxyEvent::RequestComplete {
                 id,
                 request,
@@ -1336,15 +1318,11 @@ mod tests {
             .body(())
             .unwrap()
             .into_parts();
-        let request_capture = BodyCapture::new(Some(10));
-        request_capture.append(&Bytes::from_static(b"abc"));
-        let request_done = Arc::new(Notify::new());
-        handler.captured_request = Some(CapturedRequest::streaming(
-            &req_parts,
-            request_capture.clone(),
-            Arc::clone(&request_done),
-            10,
-        ));
+        // A request-body capture that is still streaming (handle unresolved
+        // until we drive the wrapped body to completion below).
+        let (request_body, request_handle) =
+            body::full(Bytes::from_static(b"abcdef")).capture_buffered(capture_limit(Some(10)));
+        handler.captured_request = Some(CapturedRequest::streaming(&req_parts, request_handle, 10));
 
         let (parts, _) = Response::builder()
             .status(StatusCode::NO_CONTENT)
@@ -1357,8 +1335,9 @@ mod tests {
         tokio::task::yield_now().await;
         assert!(event_rx.try_recv().is_err());
 
-        request_capture.append(&Bytes::from_static(b"def"));
-        request_done.notify_one();
+        // Completing the request body resolves its capture handle, unblocking
+        // the deferred RequestComplete emission.
+        request_body.collect().await.unwrap();
 
         match event_rx.recv().await.unwrap() {
             ProxyEvent::RequestComplete {
@@ -1418,6 +1397,7 @@ mod tests {
         assert_eq!(
             handler
                 .take_captured_request()
+                .await
                 .unwrap()
                 .uri()
                 .path()

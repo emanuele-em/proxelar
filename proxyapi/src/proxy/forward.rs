@@ -142,7 +142,7 @@ impl MitmConfig {
         match result {
             Ok(res) => {
                 if is_ws && res.status() == StatusCode::SWITCHING_PROTOCOLS {
-                    return upgrade_websocket_response(res, handler, ingress_upgrade);
+                    return upgrade_websocket_response(res, handler, ingress_upgrade).await;
                 }
                 let mut res = handler.handle_upstream_response(res).await;
                 sanitize_response_for_client(&mut res, client_version);
@@ -624,7 +624,7 @@ fn prepare_upstream_request(
 }
 
 /// Turn a 101 upstream response into a MITM WebSocket relay.
-fn upgrade_websocket_response(
+async fn upgrade_websocket_response(
     res: Response,
     mut handler: CapturingHandler,
     ingress_upgrade: Option<
@@ -645,7 +645,7 @@ fn upgrade_websocket_response(
     let conn_id = handler
         .take_pending_id()
         .unwrap_or_else(crate::event::next_id);
-    if let Some(captured_req) = handler.take_captured_request() {
+    if let Some(captured_req) = handler.take_captured_request().await {
         handler.send_event(ProxyEvent::WebSocketConnected {
             id: conn_id,
             request: Box::new(captured_req),
