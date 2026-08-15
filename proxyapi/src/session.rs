@@ -13,7 +13,12 @@ use proxyapi_models::{
     ProxiedRequest, ProxiedResponse, TrafficSession, SESSION_FORMAT_VERSION,
 };
 use rama::bytes::Bytes;
-use rama::http::{HeaderMap, HeaderName, HeaderValue, Method, StatusCode, Version};
+use rama::http::convert::curl::{
+    cmd_string_for_request_parts_with_options,
+    try_cmd_string_for_request_parts_and_payload_with_options, CurlExportOptions,
+    CurlScriptCompatibility, CurlScriptPayloadMode,
+};
+use rama::http::{HeaderMap, HeaderName, HeaderValue, Method, Request, StatusCode, Version};
 use rama::net::uri::Uri;
 use serde_json::{json, Value};
 use thiserror::Error;
@@ -638,39 +643,42 @@ pub fn export_curl(
             .map(|policy| policy.redact_request(&flow.request))
             .unwrap_or_else(|| flow.request.clone());
         writeln!(output, "# flow {}", flow.id).expect("writing to String cannot fail");
-        write!(
-            output,
-            "curl --request {} {}",
-            shell_quote(request.method().as_str()),
-            shell_quote(&request.uri().to_string())
-        )
-        .expect("writing to String cannot fail");
-        for (name, value) in request.headers() {
-            let header = format!(
-                "{}: {}",
-                name.as_str(),
-                String::from_utf8_lossy(value.as_bytes())
-            );
-            output.push_str(" \\");
-            output.push('\n');
-            write!(output, "  --header {}", shell_quote(&header))
-                .expect("writing to String cannot fail");
-        }
-        if !request.body().is_empty() {
-            let encoded = base64::engine::general_purpose::STANDARD.encode(request.body());
-            output.push_str(" \\");
-            output.push('\n');
-            write!(
-                output,
-                "  --data-binary \"$(printf %s {} | base64 --decode)\"",
-                shell_quote(&encoded)
+
+        // Delegate the curl command to rama. `Unix` script compatibility keeps
+        // binary bodies replayable (base64-piped) in the generated shell script.
+        let req = curl_request(&request)?;
+        let options =
+            CurlExportOptions::default().with_script_compatibility(CurlScriptCompatibility::Unix);
+        let command = if request.body().is_empty() {
+            cmd_string_for_request_parts_with_options(&req, options)
+        } else {
+            try_cmd_string_for_request_parts_and_payload_with_options(
+                &req,
+                request.body(),
+                options,
+                &CurlScriptPayloadMode::Inline,
             )
-            .expect("writing to String cannot fail");
-        }
+            .map_err(|error| SessionError::InvalidHttp(error.to_string()))?
+        };
+        output.push_str(&command);
         output.push_str("\n\n");
     }
     fs::write(path, output)?;
     Ok(())
+}
+
+/// Rebuild a bodyless rama request from a captured snapshot so rama's curl
+/// exporter can read its method, URI, version and headers. The body is passed
+/// to the exporter separately.
+fn curl_request(request: &ProxiedRequest) -> Result<Request<()>, SessionError> {
+    let mut req = Request::builder()
+        .method(request.method().clone())
+        .uri(request.uri().clone())
+        .version(request.version())
+        .body(())
+        .map_err(|error| SessionError::InvalidHttp(error.to_string()))?;
+    *req.headers_mut() = request.headers().clone();
+    Ok(req)
 }
 
 pub fn export_raw(
@@ -739,10 +747,6 @@ fn append_headers_and_body(output: &mut Vec<u8>, headers: &HeaderMap, body: &Byt
     }
     output.extend_from_slice(b"\r\n");
     output.extend_from_slice(body);
-}
-
-fn shell_quote(value: &str) -> String {
-    format!("'{}'", value.replace('\'', "'\\''"))
 }
 
 fn version_string(version: Version) -> &'static str {
@@ -1019,14 +1023,9 @@ mod tests {
                 .len(),
             1
         );
-        assert!(fs::read_to_string(curl).unwrap().contains("curl --request"));
+        assert!(fs::read_to_string(curl).unwrap().contains("curl "));
         assert!(raw.join("00000003-request.http").exists());
         assert!(raw.join("00000003-response.http").exists());
-    }
-
-    #[test]
-    fn shell_quote_handles_single_quotes() {
-        assert_eq!(shell_quote("it's"), "'it'\\''s'");
     }
 
     #[test]
