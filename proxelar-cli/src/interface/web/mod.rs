@@ -6,7 +6,7 @@ use rama::http::header::{
 };
 use rama::http::layer::error_handling::ErrorHandlerLayer;
 use rama::http::server::HttpServer;
-use rama::http::service::web::extract::{FromPartsStateRefPair, Json, Path, Query, State};
+use rama::http::service::web::extract::{Json, Path, Query, State};
 use rama::http::service::web::response::{Html, IntoResponse};
 use rama::http::service::web::Router;
 use rama::http::ws::handshake::server::{ServerWebSocket, WebSocketAcceptor};
@@ -46,21 +46,6 @@ struct WebState {
 fn generate_token() -> String {
     let bytes: [u8; 32] = rand::rng().random();
     bytes.iter().map(|b| format!("{b:02x}")).collect()
-}
-
-/// Extracts a clone of the request headers so handlers can reuse the existing
-/// `&HeaderMap` auth/origin helpers. rama has no built-in `HeaderMap` extractor.
-struct ReqHeaders(HeaderMap);
-
-impl<S: Send + Sync> FromPartsStateRefPair<S> for ReqHeaders {
-    type Rejection = std::convert::Infallible;
-
-    async fn from_parts_state_ref_pair(
-        parts: &rama::http::request::Parts,
-        _state: &S,
-    ) -> Result<Self, Self::Rejection> {
-        Ok(Self(parts.headers.clone()))
-    }
 }
 
 /// A message sent from the browser to the proxy.
@@ -307,8 +292,8 @@ pub async fn run(
 }
 
 async fn api_wireguard_svg(
-    ReqHeaders(headers): ReqHeaders,
     State(state): State<Arc<WebState>>,
+    headers: HeaderMap,
 ) -> rama::http::Response {
     if !api_authorized(&headers, &state) {
         return forbidden();
@@ -381,8 +366,8 @@ fn forbidden() -> rama::http::Response {
 }
 
 async fn api_authenticate_browser(
-    ReqHeaders(headers): ReqHeaders,
     State(state): State<Arc<WebState>>,
+    headers: HeaderMap,
 ) -> rama::http::Response {
     if !bearer_token(&headers).is_some_and(|token| token == state.browser_token) {
         return forbidden();
@@ -415,8 +400,8 @@ struct ApiStatus {
 }
 
 async fn api_status(
-    ReqHeaders(headers): ReqHeaders,
     State(state): State<Arc<WebState>>,
+    headers: HeaderMap,
 ) -> rama::http::Response {
     if !api_authorized(&headers, &state) {
         return forbidden();
@@ -436,8 +421,8 @@ async fn api_status(
 }
 
 async fn api_session(
-    ReqHeaders(headers): ReqHeaders,
     State(state): State<Arc<WebState>>,
+    headers: HeaderMap,
 ) -> rama::http::Response {
     if !api_authorized(&headers, &state) {
         return forbidden();
@@ -446,9 +431,9 @@ async fn api_session(
 }
 
 async fn api_flows(
-    ReqHeaders(headers): ReqHeaders,
     Query(params): Query<HashMap<String, String>>,
     State(state): State<Arc<WebState>>,
+    headers: HeaderMap,
 ) -> rama::http::Response {
     if !api_authorized(&headers, &state) {
         return forbidden();
@@ -489,9 +474,9 @@ struct ApiFilterMatches {
 }
 
 async fn api_filter_matches(
-    ReqHeaders(headers): ReqHeaders,
     Query(params): Query<HashMap<String, String>>,
     State(state): State<Arc<WebState>>,
+    headers: HeaderMap,
 ) -> rama::http::Response {
     if !api_authorized(&headers, &state) {
         return forbidden();
@@ -544,8 +529,8 @@ async fn api_filter_matches(
 
 async fn api_flow(
     Path(id): Path<u64>,
-    ReqHeaders(headers): ReqHeaders,
     State(state): State<Arc<WebState>>,
+    headers: HeaderMap,
 ) -> rama::http::Response {
     if !api_authorized(&headers, &state) {
         return forbidden();
@@ -571,8 +556,8 @@ struct ApiContentView {
 
 async fn api_content(
     Path((id, side)): Path<(u64, String)>,
-    ReqHeaders(headers): ReqHeaders,
     State(state): State<Arc<WebState>>,
+    headers: HeaderMap,
 ) -> rama::http::Response {
     if !api_authorized(&headers, &state) {
         return forbidden();
@@ -628,8 +613,8 @@ async fn api_content(
 }
 
 async fn api_clear_flows(
-    ReqHeaders(headers): ReqHeaders,
     State(state): State<Arc<WebState>>,
+    headers: HeaderMap,
 ) -> rama::http::Response {
     if !api_authorized(&headers, &state) {
         return forbidden();
@@ -640,8 +625,8 @@ async fn api_clear_flows(
 
 async fn api_replay(
     Path(id): Path<u64>,
-    ReqHeaders(headers): ReqHeaders,
     State(state): State<Arc<WebState>>,
+    headers: HeaderMap,
 ) -> rama::http::Response {
     if !api_authorized(&headers, &state) {
         return forbidden();
@@ -674,8 +659,8 @@ struct SetInterceptBody {
 }
 
 async fn api_set_intercept(
-    ReqHeaders(headers): ReqHeaders,
     State(state): State<Arc<WebState>>,
+    headers: HeaderMap,
     Json(body): Json<SetInterceptBody>,
 ) -> rama::http::Response {
     if !api_authorized(&headers, &state) {
@@ -710,8 +695,8 @@ const fn default_drop_status() -> u16 {
 
 async fn api_resolve_intercept(
     Path(id): Path<u64>,
-    ReqHeaders(headers): ReqHeaders,
     State(state): State<Arc<WebState>>,
+    headers: HeaderMap,
     Json(body): Json<ApiInterceptDecision>,
 ) -> rama::http::Response {
     if !api_authorized(&headers, &state) {
@@ -1098,7 +1083,7 @@ mod tests {
         let mut headers = HeaderMap::new();
         headers.insert(AUTHORIZATION, "Bearer browser-token".parse().unwrap());
 
-        let response = api_authenticate_browser(ReqHeaders(headers), State(Arc::new(state))).await;
+        let response = api_authenticate_browser(State(Arc::new(state)), headers).await;
 
         assert_eq!(response.status(), rama::http::StatusCode::NO_CONTENT);
         assert_eq!(
@@ -1114,8 +1099,7 @@ mod tests {
             let mut headers = HeaderMap::new();
             headers.insert(AUTHORIZATION, format!("Bearer {token}").parse().unwrap());
 
-            let response =
-                api_authenticate_browser(ReqHeaders(headers), State(Arc::new(state))).await;
+            let response = api_authenticate_browser(State(Arc::new(state)), headers).await;
 
             assert_eq!(response.status(), rama::http::StatusCode::FORBIDDEN);
             assert!(!response.headers().contains_key(SET_COOKIE));
@@ -1136,7 +1120,7 @@ mod tests {
         let state = Arc::new(state);
 
         let forbidden_response =
-            api_wireguard_svg(ReqHeaders(HeaderMap::new()), State(Arc::clone(&state))).await;
+            api_wireguard_svg(State(Arc::clone(&state)), HeaderMap::new()).await;
         assert_eq!(
             forbidden_response.status(),
             rama::http::StatusCode::FORBIDDEN
@@ -1144,7 +1128,7 @@ mod tests {
 
         let mut headers = HeaderMap::new();
         headers.insert(COOKIE, "proxelar_session=browser-token".parse().unwrap());
-        let response = api_wireguard_svg(ReqHeaders(headers), State(state)).await;
+        let response = api_wireguard_svg(State(state), headers).await;
 
         assert_eq!(response.status(), rama::http::StatusCode::OK);
         assert_eq!(
