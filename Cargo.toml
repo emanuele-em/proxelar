@@ -8,7 +8,7 @@ rust-version = "1.97.1"
 
 [workspace.dependencies.rama]
 git = "https://github.com/plabayo/rama"
-rev = "19eb9417bf36eba2a4176b83645d84c108c29e79"
+rev = "3490de1ff07d48432db25928fc8cf8bc3f5380b3"
 default-features = false
 
 [profile.release]
