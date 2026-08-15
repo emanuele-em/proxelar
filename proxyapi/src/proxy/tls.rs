@@ -3,7 +3,6 @@ use std::{
     str::FromStr,
 };
 
-use rama::crypto::native_certs::bundled_root_certs;
 use rama::crypto::pki_types::{pem::PemObject, CertificateDer};
 use rama::tls::client::{ServerVerifyMode, TlsClientConfig};
 
@@ -64,21 +63,18 @@ fn path_to_policy(
 
 /// Translate the upstream trust policy into a rama BoringSSL client TLS config.
 ///
-/// rama's trust anchors *replace* the verify store rather than augmenting it, so
-/// the "default + extra CA" policy is reproduced by concatenating the bundled
-/// WebPKI roots with the extra CA file.
+/// Uses rama's `with_webpki_roots` (bundled Mozilla/WebPKI roots, independent of
+/// the OS store) and its additive `try_with_extra_server_trust_anchors` for the
+/// "webpki roots + extra CA" policy.
 pub(super) fn build_client_tls_config(
     config: &UpstreamTlsConfig,
 ) -> Result<TlsClientConfig, Error> {
     match config {
-        UpstreamTlsConfig::Default => Ok(TlsClientConfig::default_http()),
-        UpstreamTlsConfig::DefaultWithCaFile(path) => {
-            let mut anchors: Vec<CertificateDer<'static>> = bundled_root_certs().to_vec();
-            anchors.extend(load_ca_file_roots(path)?);
-            TlsClientConfig::default_http()
-                .try_with_server_trust_anchors(anchors)
-                .map_err(|error| Error::Tls(error.to_string()))
-        }
+        UpstreamTlsConfig::Default => Ok(TlsClientConfig::default_http().with_webpki_roots()),
+        UpstreamTlsConfig::DefaultWithCaFile(path) => TlsClientConfig::default_http()
+            .with_webpki_roots()
+            .try_with_extra_server_trust_anchors(load_ca_file_roots(path)?)
+            .map_err(|error| Error::Tls(error.to_string())),
         UpstreamTlsConfig::CaFileOnly(path) => TlsClientConfig::default_http()
             .try_with_server_trust_anchors(load_ca_file_roots(path)?)
             .map_err(|error| Error::Tls(error.to_string())),
