@@ -17,13 +17,16 @@ use rama::bytes::Bytes;
 
 use rama::error::{BoxError, ErrorContext};
 use rama::extensions::{Extension, ExtensionsRef};
-use rama::http::io::upgrade::{handle_upgrade, Upgraded};
+use rama::http::io::upgrade::Upgraded;
 use rama::http::layer::remove_header::coalesce_cookie_headers;
+use rama::http::layer::upgrade::mitm::HttpUpgradeMitmRelayLayer;
 use rama::http::layer::upgrade::{DefaultHttpProxyConnectReplyService, UpgradeLayer};
 use rama::http::matcher::MethodMatcher;
 use rama::http::server::HttpServer;
 use rama::http::service::web::response::IntoResponse;
-use rama::http::ws::handshake::matcher::is_http_req_websocket_handshake;
+use rama::http::ws::handshake::matcher::{
+    is_http_req_websocket_handshake, HttpWebSocketRelayServiceRequestMatcher,
+};
 use rama::http::ws::handshake::mitm::{
     WebSocketRelayDirection, WebSocketRelayEvent, WebSocketRelayEventInput,
     WebSocketRelayEventOutput, WebSocketRelayEventService, WebSocketRelayMessage,
@@ -71,6 +74,12 @@ struct TunnelContext {
     scheme: Protocol,
     authority: HostWithPort,
 }
+
+/// Capture flow ID for a WebSocket connection, threaded from the MITM service
+/// (which emits `WebSocketConnected`) to the relay service via the upstream
+/// response extensions, so per-frame events share the connection's ID.
+#[derive(Debug, Clone, Copy, Extension)]
+struct WsConnId(u64);
 
 /// Shared configuration for the MITM HTTP service.
 #[derive(Clone)]
@@ -123,14 +132,9 @@ impl MitmConfig {
         let client_version = req.version();
         let mut handler = self.handler.clone();
 
-        // Capture the client-side upgrade future before `handle_request` consumes
-        // and rebuilds the request.
+        // The upgrade-relay layer owns the client/upstream upgrade handshake; we
+        // only need to know whether to negotiate the WS version upstream.
         let is_ws = is_http_req_websocket_handshake(&req);
-        let ingress_upgrade = if is_ws {
-            Some(handle_upgrade(&req))
-        } else {
-            None
-        };
 
         let req = match handler.handle_request(req).await {
             RequestOrResponse::Request(req) => req,
@@ -151,7 +155,7 @@ impl MitmConfig {
         match result {
             Ok(res) => {
                 if is_ws && res.status() == StatusCode::SWITCHING_PROTOCOLS {
-                    return upgrade_websocket_response(res, handler, ingress_upgrade).await;
+                    return finalize_ws_upgrade(res, &mut handler).await;
                 }
                 let mut res = handler.handle_upstream_response(res).await;
                 sanitize_response_for_client(&mut res, client_version);
@@ -191,6 +195,23 @@ fn mitm_http_service(cfg: Arc<MitmConfig>) -> MitmHttpService {
     MitmHttpService { cfg }
 }
 
+/// The MITM HTTP service wrapped in rama's upgrade-relay layer, which owns the
+/// two-sided WebSocket handshake (both `handle_upgrade`s, the join, the bridge)
+/// and drives our [`WsRelayService`] for the relayed frames. Non-upgrade
+/// requests pass straight through to the inner service.
+fn mitm_http_service_with_ws(
+    cfg: Arc<MitmConfig>,
+) -> impl Service<Request, Output = Response, Error = Infallible> + Clone {
+    let exec = cfg.exec.clone();
+    let relay = WsRelayService {
+        event_tx: cfg.handler.event_tx_clone(),
+        #[cfg(feature = "scripting")]
+        script_engine: cfg.handler.script_engine_clone(),
+    };
+    HttpUpgradeMitmRelayLayer::new(exec, HttpWebSocketRelayServiceRequestMatcher::new(relay))
+        .into_layer(mitm_http_service(cfg))
+}
+
 /// Build the top-level forward-proxy HTTP service: CONNECT tunnels are hijacked
 /// by [`UpgradeLayer`]; everything else (absolute-form forwards + the cert page)
 /// is served directly.
@@ -211,7 +232,7 @@ pub(crate) fn forward_http_service(
             }),
         ),
     )
-        .into_layer(mitm_http_service(cfg))
+        .into_layer(mitm_http_service_with_ws(cfg))
 }
 
 /// CONNECT handler: after the 200 reply, peek the tunneled stream and dispatch
@@ -243,7 +264,7 @@ where
             scheme: Protocol::HTTPS,
             authority: target.clone(),
         })
-        .into_layer(mitm_http_service(Arc::clone(&cfg)));
+        .into_layer(mitm_http_service_with_ws(Arc::clone(&cfg)));
         TlsAcceptorLayer::new(tls_cfg)
             .with_store_client_hello(true)
             .into_layer(HttpServer::auto(exec.clone()).service(inner))
@@ -254,7 +275,7 @@ where
             scheme: Protocol::HTTP,
             authority: target.clone(),
         })
-        .into_layer(mitm_http_service(Arc::clone(&cfg)));
+        .into_layer(mitm_http_service_with_ws(Arc::clone(&cfg)));
         HttpServer::auto(exec.clone()).service(inner)
     };
 
@@ -403,28 +424,21 @@ fn prepare_upstream_request(
     req
 }
 
-/// Turn a 101 upstream response into a MITM WebSocket relay.
-async fn upgrade_websocket_response(
-    res: Response,
-    mut handler: CapturingHandler,
-    ingress_upgrade: Option<
-        impl std::future::Future<Output = Result<Upgraded, BoxError>> + Send + 'static,
-    >,
-) -> Response {
-    let egress_upgrade = handle_upgrade(&res);
-    let (parts, _body) = res.into_parts();
-
-    let ws_response = ProxiedResponse::new(
-        parts.status,
-        parts.version,
-        parts.headers.clone(),
-        Bytes::new(),
-        now_millis(),
-    );
-
+/// Finalize a MITM'd WebSocket 101: emit `WebSocketConnected` from the captured
+/// request and stamp the flow ID onto the response so [`WsRelayService`] (driven
+/// by rama's upgrade-relay layer) can tag per-frame events. The response is
+/// returned whole — its `on_upgrade` extension is what the layer relays.
+async fn finalize_ws_upgrade(res: Response, handler: &mut CapturingHandler) -> Response {
     let conn_id = handler
         .take_pending_id()
         .unwrap_or_else(crate::event::next_id);
+    let ws_response = ProxiedResponse::new(
+        res.status(),
+        res.version(),
+        res.headers().clone(),
+        Bytes::new(),
+        now_millis(),
+    );
     if let Some(captured_req) = handler.take_captured_request().await {
         handler.send_event(ProxyEvent::WebSocketConnected {
             id: conn_id,
@@ -432,60 +446,49 @@ async fn upgrade_websocket_response(
             response: Box::new(ws_response),
         });
     }
-
-    if let Some(ingress_upgrade) = ingress_upgrade {
-        let event_tx = handler.event_tx_clone();
-        #[cfg(feature = "scripting")]
-        let script_engine = handler.script_engine_clone();
-        tokio::spawn(async move {
-            relay_websocket(
-                conn_id,
-                ingress_upgrade,
-                egress_upgrade,
-                event_tx,
-                #[cfg(feature = "scripting")]
-                script_engine,
-            )
-            .await;
-        });
-    }
-
-    Response::from_parts(parts, Body::empty())
+    res.extensions().insert(WsConnId(conn_id));
+    res
 }
 
-/// Await both upgrade futures and hand the pair to rama's WebSocket relay,
-/// which owns masking, roles and control-frame handling (auto-pong, coordinated
-/// close). Our [`WsCaptureMiddleware`] observes every frame for capture and may
-/// transform data frames via the Lua hook.
-async fn relay_websocket<Fi, Fe>(
-    conn_id: u64,
-    ingress_upgrade: Fi,
-    egress_upgrade: Fe,
+/// Relay service handed to rama's upgrade-relay layer. Once the layer has
+/// upgraded both sides it invokes this over the bridged streams; rama owns the
+/// masking, roles and control-frame handling (auto-pong, coordinated close). We
+/// read the flow ID stamped on the upstream response (grafted onto the egress
+/// stream by the layer), drive [`WsCaptureMiddleware`] for the relayed frames,
+/// and emit `WebSocketClosed` when the relay ends.
+#[derive(Clone)]
+struct WsRelayService {
     event_tx: mpsc::Sender<ProxyEvent>,
-    #[cfg(feature = "scripting")] script_engine: Option<Arc<crate::scripting::ScriptEngine>>,
-) where
-    Fi: std::future::Future<Output = Result<Upgraded, BoxError>>,
-    Fe: std::future::Future<Output = Result<Upgraded, BoxError>>,
-{
-    let (ingress, egress) = match tokio::try_join!(ingress_upgrade, egress_upgrade) {
-        Ok(pair) => pair,
-        Err(err) => {
-            tracing::warn!("WebSocket upgrade failed for conn_id={conn_id}: {err}");
-            return;
-        }
-    };
+    #[cfg(feature = "scripting")]
+    script_engine: Option<Arc<crate::scripting::ScriptEngine>>,
+}
 
-    let middleware = WsCaptureMiddleware {
-        conn_id,
-        event_tx: event_tx.clone(),
-        #[cfg(feature = "scripting")]
-        script_engine,
-    };
-    let Ok(()) = WebSocketRelayEventService::new(middleware)
-        .serve(BridgeIo(ingress, egress))
-        .await;
+impl Service<BridgeIo<Upgraded, Upgraded>> for WsRelayService {
+    type Output = ();
+    type Error = BoxError;
 
-    let _ = event_tx.try_send(ProxyEvent::WebSocketClosed { conn_id });
+    async fn serve(
+        &self,
+        BridgeIo(ingress, egress): BridgeIo<Upgraded, Upgraded>,
+    ) -> Result<Self::Output, Self::Error> {
+        let conn_id = egress
+            .extensions()
+            .get_ref::<WsConnId>()
+            .map_or_else(crate::event::next_id, |c| c.0);
+        let middleware = WsCaptureMiddleware {
+            conn_id,
+            event_tx: self.event_tx.clone(),
+            #[cfg(feature = "scripting")]
+            script_engine: self.script_engine.clone(),
+        };
+        let Ok(()) = WebSocketRelayEventService::new(middleware)
+            .serve(BridgeIo(ingress, egress))
+            .await;
+        let _ = self
+            .event_tx
+            .try_send(ProxyEvent::WebSocketClosed { conn_id });
+        Ok(())
+    }
 }
 
 /// Relay middleware that captures every WebSocket frame (both directions, all
