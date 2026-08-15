@@ -5,8 +5,8 @@
 //! BoringSSL TLS acceptor fed by the persistent CA, a peek stack (rama's TLS
 //! peeker then its HTTP peeker, the latter skipping known non-HTTP protocol
 //! openers) that routes each tunnel to TLS-MITM, HTTP-MITM, or a raw byte
-//! tunnel, and a forked WebSocket relay loop so every opcode — not just
-//! Text/Binary — is tapped and can be transformed.
+//! tunnel, and rama's WebSocket relay-event service so every opcode is tapped
+//! for capture while data frames can be transformed.
 
 use rama::telemetry::tracing;
 use std::convert::Infallible;
@@ -24,10 +24,13 @@ use rama::http::matcher::MethodMatcher;
 use rama::http::server::HttpServer;
 use rama::http::service::web::response::IntoResponse;
 use rama::http::ws::handshake::matcher::is_http_req_websocket_handshake;
-use rama::http::ws::protocol::Role;
-use rama::http::ws::{AsyncWebSocket, Message, ProtocolError};
+use rama::http::ws::handshake::mitm::{
+    WebSocketRelayDirection, WebSocketRelayEvent, WebSocketRelayEventInput,
+    WebSocketRelayEventOutput, WebSocketRelayEventService, WebSocketRelayMessage,
+};
+use rama::http::ws::Utf8Bytes;
 use rama::http::{Body, HeaderMap, Request, Response, StatusCode, Version};
-use rama::io::Io;
+use rama::io::{BridgeIo, Io};
 use rama::layer::{AddInputExtensionLayer, ConsumeErrLayer};
 use rama::net::address::{Host, HostWithPort};
 use rama::net::client::ConnectorTarget;
@@ -487,7 +490,7 @@ async fn upgrade_websocket_response(
         #[cfg(feature = "scripting")]
         let script_engine = handler.script_engine_clone();
         tokio::spawn(async move {
-            pump_websocket_frames(
+            relay_websocket(
                 conn_id,
                 ingress_upgrade,
                 egress_upgrade,
@@ -502,11 +505,11 @@ async fn upgrade_websocket_response(
     Response::from_parts(parts, Body::empty())
 }
 
-/// Await both upgrade futures, wrap the streams in rama WebSockets (proxy is
-/// `Role::Server` toward the client and `Role::Client` toward upstream), then
-/// relay every frame — including control frames — while tapping and optionally
-/// transforming each one.
-async fn pump_websocket_frames<Fi, Fe>(
+/// Await both upgrade futures and hand the pair to rama's WebSocket relay,
+/// which owns masking, roles and control-frame handling (auto-pong, coordinated
+/// close). Our [`WsCaptureMiddleware`] observes every frame for capture and may
+/// transform data frames via the Lua hook.
+async fn relay_websocket<Fi, Fe>(
     conn_id: u64,
     ingress_upgrade: Fi,
     egress_upgrade: Fe,
@@ -524,101 +527,109 @@ async fn pump_websocket_frames<Fi, Fe>(
         }
     };
 
-    let mut client_ws = AsyncWebSocket::from_raw_socket(ingress, Role::Server, None).await;
-    let mut server_ws = AsyncWebSocket::from_raw_socket(egress, Role::Client, None).await;
-
-    loop {
-        tokio::select! {
-            msg = client_ws.recv_message() => match msg {
-                Ok(frame) => {
-                    #[cfg(feature = "scripting")]
-                    let Some(frame) = transform_ws_frame(frame, WsDirection::ClientToServer, script_engine.as_deref()) else { continue; };
-                    emit_ws_frame(&event_tx, conn_id, &frame, WsDirection::ClientToServer);
-                    if server_ws.send_message(frame).await.is_err() { break; }
-                }
-                Err(err) => { log_ws_close("client", conn_id, &err); break; }
-            },
-            msg = server_ws.recv_message() => match msg {
-                Ok(frame) => {
-                    #[cfg(feature = "scripting")]
-                    let Some(frame) = transform_ws_frame(frame, WsDirection::ServerToClient, script_engine.as_deref()) else { continue; };
-                    emit_ws_frame(&event_tx, conn_id, &frame, WsDirection::ServerToClient);
-                    if client_ws.send_message(frame).await.is_err() { break; }
-                }
-                Err(err) => { log_ws_close("server", conn_id, &err); break; }
-            },
-        }
-    }
+    let middleware = WsCaptureMiddleware {
+        conn_id,
+        event_tx: event_tx.clone(),
+        #[cfg(feature = "scripting")]
+        script_engine,
+    };
+    let Ok(()) = WebSocketRelayEventService::new(middleware)
+        .serve(BridgeIo(ingress, egress))
+        .await;
 
     let _ = event_tx.try_send(ProxyEvent::WebSocketClosed { conn_id });
 }
 
-fn log_ws_close(side: &str, conn_id: u64, err: &ProtocolError) {
-    if err.is_connection_error() || matches!(err, ProtocolError::ResetWithoutClosingHandshake) {
-        tracing::debug!("WS {side} disconnected conn_id={conn_id}: {err}");
-    } else {
-        tracing::debug!("WS {side} error conn_id={conn_id}: {err}");
+/// Relay middleware that captures every WebSocket frame (both directions, all
+/// opcodes) and, for data frames, applies the optional Lua transform. Control
+/// frames are only observed — the relay owns their handling.
+struct WsCaptureMiddleware {
+    conn_id: u64,
+    event_tx: mpsc::Sender<ProxyEvent>,
+    #[cfg(feature = "scripting")]
+    script_engine: Option<Arc<crate::scripting::ScriptEngine>>,
+}
+
+impl Service<WebSocketRelayEventInput> for WsCaptureMiddleware {
+    type Output = WebSocketRelayEventOutput;
+    type Error = Infallible;
+
+    async fn serve(&self, input: WebSocketRelayEventInput) -> Result<Self::Output, Self::Error> {
+        let direction = match input.direction {
+            WebSocketRelayDirection::Ingress => WsDirection::ClientToServer,
+            WebSocketRelayDirection::Egress => WsDirection::ServerToClient,
+        };
+        emit_ws_frame(&self.event_tx, self.conn_id, &input.event, direction);
+
+        // Only data frames are transformable; the relay owns control frames.
+        #[cfg(feature = "scripting")]
+        if let Some(engine) = self.script_engine.clone() {
+            if let WebSocketRelayEvent::Data(message) = &input.event {
+                let messages = script_data_messages(&engine, direction, message);
+                return Ok(WebSocketRelayEventOutput {
+                    messages,
+                    close: None,
+                    extensions: input.extensions,
+                });
+            }
+        }
+
+        Ok(input.into())
     }
 }
 
+/// Run the Lua `on_websocket_frame` hook for a data frame, returning the
+/// messages to forward (empty = drop, one = pass-through or replacement).
 #[cfg(feature = "scripting")]
-fn transform_ws_frame(
-    frame: Message,
+fn script_data_messages(
+    engine: &crate::scripting::ScriptEngine,
     direction: WsDirection,
-    engine: Option<&crate::scripting::ScriptEngine>,
-) -> Option<Message> {
-    let Some(engine) = engine else {
-        return Some(frame);
-    };
+    message: &WebSocketRelayMessage,
+) -> Vec<WebSocketRelayMessage> {
     let direction_name = match direction {
         WsDirection::ClientToServer => "client_to_server",
         WsDirection::ServerToClient => "server_to_client",
     };
-    let (opcode, payload): (&str, &[u8]) = match &frame {
-        Message::Text(payload) => ("text", payload.as_bytes()),
-        Message::Binary(payload) => ("binary", payload.as_ref()),
-        Message::Ping(payload) => ("ping", payload.as_ref()),
-        Message::Pong(payload) => ("pong", payload.as_ref()),
-        Message::Close(_) | Message::Frame(_) => return Some(frame),
+    let (opcode, payload): (&str, &[u8]) = match message {
+        WebSocketRelayMessage::Text(text) => ("text", text.as_bytes()),
+        WebSocketRelayMessage::Binary(bytes) => ("binary", bytes.as_ref()),
     };
     match engine.on_websocket_frame(direction_name, opcode, payload) {
-        Ok(crate::scripting::ScriptWebSocketAction::PassThrough) => Some(frame),
-        Ok(crate::scripting::ScriptWebSocketAction::Drop) => None,
-        Ok(crate::scripting::ScriptWebSocketAction::Forward(payload)) => match frame {
-            Message::Text(_) => match String::from_utf8(payload.to_vec()) {
-                Ok(text) => Some(Message::text(text)),
+        Ok(crate::scripting::ScriptWebSocketAction::PassThrough) => vec![message.clone()],
+        Ok(crate::scripting::ScriptWebSocketAction::Drop) => Vec::new(),
+        Ok(crate::scripting::ScriptWebSocketAction::Forward(payload)) => match message {
+            WebSocketRelayMessage::Text(_) => match Utf8Bytes::try_from(payload) {
+                Ok(text) => vec![WebSocketRelayMessage::Text(text)],
                 Err(error) => {
                     tracing::warn!("Lua WebSocket text replacement was not UTF-8: {error}");
-                    None
+                    Vec::new()
                 }
             },
-            Message::Binary(_) => Some(Message::binary(payload)),
-            Message::Ping(_) => Some(Message::Ping(payload)),
-            Message::Pong(_) => Some(Message::Pong(payload)),
-            other @ (Message::Close(_) | Message::Frame(_)) => Some(other),
+            WebSocketRelayMessage::Binary(_) => vec![WebSocketRelayMessage::Binary(payload)],
         },
         Err(error) => {
             tracing::warn!("Lua on_websocket_frame error (passing through): {error}");
-            Some(frame)
+            vec![message.clone()]
         }
     }
 }
 
-/// Convert a rama WebSocket [`Message`] into a [`WsFrame`] event and send it.
+/// Emit a [`WsFrame`] capture event for one relayed frame.
 fn emit_ws_frame(
     tx: &mpsc::Sender<ProxyEvent>,
     conn_id: u64,
-    msg: &Message,
+    event: &WebSocketRelayEvent,
     direction: WsDirection,
 ) {
     let time = now_millis();
-    let (opcode, raw): (WsOpcode, &[u8]) = match msg {
-        Message::Text(s) => (WsOpcode::Text, s.as_bytes()),
-        Message::Binary(b) => (WsOpcode::Binary, b.as_ref()),
-        Message::Ping(b) => (WsOpcode::Ping, b.as_ref()),
-        Message::Pong(b) => (WsOpcode::Pong, b.as_ref()),
-        Message::Close(_) => (WsOpcode::Close, b""),
-        Message::Frame(_) => (WsOpcode::Continuation, b""),
+    let (opcode, raw): (WsOpcode, &[u8]) = match event {
+        WebSocketRelayEvent::Data(WebSocketRelayMessage::Text(s)) => (WsOpcode::Text, s.as_bytes()),
+        WebSocketRelayEvent::Data(WebSocketRelayMessage::Binary(b)) => {
+            (WsOpcode::Binary, b.as_ref())
+        }
+        WebSocketRelayEvent::Ping(b) => (WsOpcode::Ping, b.as_ref()),
+        WebSocketRelayEvent::Pong(b) => (WsOpcode::Pong, b.as_ref()),
+        WebSocketRelayEvent::Close(_) => (WsOpcode::Close, b""),
     };
     let limit = MAX_WS_FRAME_PAYLOAD.unwrap_or(raw.len());
     let truncated = raw.len() > limit;
