@@ -2,10 +2,11 @@
 //! capture paths.
 //!
 //! The whole pipeline is built on rama primitives: an HTTP/1+2 auto server, a
-//! BoringSSL TLS acceptor fed by the persistent CA, a peek stack that routes
-//! each tunnel to TLS-MITM, HTTP-MITM, or a raw byte tunnel (see
-//! [`RawFirstPeekRouter`]), and a forked WebSocket relay loop so every opcode —
-//! not just Text/Binary — is tapped and can be transformed.
+//! BoringSSL TLS acceptor fed by the persistent CA, a peek stack (rama's TLS
+//! peeker then its HTTP peeker, the latter skipping known non-HTTP protocol
+//! openers) that routes each tunnel to TLS-MITM, HTTP-MITM, or a raw byte
+//! tunnel, and a forked WebSocket relay loop so every opcode — not just
+//! Text/Binary — is tapped and can be transformed.
 
 use rama::telemetry::tracing;
 use std::convert::Infallible;
@@ -26,8 +27,7 @@ use rama::http::ws::handshake::matcher::is_http_req_websocket_handshake;
 use rama::http::ws::protocol::Role;
 use rama::http::ws::{AsyncWebSocket, Message, ProtocolError};
 use rama::http::{Body, HeaderMap, Request, Response, StatusCode, Version};
-use rama::io::peek::{peek_input_until_verdict_with_options, PeekOutput, PeekVerdict};
-use rama::io::{Io, PeekIoProvider, PrefixedIo, StackReader};
+use rama::io::Io;
 use rama::layer::{AddInputExtensionLayer, ConsumeErrLayer};
 use rama::net::address::{Host, HostWithPort};
 use rama::net::client::ConnectorTarget;
@@ -51,22 +51,12 @@ use super::{sanitize_response_for_client, UpstreamClient};
 
 /// Maximum payload size captured per WebSocket frame.
 const MAX_WS_FRAME_PAYLOAD: Option<usize> = crate::handler::DEFAULT_BODY_CAPTURE_LIMIT;
-/// HTTP/2 prior-knowledge connection preface.
-const H2_PREFACE: &[u8] = b"PRI * HTTP/2.0\r\n\r\nSM\r\n\r\n";
-/// TLS record content type (handshake) — a TLS ClientHello opens with this byte.
-const TLS_RECORD_HANDSHAKE: u8 = 0x16;
-/// Bytes peeked by the custom raw-vs-HTTP fast-fail router. The verdict commits
-/// on the first method+space, so real request-lines are classified in their
-/// first handful of bytes; the window only bounds how long a spaceless opener
-/// may be before it is treated as raw. Matches the previous classifier's window
-/// so any method it routed to HTTP still does (no standard/WebDAV method comes
-/// close — `BASELINE-CONTROL` is 16).
-const RAW_PEEK_LEN: usize = 256;
 /// Upper bound on how long each protocol peeker waits for a client to reveal its
 /// protocol. A real client sends its opener (request-line, TLS ClientHello, or
-/// h2 preface) immediately, and a non-HTTP opener fails fast to the raw tunnel,
-/// so this only fires on a client that begins an HTTP-looking request-line and
-/// then stalls (a slowloris-style half-open), bounding the resources it can hold.
+/// h2 preface) immediately, and a known non-HTTP opener fails fast to the raw
+/// tunnel, so this only fires on a client that begins an HTTP-looking
+/// request-line and then stalls (a slowloris-style half-open), bounding the
+/// resources it can hold.
 const PEEK_TIMEOUT: Duration = Duration::from_secs(10);
 
 /// Per-tunnel context injected into every request served over an intercepted
@@ -269,20 +259,20 @@ where
         event_tx: cfg.handler.event_tx_clone(),
     };
 
-    // Raw fast-fail peeker first (it must run over the raw stream — see its
-    // doc), then rama's TLS peeker, then its HTTP peeker, falling back to the
-    // raw tunnel for anything non-HTTP.
-    let router = RawFirstPeekRouter::new(
-        raw_service.clone(),
-        TlsPeekRouter::new(https_service)
-            .with_peek_timeout(PEEK_TIMEOUT)
-            .with_fallback(
-                HttpPeekRouter::new(http_service)
-                    .with_peek_timeout(PEEK_TIMEOUT)
-                    .with_fallback(raw_service),
-            ),
-    )
-    .with_peek_timeout(PEEK_TIMEOUT);
+    // Peek stack: rama's TLS peeker (0x16 record header) routes to TLS-MITM,
+    // else rama's HTTP peeker routes h1/h2 to HTTP-MITM. The HTTP peeker skips
+    // known non-HTTP protocol openers (PING, SMTP/IRC/SSH/PROXY, …) straight to
+    // the raw tunnel without waiting, and the raw tunnel is also its fallback
+    // for anything else non-HTTP. The peek timeout bounds a client that begins
+    // an HTTP-looking request-line and then stalls.
+    let router = TlsPeekRouter::new(https_service)
+        .with_peek_timeout(PEEK_TIMEOUT)
+        .with_fallback(
+            HttpPeekRouter::new(http_service)
+                .with_known_non_http_protocol_methods()
+                .with_peek_timeout(PEEK_TIMEOUT)
+                .with_fallback(raw_service),
+        );
 
     router.serve(io).await
 }
@@ -311,143 +301,6 @@ where
             .await
             .map_err(Into::into)
     }
-}
-
-/// [`PrefixedIo`] produced by [`RawFirstPeekRouter`] after peeking.
-type RawPrefixedIo<S> = PrefixedIo<StackReader<RAW_PEEK_LEN>, S>;
-
-/// The first peek router in the tunnel stack, running over the raw stream.
-///
-/// It fast-fails any opener that can be *neither* a TLS record, an HTTP/1
-/// request, nor the HTTP/2 client preface onto the raw byte tunnel, so a short
-/// non-HTTP opener (e.g. a 4-byte `PING` followed by silence) is routed
-/// immediately without a timeout. rama's [`HttpPeekRouter`] cannot do this
-/// alone: it treats a bare method token as an in-progress request-line and
-/// keeps reading, which would stall a client-speaks-first raw protocol.
-///
-/// It must run first (not behind rama's [`TlsPeekRouter`]): a downstream peeker
-/// only sees the bytes the upstream one consumed — rama's TLS peeker hands on
-/// just its ≤5-byte record-header window — which would truncate the opener
-/// below the request-line space of a ≥5-char method and misroute it to raw.
-/// Running first, its own first read sees the whole opener. Everything that can
-/// still be TLS or HTTP is handed to the `fallback` (rama's [`TlsPeekRouter`]
-/// then [`HttpPeekRouter`]) for precise detection.
-struct RawFirstPeekRouter<R, F> {
-    raw: R,
-    fallback: F,
-    peek_timeout: Option<Duration>,
-}
-
-impl<R, F> RawFirstPeekRouter<R, F> {
-    fn new(raw: R, fallback: F) -> Self {
-        Self {
-            raw,
-            fallback,
-            peek_timeout: None,
-        }
-    }
-
-    fn with_peek_timeout(mut self, peek_timeout: Duration) -> Self {
-        self.peek_timeout = Some(peek_timeout);
-        self
-    }
-}
-
-impl<PeekableInput, Output, R, F> Service<PeekableInput> for RawFirstPeekRouter<R, F>
-where
-    PeekableInput: PeekIoProvider<PeekIo: Unpin>,
-    Output: Send + 'static,
-    R: Service<
-        PeekableInput::Mapped<RawPrefixedIo<PeekableInput::PeekIo>>,
-        Output = Output,
-        Error: Into<BoxError>,
-    >,
-    F: Service<
-        PeekableInput::Mapped<RawPrefixedIo<PeekableInput::PeekIo>>,
-        Output = Output,
-        Error: Into<BoxError>,
-    >,
-{
-    type Output = Output;
-    type Error = BoxError;
-
-    async fn serve(&self, mut input: PeekableInput) -> Result<Self::Output, Self::Error> {
-        let mut peek_buf = [0u8; RAW_PEEK_LEN];
-        let peek_reader = input.peek_io_mut();
-
-        let PeekOutput { data, peek_size } = peek_input_until_verdict_with_options(
-            peek_reader,
-            &mut peek_buf,
-            0,
-            self.peek_timeout,
-            // Non-HTTP openers are rejected fast (see `raw_prefix_verdict`), so
-            // the only reads that continue are for a still-plausible HTTP/2
-            // preface arriving fragmented — bounded by the buffer, EOF, and the
-            // optional peek timeout.
-            None,
-            raw_prefix_verdict,
-        )
-        .await;
-        // `Match(())` means "certainly not HTTP" → raw tunnel; a rejected
-        // (HTTP-committed) or settled-without-verdict prefix is handed to rama's
-        // HTTP peeker, which makes the final HTTP-vs-fallback call.
-        let is_raw = data.is_some();
-
-        let offset = RAW_PEEK_LEN - peek_size;
-        if offset > 0 {
-            peek_buf.copy_within(0..peek_size, offset);
-        }
-        let mut peek_stack = StackReader::new(peek_buf);
-        peek_stack.skip(offset);
-
-        let mapped = input.map_peek_io(|io| PrefixedIo::new(peek_stack, io));
-
-        if is_raw {
-            self.raw.serve(mapped).await.map_err(Into::into)
-        } else {
-            self.fallback.serve(mapped).await.map_err(Into::into)
-        }
-    }
-}
-
-/// Fail-fast [`PeekVerdict`] predicate for [`RawFirstPeekRouter`].
-///
-/// [`Match`](PeekVerdict::Match) routes to the raw tunnel, [`Reject`](PeekVerdict::Reject)
-/// hands the (replayed) stream to the fallback (rama's TLS then HTTP peeker),
-/// and [`NeedMore`](PeekVerdict::NeedMore) keeps reading.
-fn raw_prefix_verdict(buffer: &[u8]) -> PeekVerdict<()> {
-    let Some(&first) = buffer.first() else {
-        return PeekVerdict::NeedMore;
-    };
-    // Possible TLS record (a ClientHello opens with 0x16): let rama's TLS peeker
-    // decide — 0x16 is not an HTTP method byte, so it would otherwise fall to
-    // the raw arm below.
-    if first == TLS_RECORD_HANDSHAKE {
-        return PeekVerdict::Reject;
-    }
-    match buffer.iter().position(|byte| *byte == b' ') {
-        // A method token followed by a space commits the opener to the HTTP
-        // family — an HTTP/1 request-line, or the h2 preface which opens
-        // `PRI `. Hand it to rama's HTTP peeker, which validates the rest and
-        // splits h1 vs h2. Committing on the first space (rather than waiting
-        // for the `HTTP/1.` version token) keeps a long method like `OPTIONS`
-        // or `DELETE` from being misread as raw when the version would fall
-        // outside the peek window.
-        Some(end) if end > 0 && buffer[..end].iter().all(|byte| is_http_token(*byte)) => {
-            PeekVerdict::Reject
-        }
-        // A space not preceded by a valid method token → not HTTP → raw.
-        Some(_) => PeekVerdict::Match(()),
-        // No space yet: keep reading only while the bytes could still open the
-        // h2 preface (`PRI`); any other bare opener (e.g. `PING`) goes to the
-        // raw tunnel immediately, with no timeout.
-        None if H2_PREFACE.starts_with(buffer) => PeekVerdict::NeedMore,
-        None => PeekVerdict::Match(()),
-    }
-}
-
-fn is_http_token(byte: u8) -> bool {
-    byte.is_ascii_alphanumeric() || b"!#$%&'*+-.^_`|~".contains(&byte)
 }
 
 /// True when the request targets the listener itself (used to serve the cert
