@@ -28,6 +28,7 @@ use rama::http::ws::handshake::mitm::{
     WebSocketRelayDirection, WebSocketRelayEvent, WebSocketRelayEventInput,
     WebSocketRelayEventOutput, WebSocketRelayEventService, WebSocketRelayMessage,
 };
+#[cfg(feature = "scripting")]
 use rama::http::ws::Utf8Bytes;
 use rama::http::{Body, HeaderMap, Request, Response, StatusCode, Version};
 use rama::io::{BridgeIo, Io};
@@ -35,7 +36,7 @@ use rama::layer::{AddInputExtensionLayer, ConsumeErrLayer};
 use rama::net::address::{Host, HostWithPort};
 use rama::net::client::ConnectorTarget;
 use rama::net::http::server::HttpPeekRouter;
-use rama::net::uri::Uri;
+use rama::net::AuthorityInputExt;
 use rama::net::Protocol;
 use rama::rt::Executor;
 use rama::service::service_fn;
@@ -114,7 +115,7 @@ impl MitmConfig {
             None => (Protocol::HTTP, None),
         };
 
-        let req = match reconstruct_uri(req, scheme, authority.as_ref()) {
+        let req = match reconstruct_uri(req, scheme) {
             Ok(req) => req,
             Err(response) => return response,
         };
@@ -346,76 +347,23 @@ fn host_matches_listener(host: &Host, listen_addr: std::net::SocketAddr, port: u
     }
 }
 
-/// Rebuild the request URI in absolute form for upstream forwarding.
+/// Rebuild the request URI in absolute form so the captured (user-facing)
+/// request carries a full `scheme://authority/path` URL rather than a bare
+/// origin-form path. Routing itself is pinned by the `ConnectorTarget` extension.
 #[allow(clippy::result_large_err)]
-fn reconstruct_uri(
-    mut req: Request,
-    scheme: Protocol,
-    authority: Option<&HostWithPort>,
-) -> Result<Request, Response> {
-    let host_with_port = match authority {
-        Some(authority) => {
-            // Inside a CONNECT/SOCKS tunnel the inner request must still identify
-            // its host (absolute-form URI or a Host header); a Host-less request
-            // is a 400 rather than being silently routed to the tunnel target.
-            if req.uri().authority().is_none() && host_header_authority(&req).is_none() {
-                return Err(bad_request("Bad Request: missing Host header"));
-            }
-            authority.clone()
-        }
-        None => {
-            if req.uri().authority().is_some() {
-                // Already an absolute-form forward request.
-                return Ok(req);
-            }
-            match host_header_authority(&req) {
-                Some(authority) => authority,
-                None => return Err(bad_request("Bad Request: missing Host header")),
-            }
-        }
-    };
-
-    let scheme_str = if scheme == Protocol::HTTPS {
-        "https"
-    } else {
-        "http"
-    };
-    let target = if req.uri().query_or_empty().is_empty() {
-        format!(
-            "{scheme_str}://{host_with_port}{}",
-            req.uri().path_or_root()
-        )
-    } else {
-        format!(
-            "{scheme_str}://{host_with_port}{}?{}",
-            req.uri().path_or_root(),
-            req.uri().query_or_empty()
-        )
-    };
-
-    match Uri::parse(target) {
-        Ok(uri) => {
-            *req.uri_mut() = uri;
-            Ok(req)
-        }
-        Err(error) => {
-            tracing::warn!("Failed to rebuild tunnel URI: {error}");
-            Err(bad_request("Bad Request: invalid URI"))
-        }
+fn reconstruct_uri(mut req: Request, scheme: Protocol) -> Result<Request, Response> {
+    // The request must still name a host (absolute-form URI, Host header, or
+    // terminated-TLS SNI); a host-less request is a 400.
+    if req.authority().is_none() {
+        return Err(bad_request("Bad Request: missing Host header"));
     }
-}
-
-fn host_header_authority<B>(req: &Request<B>) -> Option<HostWithPort> {
-    let host = req
-        .headers()
-        .get(rama::http::header::HOST)
-        .and_then(|value| value.to_str().ok())?;
-    if let Ok(authority) = HostWithPort::try_from(host) {
-        return Some(authority);
-    }
-    Host::try_from(host)
-        .ok()
-        .map(|host| HostWithPort { host, port: 80 })
+    // rama's `request_uri` assembles scheme://authority/path from the request
+    // context; override the scheme with the tunnel's, since a decrypted (MITM'd)
+    // HTTPS request is otherwise indistinguishable from plaintext.
+    let mut uri = req.request_uri();
+    uri.set_scheme(scheme);
+    *req.uri_mut() = uri;
+    Ok(req)
 }
 
 fn bad_request(message: &'static str) -> Response {
