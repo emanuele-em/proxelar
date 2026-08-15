@@ -17,6 +17,7 @@ use rama::bytes::Bytes;
 use rama::error::{BoxError, ErrorContext};
 use rama::extensions::{Extension, ExtensionsRef};
 use rama::http::io::upgrade::{handle_upgrade, Upgraded};
+use rama::http::layer::remove_header::coalesce_cookie_headers;
 use rama::http::layer::upgrade::{DefaultHttpProxyConnectReplyService, UpgradeLayer};
 use rama::http::matcher::MethodMatcher;
 use rama::http::server::HttpServer;
@@ -583,7 +584,7 @@ fn prepare_upstream_request(
         req.headers_mut().remove(rama::http::header::HOST);
         req.headers_mut()
             .remove(rama::http::header::PROXY_AUTHORIZATION);
-        super::join_cookie_headers(req.headers_mut());
+        coalesce_cookie_headers(req.headers_mut());
         // WebSocket upgrades only speak HTTP/1.1.
         *req.version_mut() = Version::HTTP_11;
     } else {

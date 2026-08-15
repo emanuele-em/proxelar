@@ -392,7 +392,6 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "1f7dc094d718f2e1c1559ad110e27eeaae14a5465d3d56dd6dbd793079fbd530"
 dependencies = [
  "memchr",
- "regex-automata",
  "serde_core",
 ]
 
@@ -2851,7 +2850,6 @@ dependencies = [
  "base64 0.23.0",
  "boringtun",
  "brotli",
- "bstr",
  "chrono",
  "encoding_rs",
  "flate2",

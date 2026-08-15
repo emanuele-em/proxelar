@@ -16,9 +16,8 @@ use rama::error::BoxError;
 use rama::extensions::ExtensionsRef;
 use rama::http::client::EasyHttpWebClient;
 use rama::http::conn::TargetHttpVersion;
-use rama::http::header::{Entry, COOKIE};
 use rama::http::layer::remove_header::{
-    remove_hop_by_hop_request_headers, remove_hop_by_hop_response_headers,
+    coalesce_cookie_headers, remove_hop_by_hop_request_headers, remove_hop_by_hop_response_headers,
 };
 use rama::http::server::HttpServer;
 use rama::http::{HeaderMap, Request, Response, Version};
@@ -155,28 +154,13 @@ pub(crate) fn sanitize_response_for_client<B>(res: &mut Response<B>, version: Ve
     }
 }
 
-pub(super) fn join_cookie_headers(headers: &mut HeaderMap) {
-    if let Entry::Occupied(mut cookies) = headers.entry(COOKIE) {
-        let joined_cookies = bstr::join(b"; ", cookies.iter());
-        match joined_cookies.try_into() {
-            Ok(value) => {
-                cookies.insert(value);
-            }
-            Err(e) => {
-                tracing::warn!("Failed to join cookies, removing header: {e}");
-                cookies.remove();
-            }
-        }
-    }
-}
-
 /// Sanitize a request's headers before it is forwarded upstream: drop per-hop
-/// and proxy-only headers (via rama's RFC 9110 helper) and coalesce duplicate
-/// `Cookie`s. Shared by the forward and reverse paths so they cannot drift on
-/// what reaches the origin.
+/// and proxy-only headers and coalesce duplicate `Cookie`s (both via rama's RFC
+/// 9110 / 6265 helpers). Shared by the forward and reverse paths so they cannot
+/// drift on what reaches the origin.
 pub(super) fn sanitize_forwarded_request_headers(headers: &mut HeaderMap) {
     remove_hop_by_hop_request_headers(headers);
-    join_cookie_headers(headers);
+    coalesce_cookie_headers(headers);
 }
 
 /// Configuration for creating a [`Proxy`].
