@@ -6,7 +6,7 @@ This page is intentionally practical, not promotional. Proxelar overlaps with se
 
 Use Proxelar when you want a local, scriptable, Rust-native traffic workbench with a TUI, web GUI, Lua hooks, request intercept, replay, and WebSocket frame inspection.
 
-Choose another tool when you need HTTP/3/QUIC interception, a large pre-existing addon inventory, polished desktop UX, or professional security testing workflows.
+If you need HTTP/3 and QUIC interception today, choose a tool that already provides it. Proxelar will add HTTP/3 and QUIC support later this year. Another tool may also be a better fit when you need a large pre-existing addon inventory, polished desktop UX, or professional security testing workflows.
 
 ## mitmproxy
 

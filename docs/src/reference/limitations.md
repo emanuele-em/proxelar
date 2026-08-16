@@ -20,7 +20,7 @@ Unknown TCP streams can be observed as directional chunks, but there is no proto
 
 ## HTTP versions
 
-HTTP/1.1 and HTTP/2 are intercepted and preserved end to end: the client and upstream legs negotiate their protocol independently over ALPN rather than every request being rewritten to HTTP/1.1, so an HTTP/2 client is proxied to an HTTP/2-capable upstream as HTTP/2. Use `--upstream-http-version` to control the upstream leg (`auto`, the default, negotiates and preserves the client's version; `http1` or `http2` forces one). HTTP/3/QUIC interception is not supported.
+HTTP/1.1 and HTTP/2 are intercepted and preserved end to end. With `--upstream-http-version auto`, the default, the incoming request version determines the upstream version (h1→h1, h2→h2); for HTTPS, upstream ALPN is constrained to that version. Use `http1` or `http2` to force a version instead. HTTP/3 and QUIC interception are not available today and are planned for later this year.
 
 ## HTTPS and mobile apps
 

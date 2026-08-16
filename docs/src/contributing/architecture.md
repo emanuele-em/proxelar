@@ -18,11 +18,12 @@ interfaces      engine       pure data
 5. `ProxyEvent` values fan out once to the selected interface and `SessionRecorder`.
 6. The recorder backs the REST API and clean-shutdown exporters.
 
-The upstream client is shared by forward, reverse, replay, and chaining paths. Preserve its normalization invariants: remove `Host`, join duplicate `Cookie` fields with `; `, strip hop-by-hop metadata, and pin upstream HTTP/1.1.
+Forward, reverse, replay, and chaining use the same outbound connector policy, but direct proxy requests are not pooled across transactions. Preserve the normalization invariants: remove `Host`, join duplicate `Cookie` fields with `; `, strip hop-by-hop metadata, and preserve the incoming HTTP version unless the user explicitly forces one.
 
 ## Extension points
 
-- `HttpHandler` provides library-level request/response interception.
+- `ProxyConfig` and `ProxyMode` provide the library-level embedding surface.
+- `InterceptConfig` and `InterceptDecision` provide interactive request interception.
 - `RouteRules` provides deterministic configuration without code.
 - Lua provides hot-reloaded request, response, and WebSocket frame hooks.
 - `ProxyEvent` is the stable internal observation stream used by interfaces and persistence.

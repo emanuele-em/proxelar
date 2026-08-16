@@ -1,6 +1,6 @@
 pub mod cert_server;
 
-use std::{path::Path, time::Duration};
+use std::{num::NonZeroU64, path::Path, time::Duration};
 
 use rama::bytes::Bytes;
 use rama::crypto::dep::boring::{pkey::PKey, x509::X509};
@@ -9,7 +9,7 @@ use rama::error::{BoxError, ErrorContext};
 use rama::net::address::Host;
 use rama::telemetry::tracing;
 use rama::tls::boring::server::{
-    BoringServerConfigExt as _, ServerCertIssuerData, ServerCertIssuerKind,
+    BoringServerConfigExt as _, CacheKind, ServerCertIssuerData, ServerCertIssuerKind,
 };
 use rama::tls::server::{
     CertificateAuthorityData, CertificateIdentity, CertificateKeyKind, CertificateSubject,
@@ -19,6 +19,9 @@ use rama::tls::server::{
 /// Per-host MITM leaf validity: one year, back-dated slightly for clock skew.
 const LEAF_LIFETIME: Duration = Duration::from_secs(365 * 24 * 60 * 60);
 const NOT_BEFORE_SKEW: Duration = Duration::from_secs(60);
+const LEAF_CACHE_MAX_SIZE: NonZeroU64 =
+    NonZeroU64::new(1_000).expect("leaf cache size is non-zero");
+const LEAF_CACHE_TTL: Duration = Duration::from_secs(365 * 24 * 60 * 60 / 2);
 
 /// A persistent local certificate authority that mints per-host leaf
 /// certificates for MITM interception.
@@ -86,6 +89,10 @@ impl Ssl {
                 validity: CertificateValidity::new(LEAF_LIFETIME, NOT_BEFORE_SKEW),
                 key_kind: CertificateKeyKind::EcP256,
             },
+        })
+        .with_cache_kind(CacheKind::MemCache {
+            max_size: LEAF_CACHE_MAX_SIZE,
+            ttl: Some(LEAF_CACHE_TTL),
         });
 
         Ok(Self {
@@ -167,6 +174,20 @@ mod tests {
         let second = Ssl::load_or_generate(directory.path()).unwrap();
         // The second instance reloads the persisted CA rather than regenerating.
         assert_eq!(first.ca_cert_pem(), second.ca_cert_pem());
+    }
+
+    #[test]
+    fn leaf_cache_preserves_proxelar_limits() {
+        let directory = tempfile::tempdir().unwrap();
+        let ssl = Ssl::load_or_generate(directory.path()).unwrap();
+
+        match ssl.issuer.cache_kind() {
+            CacheKind::MemCache { max_size, ttl } => {
+                assert_eq!(*max_size, LEAF_CACHE_MAX_SIZE);
+                assert_eq!(*ttl, Some(LEAF_CACHE_TTL));
+            }
+            CacheKind::Disabled => panic!("leaf certificate cache must be enabled"),
+        }
     }
 
     #[test]
