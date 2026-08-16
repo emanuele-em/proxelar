@@ -54,7 +54,10 @@ use crate::ca::{cert_server, Ssl};
 use crate::event::ProxyEvent;
 use crate::handler::{now_millis, CapturingHandler, RequestOrResponse};
 
-use super::{sanitize_response_for_client, UpstreamClient};
+use super::{
+    connector::{RawConnection, RawConnector},
+    sanitize_response_for_client, UpstreamClient,
+};
 
 /// Maximum payload size captured per WebSocket frame.
 const MAX_WS_FRAME_PAYLOAD: Option<usize> = crate::handler::DEFAULT_BODY_CAPTURE_LIMIT;
@@ -105,6 +108,20 @@ impl MitmConfig {
             exec: Executor::default(),
             listen_addr,
         }
+    }
+
+    pub(crate) fn raw_connector(&self) -> RawConnector {
+        self.client.raw_connector()
+    }
+
+    pub(crate) fn with_pinned_client(&self, connection: RawConnection) -> Result<Self, BoxError> {
+        Ok(Self {
+            handler: self.handler.clone(),
+            client: Arc::new(self.client.pinned(connection)?),
+            ca: Arc::clone(&self.ca),
+            exec: self.exec.clone(),
+            listen_addr: self.listen_addr,
+        })
     }
 
     async fn serve_request(&self, req: Request) -> Response {
@@ -281,6 +298,7 @@ where
 
     let raw_service = RawTunnelService {
         target: target.clone(),
+        client: Arc::clone(&cfg.client),
         event_tx: cfg.handler.event_tx_clone(),
     };
 
@@ -307,6 +325,7 @@ where
 #[derive(Clone)]
 struct RawTunnelService {
     target: HostWithPort,
+    client: Arc<UpstreamClient>,
     event_tx: mpsc::Sender<ProxyEvent>,
 }
 
@@ -319,7 +338,9 @@ where
 
     async fn serve(&self, mut io: IO) -> Result<Self::Output, Self::Error> {
         let target = self.target.to_string();
-        let mut upstream = tokio::net::TcpStream::connect(&target)
+        let mut upstream = self
+            .client
+            .connect_raw(self.target.clone())
             .await
             .with_context(|| format!("connect raw tunnel to {target}"))?;
         super::raw::tunnel(&mut io, &mut upstream, target, self.event_tx.clone())

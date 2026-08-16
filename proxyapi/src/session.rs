@@ -183,7 +183,7 @@ impl SessionRecorder {
     }
 
     pub fn from_session(session: TrafficSession) -> Result<Self, SessionError> {
-        validate_version(&session)?;
+        let session = migrate_session(session)?;
         let largest_id = session
             .flows
             .iter()
@@ -398,8 +398,7 @@ pub(crate) fn write_private(path: &Path, bytes: &[u8]) -> Result<(), std::io::Er
 pub fn load_session(path: impl AsRef<Path>) -> Result<TrafficSession, SessionError> {
     let bytes = fs::read(path)?;
     let session = serde_json::from_slice(&bytes)?;
-    validate_version(&session)?;
-    Ok(session)
+    migrate_session(session)
 }
 
 /// Recreate the public event stream represented by a stored session.
@@ -500,6 +499,23 @@ fn validate_version(session: &TrafficSession) -> Result<(), SessionError> {
         });
     }
     Ok(())
+}
+
+fn migrate_session(mut session: TrafficSession) -> Result<TrafficSession, SessionError> {
+    match session.version {
+        // Version 2 changed headers from name-keyed objects to ordered
+        // [name, value] tuples. proxyapi_models accepts both representations,
+        // so migration only needs to advance the version marker.
+        1 => session.version = SESSION_FORMAT_VERSION,
+        SESSION_FORMAT_VERSION => {}
+        _ => {
+            return Err(SessionError::UnsupportedVersion {
+                found: session.version,
+                supported: SESSION_FORMAT_VERSION,
+            });
+        }
+    }
+    Ok(session)
 }
 
 pub fn export_har(
@@ -1239,6 +1255,47 @@ mod tests {
                 [rama::http::header::AUTHORIZATION],
             "[REDACTED]"
         );
+    }
+
+    #[test]
+    fn loads_and_migrates_version_one_header_objects() {
+        let directory = tempdir().unwrap();
+        let path = directory.path().join("legacy.pxsession");
+        let mut value = serde_json::to_value(TrafficSession::new(123)).unwrap();
+        value["version"] = json!(1);
+        value["flows"] = json!([{
+            "id": 7,
+            "request": {
+                "method": "GET",
+                "uri": "http://example.test/",
+                "version": "HTTP/1.1",
+                "headers": {"x-repeat": ["one", "two"]},
+                "body": [],
+                "time": 123
+            },
+            "response": {
+                "status": 200,
+                "version": "HTTP/1.1",
+                "headers": {"content-type": "text/plain"},
+                "body": [111, 107],
+                "time": 124
+            }
+        }]);
+        std::fs::write(&path, serde_json::to_vec(&value).unwrap()).unwrap();
+
+        let session = load_session(&path).unwrap();
+
+        assert_eq!(session.version, SESSION_FORMAT_VERSION);
+        assert_eq!(
+            session.flows[0]
+                .request
+                .headers()
+                .get_all("x-repeat")
+                .iter()
+                .count(),
+            2
+        );
+        assert_eq!(session.flows[0].response.body().as_ref(), b"ok");
     }
 
     #[test]

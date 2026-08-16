@@ -1,10 +1,10 @@
 # Session format
 
-The native Proxelar session is JSON with a mandatory numeric `version`. Version 1 has this top-level shape:
+The native Proxelar session is JSON with a mandatory numeric `version`. Version 2 has this top-level shape:
 
 ```json
 {
-  "version": 1,
+  "version": 2,
   "created_at": 1784450000000,
   "flows": [],
   "websockets": [],
@@ -21,8 +21,10 @@ The native Proxelar session is JSON with a mandatory numeric `version`. Version 
 - `tcp_streams` contain target, opening time, ordered directional chunks, and closure state.
 - `dns_exchanges` contain the query name/type, parsed IP answers, override state, and completion state.
 - `udp_exchanges` contain the client and fixed target addresses, lossless request/response bytes, response-received state, and capture-limit flags.
-- duplicate HTTP header values are preserved.
+- HTTP headers are ordered `[name, value]` tuples, preserving duplicate fields
+  and HTTP/1 field order. Readers also accept the name-keyed header objects
+  written by version 1 sessions.
 
-Readers reject versions newer than the implementation supports. Additive collection fields use empty defaults so version-1 readers remain tolerant of data written before those collections existed. Any incompatible schema change must increment the version and provide an explicit migration or a clear rejection.
+Readers migrate version 1 sessions and reject versions newer than the implementation supports. Additive collection fields use empty defaults so readers remain tolerant of data written before those collections existed. Any incompatible schema change must increment the version and provide an explicit migration or a clear rejection.
 
 The format prioritizes fidelity and debuggability over compactness. It is not encrypted and native saves are not redacted. Use filesystem permissions appropriate for secrets-bearing traffic.

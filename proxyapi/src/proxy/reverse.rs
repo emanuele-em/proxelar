@@ -4,8 +4,11 @@ use std::sync::Arc;
 
 use rama::bytes::Bytes;
 
-use rama::http::{HeaderMap, HeaderValue, Request, Response, StatusCode};
+use rama::http::headers::{HeaderMapExt as _, Host as HostHeader};
+use rama::http::{HeaderMap, Request, Response, StatusCode};
+use rama::net::address::{Authority, HostWithOptPort};
 use rama::net::uri::Uri;
+use rama::net::Protocol;
 use rama::Service;
 
 use crate::handler::{CapturingHandler, RequestOrResponse};
@@ -87,36 +90,46 @@ impl Service<Request> for ReverseProxyService {
 /// Rewrite the request URI to point at the reverse-proxy target, preserving the
 /// original path and query, and update the `Host` header to match.
 fn rewrite_uri(mut req: Request, target: &Uri) -> Result<Request, ()> {
-    let Some(host) = target.host_str() else {
-        return Ok(req);
-    };
-    let scheme = target.scheme_str().unwrap_or("http");
-    let authority = match target.port_u16() {
-        Some(port) => format!("{host}:{port}"),
-        None => host.to_string(),
+    let Some(authority) = target.authority() else {
+        return Err(());
     };
 
-    let new_uri = if req.uri().query_or_empty().is_empty() {
-        format!("{scheme}://{authority}{}", req.uri().path_or_root())
-    } else {
-        format!(
-            "{scheme}://{authority}{}?{}",
-            req.uri().path_or_root(),
-            req.uri().query_or_empty()
-        )
+    // Replace typed URI components in-place so rama retains the request's
+    // exact path/query representation and renders IPv6 authority brackets.
+    // Userinfo is intentionally not copied to either the request target or
+    // Host header; reverse-proxy credentials belong in authorization headers.
+    let host = HostWithOptPort {
+        host: authority.host().into_owned(),
+        port: authority.port(),
     };
-
-    *req.uri_mut() = Uri::parse(new_uri).map_err(|_| ())?;
-
-    match HeaderValue::from_str(&authority) {
-        Ok(host_value) => {
-            req.headers_mut()
-                .insert(rama::http::header::HOST, host_value);
-        }
-        Err(error) => {
-            tracing::warn!("Invalid target authority for Host header: {error}");
-        }
-    }
+    let mut uri = req.uri().clone();
+    uri.set_scheme(target.scheme().cloned().unwrap_or(Protocol::HTTP));
+    uri.set_authority(Authority::new(host.clone()));
+    *req.uri_mut() = uri;
+    req.headers_mut().typed_insert(HostHeader(host));
 
     Ok(req)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use rama::http::Body;
+
+    #[test]
+    fn rewrite_uri_uses_typed_ipv6_authority() {
+        let request = Request::builder()
+            .uri("/items?view=full")
+            .body(Body::empty())
+            .unwrap();
+        let target: Uri = "http://[::1]:8080".parse().unwrap();
+
+        let request = rewrite_uri(request, &target).unwrap();
+
+        assert_eq!(
+            request.uri().to_string(),
+            "http://[::1]:8080/items?view=full"
+        );
+        assert_eq!(request.headers()[rama::http::header::HOST], "[::1]:8080");
+    }
 }

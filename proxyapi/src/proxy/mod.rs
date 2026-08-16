@@ -1,3 +1,4 @@
+mod connector;
 mod dns;
 pub(crate) mod forward;
 mod outbound;
@@ -21,8 +22,9 @@ use rama::http::layer::remove_header::{
 };
 use rama::http::server::HttpServer;
 use rama::http::{HeaderMap, Request, Response, Version};
+use rama::net::address::HostWithPort;
 use rama::net::address::ProxyAddress;
-use rama::net::client::ProxyRoute;
+use rama::net::client::{ConnectRequest, ConnectorService};
 use rama::net::uri::Uri;
 use rama::rt::Executor;
 use rama::service::BoxService;
@@ -79,10 +81,12 @@ impl FromStr for UpstreamHttpVersion {
 /// Upstream HTTP(S) client — rama's `EasyHttpWebClient` configured with
 /// BoringSSL TLS, optional upstream-proxy chaining, and no connection pool.
 /// Built once and shared; the wrapper only applies proxelar's per-request
-/// version policy and proxy route.
+/// version policy and exposes the same transport to raw tunnel paths.
 pub(crate) struct UpstreamClient {
     inner: BoxService<Request, Response, OpaqueError>,
-    proxy: Option<ProxyAddress>,
+    raw: connector::RawConnector,
+    tls_config: rama::tls::client::TlsClientConfig,
+    exec: Executor,
     version: UpstreamHttpVersion,
 }
 
@@ -99,37 +103,82 @@ impl UpstreamClient {
         proxy: Option<ProxyAddress>,
         version: UpstreamHttpVersion,
         exec: Executor,
-    ) -> Self {
-        let client = EasyHttpWebClient::connector_builder()
-            .with_default_transport_connector()
-            .with_default_dns_connector()
-            .with_tls_proxy_support_using_boringssl()
-            .with_proxy_support()
-            .with_tls_support_using_boringssl_and_default_http_version(tls_config, Version::HTTP_11)
-            .with_default_http_connector(exec)
-            // No pooling: as an observability MITM we want a fresh upstream
-            // connection per request (1:1), not connection reuse.
-            .without_connection_pool()
-            .build_client();
+    ) -> Result<Self, BoxError> {
+        let raw = connector::routed(proxy);
+        let inner = Self::build_http_client(raw.clone(), tls_config.clone(), exec.clone(), false)?;
 
-        Self {
-            inner: box_client(client),
-            proxy,
+        Ok(Self {
+            inner,
+            raw,
+            tls_config,
+            exec,
             version,
+        })
+    }
+
+    fn build_http_client(
+        raw: connector::RawConnector,
+        tls_config: rama::tls::client::TlsClientConfig,
+        exec: Executor,
+        pooled: bool,
+    ) -> Result<BoxService<Request, Response, OpaqueError>, BoxError> {
+        let builder = EasyHttpWebClient::connector_builder()
+            .with_custom_transport_connector(raw)
+            // DNS and proxy routing are already part of the shared raw
+            // connector, so the HTTP stack starts directly at TLS.
+            .with_dns_connector(())
+            .without_tls_proxy_support()
+            .without_proxy_support()
+            .with_tls_support_using_boringssl(tls_config)
+            .with_default_http_connector(exec);
+        if pooled {
+            Ok(box_client(
+                builder.try_with_default_connection_pool()?.build_client(),
+            ))
+        } else {
+            // Direct proxy traffic intentionally gets a fresh upstream
+            // connection per request. A SOCKS tunnel uses the pooled branch
+            // below solely to preserve its already-established 1:1 egress.
+            Ok(box_client(builder.without_connection_pool().build_client()))
         }
     }
 
-    fn apply_proxy(&self, req: &Request) {
-        if let Some(proxy) = &self.proxy {
-            req.extensions().insert(ProxyRoute::Proxy(proxy.clone()));
-        }
+    pub(crate) fn raw_connector(&self) -> connector::RawConnector {
+        self.raw.clone()
+    }
+
+    pub(crate) async fn connect_raw(
+        &self,
+        target: HostWithPort,
+    ) -> Result<connector::RawConnection, BoxError> {
+        let connection = self.raw.connect(ConnectRequest::new(target)).await?;
+        Ok(connection.conn)
+    }
+
+    pub(crate) fn pinned(&self, connection: connector::RawConnection) -> Result<Self, BoxError> {
+        let raw = connector::pinned(connection);
+        let inner = Self::build_http_client(
+            raw.clone(),
+            self.tls_config.clone(),
+            self.exec.clone(),
+            true,
+        )?;
+        Ok(Self {
+            inner,
+            raw,
+            tls_config: self.tls_config.clone(),
+            exec: self.exec.clone(),
+            version: self.version,
+        })
     }
 
     /// Forward a request upstream, applying the configured version policy.
     pub(crate) async fn serve(&self, req: Request) -> Result<Response, BoxError> {
-        self.apply_proxy(&req);
         match self.version {
-            UpstreamHttpVersion::Auto => {}
+            UpstreamHttpVersion::Auto => {
+                let version = req.version();
+                req.extensions().insert(TargetHttpVersion(version));
+            }
             UpstreamHttpVersion::Http1 => {
                 req.extensions().insert(TargetHttpVersion(Version::HTTP_11));
             }
@@ -142,7 +191,6 @@ impl UpstreamClient {
 
     /// Forward a WebSocket upgrade request upstream (always HTTP/1.1).
     pub(crate) async fn serve_upgrade(&self, req: Request) -> Result<Response, BoxError> {
-        self.apply_proxy(&req);
         req.extensions().insert(TargetHttpVersion(Version::HTTP_11));
         self.inner.serve(req).await.map_err(Into::into)
     }
@@ -316,7 +364,7 @@ impl Proxy {
             proxy_address,
             self.config.upstream_http_version,
             exec.clone(),
-        ));
+        )?);
 
         let handler = self.build_handler(
             #[cfg(feature = "scripting")]

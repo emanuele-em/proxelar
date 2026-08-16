@@ -273,7 +273,7 @@ async fn reverse_proxy_forwards_h2c_post_and_emits_http2_capture() {
 
     assert_eq!(response.version(), Version::HTTP_2);
     assert_eq!(response.status(), StatusCode::CREATED);
-    assert_eq!(response.headers()["x-upstream-version"], "HTTP/1.1");
+    assert_eq!(response.headers()["x-upstream-version"], "HTTP/2.0");
     assert_eq!(
         response
             .into_body()

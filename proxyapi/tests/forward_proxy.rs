@@ -19,8 +19,9 @@ use rama::http::server::HttpServer;
 use rama::http::ws::handshake::server::{ServerWebSocket, WebSocketAcceptor};
 use rama::http::ws::protocol::Role;
 use rama::http::ws::{AsyncWebSocket, Message};
-use rama::http::{header, Body, HeaderMap, Method, Request, Response, StatusCode, Version};
+use rama::http::{Body, HeaderMap, Method, Request, Response, StatusCode, Version};
 use rama::net::uri::Uri;
+use rama::net::AuthorityInputExt as _;
 use rama::rt::Executor;
 use rama::service::service_fn;
 use rama::tcp::server::TcpListener as RamaTcpListener;
@@ -123,6 +124,44 @@ async fn forward_proxy_forwards_absolute_http_and_emits_request_complete() {
 }
 
 #[tokio::test]
+async fn forward_proxy_routes_plain_http_through_configured_connect_proxy() {
+    let (upstream_addr, upstream_shutdown) = start_upstream_server().await;
+    let (chain_addr, observed_target, chain_shutdown) = start_http_connect_proxy().await;
+    let upstream_proxy = format!("http://{chain_addr}").parse().unwrap();
+    let (proxy_addr, shutdown_tx, handle, _event_rx, _ca_dir) =
+        start_forward_proxy_with_upstream(Some(upstream_proxy)).await;
+
+    let raw_response = send_raw_request(
+        proxy_addr,
+        format!(
+            "GET http://{upstream_addr}/through-connect-proxy HTTP/1.1\r\n\
+             Host: {upstream_addr}\r\n\
+             Connection: close\r\n\
+             \r\n"
+        ),
+    )
+    .await;
+
+    assert!(
+        raw_response.starts_with("HTTP/1.1 200 OK"),
+        "{raw_response}"
+    );
+    assert!(raw_response.ends_with("forward response"), "{raw_response}");
+    assert_eq!(
+        tokio::time::timeout(std::time::Duration::from_secs(5), observed_target)
+            .await
+            .expect("upstream proxy did not observe CONNECT")
+            .unwrap(),
+        upstream_addr.to_string()
+    );
+
+    let _ = shutdown_tx.send(());
+    let _ = chain_shutdown.send(());
+    let _ = upstream_shutdown.send(());
+    assert!(handle.await.unwrap().is_ok());
+}
+
+#[tokio::test]
 async fn forward_proxy_forwards_h2c_absolute_http_and_emits_http2_capture() {
     let (upstream_addr, upstream_shutdown) = start_upstream_server().await;
     let (proxy_addr, shutdown_tx, handle, mut event_rx, _ca_dir) = start_forward_proxy().await;
@@ -147,7 +186,7 @@ async fn forward_proxy_forwards_h2c_absolute_http_and_emits_http2_capture() {
         response.headers()["x-upstream-host"],
         upstream_addr.to_string()
     );
-    assert_eq!(response.headers()["x-upstream-version"], "HTTP/1.1");
+    assert_eq!(response.headers()["x-upstream-version"], "HTTP/2.0");
     assert_eq!(
         response
             .into_body()
@@ -345,7 +384,7 @@ async fn forward_proxy_h2_connect_tunnels_h2c_requests() {
         response.headers()["x-upstream-path-query"],
         "/h2-tunnel?via=connect"
     );
-    assert_eq!(response.headers()["x-upstream-version"], "HTTP/1.1");
+    assert_eq!(response.headers()["x-upstream-version"], "HTTP/2.0");
     assert_eq!(
         response
             .into_body()
@@ -739,6 +778,18 @@ async fn start_forward_proxy() -> (
     mpsc::Receiver<ProxyEvent>,
     tempfile::TempDir,
 ) {
+    start_forward_proxy_with_upstream(None).await
+}
+
+async fn start_forward_proxy_with_upstream(
+    upstream_proxy: Option<proxyapi::UpstreamProxyConfig>,
+) -> (
+    SocketAddr,
+    tokio::sync::oneshot::Sender<()>,
+    tokio::task::JoinHandle<Result<(), proxyapi::Error>>,
+    mpsc::Receiver<ProxyEvent>,
+    tempfile::TempDir,
+) {
     let proxy_addr = reserve_loopback_addr().await;
     let ca_dir = tempfile::tempdir().unwrap();
     let (event_tx, event_rx) = mpsc::channel::<ProxyEvent>(100);
@@ -756,7 +807,10 @@ async fn start_forward_proxy() -> (
         replay_rx: None,
     };
 
-    let proxy = Proxy::new(config);
+    let proxy = match upstream_proxy {
+        Some(upstream) => Proxy::new(config).with_upstream_proxy(upstream),
+        None => Proxy::new(config),
+    };
     let (shutdown_tx, shutdown_rx) = tokio::sync::oneshot::channel();
     let handle = tokio::spawn(async move {
         proxy
@@ -905,6 +959,50 @@ async fn start_raw_echo_server() -> (SocketAddr, tokio::sync::oneshot::Sender<()
     (addr, shutdown_tx)
 }
 
+async fn start_http_connect_proxy() -> (
+    SocketAddr,
+    tokio::sync::oneshot::Receiver<String>,
+    tokio::sync::oneshot::Sender<()>,
+) {
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    let (target_tx, target_rx) = tokio::sync::oneshot::channel();
+    let (shutdown_tx, mut shutdown_rx) = tokio::sync::oneshot::channel();
+    tokio::spawn(async move {
+        tokio::select! {
+            accepted = listener.accept() => {
+                let (mut ingress, _) = accepted.unwrap();
+                let request = read_http_head(&mut ingress).await;
+                let target = request
+                    .lines()
+                    .next()
+                    .and_then(|line| line.split_whitespace().nth(1))
+                    .unwrap()
+                    .to_owned();
+                let mut egress = TcpStream::connect(&target).await.unwrap();
+                ingress
+                    .write_all(b"HTTP/1.1 200 Connection Established\r\n\r\n")
+                    .await
+                    .unwrap();
+                let _ = target_tx.send(target);
+                let _ = tokio::io::copy_bidirectional(&mut ingress, &mut egress).await;
+            }
+            _ = &mut shutdown_rx => {}
+        }
+    });
+    (addr, target_rx, shutdown_tx)
+}
+
+async fn read_http_head(stream: &mut TcpStream) -> String {
+    let mut bytes = Vec::new();
+    while !bytes.ends_with(b"\r\n\r\n") {
+        let mut byte = [0];
+        stream.read_exact(&mut byte).await.unwrap();
+        bytes.push(byte[0]);
+    }
+    String::from_utf8(bytes).unwrap()
+}
+
 async fn start_websocket_upstream_server() -> (SocketAddr, tokio::sync::oneshot::Sender<()>) {
     let exec = Executor::default();
     let listener = RamaTcpListener::bind_address("127.0.0.1:0", exec.clone())
@@ -947,11 +1045,8 @@ async fn upstream_response(req: Request) -> Result<Response, Infallible> {
         )
     };
     let host = req
-        .headers()
-        .get(header::HOST)
-        .and_then(|value| value.to_str().ok())
-        .unwrap_or("")
-        .to_owned();
+        .authority()
+        .map_or_else(String::new, |value| value.to_string());
     let version = format!("{:?}", req.version());
 
     Ok(Response::builder()

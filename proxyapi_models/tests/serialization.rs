@@ -126,6 +126,40 @@ fn test_proxied_request_multiple_headers_same_key() {
 }
 
 #[test]
+fn headers_serialize_as_ordered_pairs_and_accept_legacy_objects() {
+    let mut headers = HeaderMap::new();
+    headers.append("x-first", "one".parse().unwrap());
+    headers.append("x-second", "middle".parse().unwrap());
+    headers.append("x-first", "two".parse().unwrap());
+    let request = ProxiedRequest::new(
+        Method::GET,
+        "https://example.com/".parse().unwrap(),
+        Version::HTTP_11,
+        headers,
+        Bytes::new(),
+        0,
+    );
+
+    let mut value = serde_json::to_value(&request).unwrap();
+    assert_eq!(
+        value["headers"],
+        serde_json::json!([
+            ["x-first", "one"],
+            ["x-second", "middle"],
+            ["x-first", "two"]
+        ])
+    );
+
+    value["headers"] = serde_json::json!({
+        "content-type": "text/plain",
+        "set-cookie": ["a=1", "b=2"]
+    });
+    let decoded: ProxiedRequest = serde_json::from_value(value).unwrap();
+    assert_eq!(decoded.headers()["content-type"], "text/plain");
+    assert_eq!(decoded.headers().get_all("set-cookie").iter().count(), 2);
+}
+
+#[test]
 fn test_proxied_response_large_body() {
     let body = Bytes::from(vec![0xABu8; 1024 * 1024]); // 1MB
     let res = ProxiedResponse::new(

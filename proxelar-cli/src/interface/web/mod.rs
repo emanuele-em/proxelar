@@ -109,19 +109,36 @@ enum ClientHeaders {
 #[derive(Deserialize)]
 #[serde(untagged)]
 enum HeaderValues {
-    One(String),
-    Many(Vec<String>),
+    One(ClientHeaderValue),
+    Many(Vec<ClientHeaderValue>),
+}
+
+#[derive(Deserialize)]
+#[serde(untagged)]
+enum ClientHeaderValue {
+    Text(String),
+    Bytes(Vec<u8>),
 }
 
 #[derive(Deserialize)]
 struct ClientHeader {
     name: String,
-    value: String,
+    value: ClientHeaderValue,
+}
+
+impl ClientHeaderValue {
+    fn try_into_header_value(self) -> Result<rama::http::HeaderValue, String> {
+        match self {
+            Self::Text(value) => rama::http::HeaderValue::from_str(&value),
+            Self::Bytes(value) => rama::http::HeaderValue::from_bytes(&value),
+        }
+        .map_err(|error| format!("invalid header value: {error}"))
+    }
 }
 
 impl ClientHeaders {
     fn try_into_header_map(self) -> Result<HeaderMap, String> {
-        let values: Vec<(String, String)> = match self {
+        let values: Vec<(String, ClientHeaderValue)> = match self {
             Self::Map(headers) => headers
                 .into_iter()
                 .flat_map(|(name, values)| match values {
@@ -141,8 +158,7 @@ impl ClientHeaders {
         for (name, value) in values {
             let name = rama::http::header::HeaderName::from_bytes(name.as_bytes())
                 .map_err(|error| format!("invalid header name: {error}"))?;
-            let value = rama::http::header::HeaderValue::from_str(&value)
-                .map_err(|error| format!("invalid header value: {error}"))?;
+            let value = value.try_into_header_value()?;
             headers.append(name, value);
         }
         Ok(headers)
@@ -1284,6 +1300,37 @@ mod tests {
             "text/plain"
         );
         assert_eq!(req.body().as_ref(), b"again");
+    }
+
+    #[tokio::test]
+    async fn replay_accepts_ordered_header_pairs_without_losing_duplicates() {
+        let (state, _broadcast_rx, mut replay_rx) = test_state();
+
+        handle_client_message(
+            r#"{
+                "type":"Replay",
+                "method":"GET",
+                "uri":"http://api.test/ordered",
+                "headers":[
+                    ["x-repeat","one"],
+                    ["x-opaque",[128,255]],
+                    ["x-repeat","two"]
+                ],
+                "body":""
+            }"#,
+            &state,
+        )
+        .await;
+
+        let request = replay_rx.recv().await.unwrap();
+        let repeated = request
+            .headers()
+            .get_all("x-repeat")
+            .iter()
+            .map(|value| value.as_bytes())
+            .collect::<Vec<_>>();
+        assert_eq!(repeated, [b"one".as_slice(), b"two".as_slice()]);
+        assert_eq!(request.headers()["x-opaque"].as_bytes(), &[128, 255]);
     }
 
     #[tokio::test]
