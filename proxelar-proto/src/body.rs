@@ -41,6 +41,7 @@ impl CollectedBody {
 pub struct ProxyBody {
     inner: Pin<Box<dyn Stream<Item = BodyResult> + Send + 'static>>,
     exact_length: Option<u64>,
+    may_have_trailers: bool,
 }
 
 impl ProxyBody {
@@ -51,6 +52,7 @@ impl ProxyBody {
         Self {
             inner: Box::pin(stream),
             exact_length: None,
+            may_have_trailers: true,
         }
     }
 
@@ -71,9 +73,13 @@ impl ProxyBody {
             Ok(BodyFrame::Trailers(_)) => Some(length),
             Err(_) => None,
         });
+        let may_have_trailers = frames
+            .iter()
+            .any(|frame| matches!(frame, Ok(BodyFrame::Trailers(_))));
         Self {
             inner: Box::pin(ReadyFrames { frames }),
             exact_length,
+            may_have_trailers,
         }
     }
 
@@ -88,6 +94,14 @@ impl ProxyBody {
     /// Return the exact data length when the producer can determine it upfront.
     pub const fn exact_length(&self) -> Option<u64> {
         self.exact_length
+    }
+
+    /// Return whether the producer may emit a trailer block.
+    ///
+    /// Generic streams are conservative because inspecting them would consume
+    /// data. Ready bodies provide an exact hint.
+    pub const fn may_have_trailers(&self) -> bool {
+        self.may_have_trailers
     }
 
     /// Collect a body while retaining ordered trailers.
