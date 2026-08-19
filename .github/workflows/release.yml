@@ -60,11 +60,11 @@ jobs:
 
       - name: Build (cross)
         if: matrix.cross
-        run: cross build --release --locked --target ${{ matrix.target }}
+        run: cross build -p proxelar --release --locked --features http3 --target ${{ matrix.target }}
 
       - name: Build (native)
         if: "!matrix.cross"
-        run: cargo build --release --locked --target ${{ matrix.target }}
+        run: cargo build -p proxelar --release --locked --features http3 --target ${{ matrix.target }}
 
       - name: Package (unix)
         if: matrix.archive == 'tar.gz'
@@ -178,6 +178,12 @@ jobs:
 
       - name: Publish proxyapi_models
         run: cargo publish -p proxyapi_models --token ${{ secrets.CARGO_REGISTRY_TOKEN }}
+
+      - name: Wait for crates.io index
+        run: sleep 30
+
+      - name: Publish proxelar-proto
+        run: cargo publish -p proxelar-proto --token ${{ secrets.CARGO_REGISTRY_TOKEN }}
 
       - name: Wait for crates.io index
         run: sleep 30
