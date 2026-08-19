@@ -1,13 +1,14 @@
 use std::future::poll_fn;
 use std::sync::Arc;
 
+use base64::Engine as _;
 use http::uri::{Authority, PathAndQuery};
-use http::{Uri, Version};
+use http::{Method, Uri, Version};
 use proxelar_proto::http1::{
     BoxIo, ConnectionConfig, Http1Client, Http1ClientResponse, Http1Connector, Http1Pool, PoolKey,
 };
 use proxelar_proto::http2::{ConnectionConfig as H2ConnectionConfig, H2Client};
-use proxelar_proto::{BoxFuture, ErrorKind, ProtocolError, ProxyRequest};
+use proxelar_proto::{BoxFuture, ErrorKind, ProtocolError, ProxyBody, ProxyRequest, ProxyResponse};
 use rustls::pki_types::ServerName;
 use tokio_rustls::TlsConnector;
 use tower_service::Service as _;
@@ -102,6 +103,11 @@ enum NegotiatedClient {
     Http2(H2Client),
 }
 
+pub(super) enum NativeWebSocketResponse {
+    Http1(Http1ClientResponse),
+    Http2(ProxyResponse),
+}
+
 impl NativeUpstream {
     pub(super) fn shared(pool: Arc<NativePool>, route: Option<String>) -> Self {
         Self::Shared { pool, route }
@@ -170,6 +176,26 @@ impl NativeUpstream {
             Self::Pinned { client, .. } => client.send_request_with_upgrade(request).await,
             Self::Negotiated(_) => unreachable!("negotiated upstream returned before H1 dispatch"),
         }
+    }
+
+    pub(super) async fn send_websocket(
+        &self,
+        mut request: ProxyRequest,
+    ) -> Result<NativeWebSocketResponse, ProtocolError> {
+        let authority = request
+            .head
+            .uri
+            .authority()
+            .cloned()
+            .ok_or_else(|| malformed("upstream request has no authority"))?;
+        if let Self::Negotiated(upstream) = self {
+            return upstream.send_websocket(request, authority).await;
+        }
+
+        prepare_http1_websocket_upgrade(&mut request)?;
+        self.send(request, true)
+            .await
+            .map(NativeWebSocketResponse::Http1)
     }
 }
 
@@ -252,6 +278,79 @@ impl NegotiatedUpstream {
             )),
         }
     }
+
+    async fn send_websocket(
+        &self,
+        mut request: ProxyRequest,
+        authority: Authority,
+    ) -> Result<NativeWebSocketResponse, ProtocolError> {
+        let client = {
+            let mut state = self.client.lock().await;
+            if let Some(client) = state.as_ref() {
+                client.clone()
+            } else {
+                let client = self.connect(authority.clone()).await?;
+                *state = Some(client.clone());
+                client
+            }
+        };
+
+        match client {
+            NegotiatedClient::Http1 { client, authority } => {
+                prepare_http1_websocket_upgrade(&mut request)?;
+                prepare_http1_request(&mut request, &authority, true)?;
+                client
+                    .send_request_with_upgrade(request)
+                    .await
+                    .map(NativeWebSocketResponse::Http1)
+            }
+            NegotiatedClient::Http2(client) => {
+                client.ensure_extended_connect().await?;
+                client
+                    .send_request(request)
+                    .await
+                    .map(NativeWebSocketResponse::Http2)
+            }
+        }
+    }
+}
+
+fn prepare_http1_websocket_upgrade(request: &mut ProxyRequest) -> Result<(), ProtocolError> {
+    request.body = ProxyBody::empty();
+    request.head.method = Method::GET;
+    request.head.version = Version::HTTP_11;
+    for name in [
+        b":protocol".as_slice(),
+        b"connection".as_slice(),
+        b"upgrade".as_slice(),
+        b"sec-websocket-key".as_slice(),
+        b"sec-websocket-accept".as_slice(),
+        b"sec-websocket-extensions".as_slice(),
+    ] {
+        request.head.headers.remove(name);
+    }
+    let mut nonce = [0_u8; 16];
+    getrandom::fill(&mut nonce)
+        .map_err(|error| ProtocolError::new(ErrorKind::Io, error.to_string()))?;
+    request
+        .head
+        .headers
+        .set("connection", "Upgrade")
+        .map_err(|error| malformed(error.to_string()))?;
+    request
+        .head
+        .headers
+        .set("upgrade", "websocket")
+        .map_err(|error| malformed(error.to_string()))?;
+    request
+        .head
+        .headers
+        .set(
+            "sec-websocket-key",
+            base64::engine::general_purpose::STANDARD.encode(nonce),
+        )
+        .map_err(|error| malformed(error.to_string()))?;
+    Ok(())
 }
 
 fn prepare_http1_request(

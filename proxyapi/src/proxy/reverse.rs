@@ -835,7 +835,8 @@ mod tests {
             cert_path,
             key_path,
         );
-        let (tunnel, request_body, response_body) = super::super::http3::websocket_body_tunnel();
+        let (tunnel, request_body, response_body) =
+            proxelar_proto::http2::websocket_body_tunnel(64 * 1024);
         let mut headers = proxyapi_models::HeaderBlock::new();
         headers.add(":protocol", "websocket").unwrap();
         headers.add("sec-websocket-version", "13").unwrap();

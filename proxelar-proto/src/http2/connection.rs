@@ -9,7 +9,7 @@ use futures_core::Stream;
 use futures_util::StreamExt as _;
 use h2::{Ping, PingPong, Reason, RecvStream, SendStream};
 use tokio::io::{AsyncRead, AsyncReadExt as _, AsyncWrite, AsyncWriteExt as _, DuplexStream};
-use tokio::sync::{mpsc, Mutex};
+use tokio::sync::{mpsc, oneshot, Mutex};
 
 use super::{
     from_h2_request, from_h2_response, from_h2_trailers, map_h2_error, to_h2_request,
@@ -139,6 +139,60 @@ pub fn body_tunnel(mut inbound: ProxyBody, capacity: usize) -> (DuplexStream, Pr
         ProxyBody::new(BodyChannel {
             receiver: outbound_rx,
         }),
+    )
+}
+
+/// Bridge a bidirectional byte stream to an outbound request body and a later
+/// inbound response body. This is the shape used by extended CONNECT.
+pub fn websocket_body_tunnel(
+    capacity: usize,
+) -> (DuplexStream, ProxyBody, oneshot::Sender<ProxyBody>) {
+    let capacity = capacity.max(1);
+    let (application, bridge) = tokio::io::duplex(capacity);
+    let (mut bridge_reader, mut bridge_writer) = tokio::io::split(bridge);
+    let (outbound_tx, outbound_rx) = mpsc::channel(capacity.div_ceil(16 * 1024).max(1));
+    let (inbound_tx, inbound_rx) = oneshot::channel::<ProxyBody>();
+
+    tokio::spawn(async move {
+        let mut output = vec![0_u8; capacity.min(16 * 1024)];
+        loop {
+            match bridge_reader.read(&mut output).await {
+                Ok(0) | Err(_) => break,
+                Ok(read) => {
+                    if outbound_tx
+                        .send(Ok(BodyFrame::Data(Bytes::copy_from_slice(&output[..read]))))
+                        .await
+                        .is_err()
+                    {
+                        break;
+                    }
+                }
+            }
+        }
+    });
+    tokio::spawn(async move {
+        if let Ok(mut inbound) = inbound_rx.await {
+            while let Some(frame) = inbound.next().await {
+                match frame {
+                    Ok(BodyFrame::Data(data)) => {
+                        if bridge_writer.write_all(&data).await.is_err() {
+                            break;
+                        }
+                    }
+                    Ok(BodyFrame::Trailers(_)) | Err(_) => break,
+                }
+            }
+        }
+        let _ = bridge_writer.shutdown().await;
+    });
+
+    (
+        application,
+        ProxyBody::new(BodyChannel {
+            receiver: outbound_rx,
+        })
+        .with_trailer_hint(false),
+        inbound_tx,
     )
 }
 

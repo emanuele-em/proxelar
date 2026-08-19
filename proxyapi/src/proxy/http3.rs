@@ -19,9 +19,8 @@ use proxelar_proto::{
 use proxyapi_models::{HeaderBlock, ProxiedResponse};
 use rustls::client::danger::ServerCertVerifier;
 use rustls::pki_types::{CertificateDer, ServerName, UnixTime};
-use tokio::io::{AsyncReadExt as _, AsyncWriteExt as _, DuplexStream};
 use tokio::net::UdpSocket;
-use tokio::sync::{mpsc, oneshot, Mutex as AsyncMutex};
+use tokio::sync::{oneshot, Mutex as AsyncMutex};
 use tokio_quiche::http3::driver::{
     ClientH3Controller, ClientH3Event, H3Event, InboundFrame, InboundFrameStream,
     IncomingH3Headers, NewClientRequest, OutboundFrame, OutboundFrameSender, ServerH3Controller,
@@ -595,7 +594,8 @@ where
     }
 
     let inbound = std::mem::replace(&mut request.body, ProxyBody::empty());
-    let (server_tunnel, upstream_body, upstream_response) = websocket_body_tunnel();
+    let (server_tunnel, upstream_body, upstream_response) =
+        proxelar_proto::http2::websocket_body_tunnel(WEBSOCKET_TUNNEL_CAPACITY);
     request.body = upstream_body;
     let response = match send_upstream(request).await {
         Ok(response) => response,
@@ -663,64 +663,6 @@ fn set_header(
     headers
         .set(name, value)
         .map_err(|error| malformed(error.to_string()))
-}
-
-pub(super) fn websocket_body_tunnel() -> (DuplexStream, ProxyBody, oneshot::Sender<ProxyBody>) {
-    let (application, bridge) = tokio::io::duplex(WEBSOCKET_TUNNEL_CAPACITY);
-    let (mut bridge_reader, mut bridge_writer) = tokio::io::split(bridge);
-    let (outbound_tx, outbound_rx) = mpsc::channel(4);
-    let (inbound_tx, inbound_rx) = oneshot::channel::<ProxyBody>();
-
-    tokio::spawn(async move {
-        let mut output = vec![0_u8; 16 * 1024];
-        loop {
-            match bridge_reader.read(&mut output).await {
-                Ok(0) | Err(_) => break,
-                Ok(read) => {
-                    if outbound_tx
-                        .send(Ok(BodyFrame::Data(Bytes::copy_from_slice(&output[..read]))))
-                        .await
-                        .is_err()
-                    {
-                        break;
-                    }
-                }
-            }
-        }
-    });
-    tokio::spawn(async move {
-        if let Ok(mut inbound) = inbound_rx.await {
-            while let Some(frame) = inbound.next().await {
-                match frame {
-                    Ok(BodyFrame::Data(data)) => {
-                        if bridge_writer.write_all(&data).await.is_err() {
-                            break;
-                        }
-                    }
-                    Ok(BodyFrame::Trailers(_)) | Err(_) => break,
-                }
-            }
-        }
-        let _ = bridge_writer.shutdown().await;
-    });
-
-    let outbound = ProxyBody::new(H3WebSocketBodyStream {
-        receiver: outbound_rx,
-    })
-    .with_trailer_hint(false);
-    (application, outbound, inbound_tx)
-}
-
-struct H3WebSocketBodyStream {
-    receiver: mpsc::Receiver<Result<BodyFrame, ProtocolError>>,
-}
-
-impl Stream for H3WebSocketBodyStream {
-    type Item = Result<BodyFrame, ProtocolError>;
-
-    fn poll_next(mut self: Pin<&mut Self>, context: &mut Context<'_>) -> Poll<Option<Self::Item>> {
-        self.receiver.poll_recv(context)
-    }
 }
 
 type ResponseSender = oneshot::Sender<Result<ProxyResponse, ProtocolError>>;

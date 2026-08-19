@@ -1,11 +1,12 @@
 use std::net::SocketAddr;
 use std::sync::Arc;
 
-use base64::Engine as _;
 use bytes::Bytes;
 use http::uri::{Authority, Scheme};
 use http::{Method, StatusCode, Uri, Version};
-use proxelar_proto::http2::{body_tunnel, serve_connection, ConnectionConfig};
+use proxelar_proto::http2::{
+    body_tunnel, serve_connection, websocket_body_tunnel, ConnectionConfig,
+};
 use proxelar_proto::{
     BoxFuture, ErrorKind, HttpService, ProtocolError, ProxyRequest, ProxyResponse, ResponseHead,
 };
@@ -19,10 +20,10 @@ use crate::{HttpContext, HttpHandler, RequestOrResponse};
 
 use super::forward::{
     handle_cert_protocol_request, is_cert_protocol_request, is_direct_cert_protocol_request,
-    is_h2_preface, pump_native_websocket, reconstruct_protocol_uri, serve_native_stream,
-    sniff_stream_protocol, StreamProtocol,
+    is_h2_preface, pump_native_websocket, pump_websocket_streams, reconstruct_protocol_uri,
+    serve_native_stream, sniff_stream_protocol, StreamProtocol,
 };
-use super::http1::{NativePool, NativeUpstream};
+use super::http1::{NativePool, NativeUpstream, NativeWebSocketResponse};
 use super::BoxError;
 
 const TUNNEL_BUFFER_CAPACITY: usize = 64 * 1024;
@@ -329,31 +330,10 @@ async fn handle_extended_websocket(
     }
 
     let inbound = std::mem::replace(&mut request.body, crate::ProxyBody::empty());
-    request.head.method = Method::GET;
-    request.head.version = Version::HTTP_11;
-    for name in [
-        b":protocol".as_slice(),
-        b"connection".as_slice(),
-        b"upgrade".as_slice(),
-        b"sec-websocket-key".as_slice(),
-        b"sec-websocket-accept".as_slice(),
-        b"sec-websocket-extensions".as_slice(),
-    ] {
-        request.head.headers.remove(name);
-    }
-    let mut nonce = [0_u8; 16];
-    if let Err(error) = getrandom::fill(&mut nonce) {
-        return Err(ProtocolError::new(ErrorKind::Io, error.to_string()));
-    }
-    set_header(&mut request.head.headers, "connection", "Upgrade")?;
-    set_header(&mut request.head.headers, "upgrade", "websocket")?;
-    set_header(
-        &mut request.head.headers,
-        "sec-websocket-key",
-        base64::engine::general_purpose::STANDARD.encode(nonce),
-    )?;
-
-    let mut result = match upstream.send(request, true).await {
+    let (server_tunnel, upstream_body, upstream_response) =
+        websocket_body_tunnel(TUNNEL_BUFFER_CAPACITY);
+    request.body = upstream_body;
+    let result = match upstream.send_websocket(request).await {
         Ok(result) => result,
         Err(error) => {
             tracing::error!("RFC 8441 upstream handshake failed: {error}");
@@ -364,33 +344,65 @@ async fn handle_extended_websocket(
             ));
         }
     };
-    if result.response.head.status != StatusCode::SWITCHING_PROTOCOLS {
-        return Ok(handler.handle_response(&context, result.response).await);
+    enum UpstreamTunnel {
+        Http1(proxelar_proto::http1::UpgradeReceiver),
+        Http2(tokio::io::DuplexStream),
     }
-    let Some(upstream_upgrade) = result.upgrade.take() else {
-        return Ok(handler.synthetic_protocol_response(
-            StatusCode::BAD_GATEWAY,
-            http::HeaderMap::new(),
-            Bytes::from_static(b"Bad Gateway: missing WebSocket upgrade"),
-        ));
+
+    let (head, upstream_tunnel) = match result {
+        NativeWebSocketResponse::Http1(mut result) => {
+            if result.response.head.status != StatusCode::SWITCHING_PROTOCOLS {
+                return Ok(handler.handle_response(&context, result.response).await);
+            }
+            let Some(upgrade) = result.upgrade.take() else {
+                return Ok(handler.synthetic_protocol_response(
+                    StatusCode::BAD_GATEWAY,
+                    http::HeaderMap::new(),
+                    Bytes::from_static(b"Bad Gateway: missing WebSocket upgrade"),
+                ));
+            };
+            let (mut head, _) = result.response.into_parts();
+            for name in [
+                b"connection".as_slice(),
+                b"upgrade".as_slice(),
+                b"sec-websocket-accept".as_slice(),
+                b"content-length".as_slice(),
+                b"transfer-encoding".as_slice(),
+            ] {
+                head.headers.remove(name);
+            }
+            head.status = StatusCode::OK;
+            head.version = Version::HTTP_2;
+            (head, UpstreamTunnel::Http1(upgrade))
+        }
+        NativeWebSocketResponse::Http2(response) => {
+            if !response.head.status.is_success() {
+                return Ok(handler.handle_response(&context, response).await);
+            }
+            let (mut head, body) = response.into_parts();
+            if upstream_response.send(body).is_err() {
+                return Ok(handler.synthetic_protocol_response(
+                    StatusCode::BAD_GATEWAY,
+                    http::HeaderMap::new(),
+                    Bytes::from_static(b"Bad Gateway: WebSocket response stream unavailable"),
+                ));
+            }
+            for name in [
+                b"content-length".as_slice(),
+                b"transfer-encoding".as_slice(),
+            ] {
+                head.headers.remove(name);
+            }
+            head.version = Version::HTTP_2;
+            (head, UpstreamTunnel::Http2(server_tunnel))
+        }
     };
 
     let (client_tunnel, outbound) = body_tunnel(inbound, TUNNEL_BUFFER_CAPACITY);
-    for name in [
-        b"connection".as_slice(),
-        b"upgrade".as_slice(),
-        b"sec-websocket-accept".as_slice(),
-        b"content-length".as_slice(),
-        b"transfer-encoding".as_slice(),
-    ] {
-        result.response.head.headers.remove(name);
-    }
-    result.response.head.status = StatusCode::OK;
-    result.response.head.version = Version::HTTP_2;
     let connected = ProxiedResponse::new(
-        StatusCode::OK,
+        head.status,
         Version::HTTP_2,
-        result.response.head.headers.clone(),
+        head.headers.clone(),
         Bytes::new(),
         crate::handler::now_millis(),
     );
@@ -405,23 +417,28 @@ async fn handle_extended_websocket(
         });
     }
     tokio::spawn(async move {
-        match upstream_upgrade.wait().await {
-            Ok(server) => {
-                pump_native_websocket(
-                    connection_id,
-                    proxelar_proto::http1::UpgradedIo {
-                        io: client_tunnel,
-                        read_ahead: Bytes::new(),
-                    },
-                    server,
-                    handler,
-                )
-                .await;
+        match upstream_tunnel {
+            UpstreamTunnel::Http1(upgrade) => match upgrade.wait().await {
+                Ok(server) => {
+                    pump_native_websocket(
+                        connection_id,
+                        proxelar_proto::http1::UpgradedIo {
+                            io: client_tunnel,
+                            read_ahead: Bytes::new(),
+                        },
+                        server,
+                        handler,
+                    )
+                    .await;
+                }
+                Err(error) => tracing::debug!("RFC 8441 upstream upgrade failed: {error}"),
+            },
+            UpstreamTunnel::Http2(server) => {
+                pump_websocket_streams(connection_id, client_tunnel, server, handler).await;
             }
-            Err(error) => tracing::debug!("RFC 8441 upstream upgrade failed: {error}"),
         }
     });
-    Ok(ProxyResponse::new(result.response.head, outbound))
+    Ok(ProxyResponse::new(head, outbound))
 }
 
 fn is_extended_websocket(request: &ProxyRequest) -> bool {
