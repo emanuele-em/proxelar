@@ -72,7 +72,18 @@ curl -H "Authorization: Bearer $PROXELAR_TOKEN" \
 | `PUT /api/v1/intercept` | Set intercept with `{ "enabled": true }` |
 | `POST /api/v1/intercept/{id}` | Resolve with `forward`, `drop`, or `modify` |
 
-For a `modify` decision, `body` can be a UTF-8 string or `{ "bytes": [0, 255, ...] }` for lossless binary editing. Header input accepts either a JSON object (string or string-array values) or an ordered list of `{ "name", "value" }` entries when duplicate order matters.
+For a `modify` decision, `body` can be a UTF-8 string or `{ "bytes": [0, 255, ...] }` for lossless binary editing. Header input accepts either a JSON object (string or string-array values) or an ordered list when duplicate order matters. Each ordered entry contains `name` and exactly one of `value` (UTF-8 text) or `value_base64` (arbitrary bytes):
+
+```json
+[
+  { "name": "X-Trace", "value": "first" },
+  { "name": "X-Binary", "value_base64": "gP8=" },
+  { "name": "X-Trace", "value": "last" }
+]
+```
+
+Flow and session responses use this same ordered representation, preserving
+duplicates and using `value_base64` whenever a value is not valid UTF-8.
 
 Filter terms include `host:`, `method:`, `status:`, `type:`, `body:`, `header:`, `request_body:`, and `response_body:`. Combine terms with `&`, `|`, `!`, parentheses, or adjacent implicit AND. The aliases `~d`, `~m`, `~s`, `~t`, `~b`, and `~h` are also accepted.
 
