@@ -457,7 +457,21 @@ async fn send_response(
     mut send: OutboundFrameSender,
     response: ProxyResponse,
 ) -> Result<(), ProtocolError> {
-    let (head, body) = response.into_parts();
+    let (informational, head, body) = response.into_parts();
+    for informational in informational {
+        if !informational.status.is_informational()
+            || informational.status == StatusCode::SWITCHING_PROTOCOLS
+        {
+            return Err(ProtocolError::new(
+                ErrorKind::ProtocolViolation,
+                "HTTP/3 informational response must be 1xx other than 101",
+            ));
+        }
+        let headers = encode_response_headers(&informational)?;
+        send.send(OutboundFrame::Headers(headers, None))
+            .await
+            .map_err(|error| protocol(ErrorKind::Io, error))?;
+    }
     let headers = encode_response_headers(&head)?;
     send.send(OutboundFrame::Headers(headers, None))
         .await
@@ -612,7 +626,7 @@ where
         return Ok(handler.handle_response(&context, response).await);
     }
 
-    let (mut head, body) = response.into_parts();
+    let (informational, mut head, body) = response.into_parts();
     if upstream_response.send(body).is_err() {
         return Ok(handler.synthetic_protocol_response(
             StatusCode::BAD_GATEWAY,
@@ -652,7 +666,7 @@ where
         server_tunnel,
         handler,
     ));
-    Ok(ProxyResponse::new(head, outbound))
+    Ok(ProxyResponse::new(head, outbound).with_informational(informational))
 }
 
 fn set_header(

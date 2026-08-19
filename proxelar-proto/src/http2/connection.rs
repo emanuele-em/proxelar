@@ -1,5 +1,5 @@
 use std::collections::HashMap;
-use std::future::poll_fn;
+use std::future::{poll_fn, Future as _};
 use std::pin::Pin;
 use std::sync::Arc;
 use std::task::{Context, Poll};
@@ -219,7 +219,18 @@ where
             return Err(error);
         }
     };
-    let (head, body) = response.into_parts();
+    let (informational, head, body) = response.into_parts();
+    for head in informational {
+        if !head.status.is_informational() || head.status == http::StatusCode::SWITCHING_PROTOCOLS {
+            return Err(ProtocolError::new(
+                ErrorKind::ProtocolViolation,
+                "HTTP/2 informational response must be 1xx other than 101",
+            ));
+        }
+        respond
+            .send_informational(to_h2_response(&head)?)
+            .map_err(map_h2_error)?;
+    }
     let response = to_h2_response(&head)?;
     let end_stream = body_is_known_empty(&body);
     let mut send = respond
@@ -332,12 +343,28 @@ impl H2Client {
                 }
             });
         }
-        let response = response
-            .await
-            .map_err(map_h2_error)
-            .map_err(H2SendError::Failed)?;
+        let mut response = response;
+        let mut informational = Vec::new();
+        let response = poll_fn(|context| {
+            loop {
+                match response.poll_informational(context) {
+                    Poll::Ready(Some(Ok(head))) => match from_h2_response(&head) {
+                        Ok(head) => informational.push(head),
+                        Err(error) => return Poll::Ready(Err(error)),
+                    },
+                    Poll::Ready(Some(Err(error))) => {
+                        return Poll::Ready(Err(map_h2_error(error)));
+                    }
+                    Poll::Ready(None) | Poll::Pending => break,
+                }
+            }
+            Pin::new(&mut response).poll(context).map_err(map_h2_error)
+        })
+        .await
+        .map_err(H2SendError::Failed)?;
         let head = from_h2_response(&response).map_err(H2SendError::Failed)?;
-        Ok(ProxyResponse::new(head, recv_body(response.into_body())))
+        Ok(ProxyResponse::new(head, recv_body(response.into_body()))
+            .with_informational(informational))
     }
 
     fn same_connection(&self, other: &Self) -> bool {

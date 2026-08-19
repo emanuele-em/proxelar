@@ -50,6 +50,9 @@ struct PreservedHeaders {
     compatibility: http::HeaderMap,
 }
 
+#[derive(Clone, Debug)]
+struct InformationalResponses(Vec<ResponseHead>);
+
 fn preserve_headers(
     headers: &mut http::HeaderMap,
     extensions: &mut http::Extensions,
@@ -1382,7 +1385,7 @@ fn request_to_protocol(request: Request<ProxyBody>) -> ProxyRequest {
 fn response_from_protocol(
     response: ProxyResponse,
 ) -> Result<Response<ProxyBody>, crate::header::HeaderConversionError> {
-    let (head, body) = response.into_parts();
+    let (informational, head, body) = response.into_parts();
     let mut response = Response::new(body);
     *response.status_mut() = head.status;
     *response.version_mut() = head.version;
@@ -1392,11 +1395,20 @@ fn response_from_protocol(
         ordered: head.headers,
         compatibility,
     });
+    if !informational.is_empty() {
+        response
+            .extensions_mut()
+            .insert(InformationalResponses(informational));
+    }
     Ok(response)
 }
 
 fn response_to_protocol(response: Response<ProxyBody>) -> ProxyResponse {
-    let (parts, body) = response.into_parts();
+    let (mut parts, body) = response.into_parts();
+    let informational = parts
+        .extensions
+        .remove::<InformationalResponses>()
+        .map_or_else(Vec::new, |responses| responses.0);
     ProxyResponse::new(
         ResponseHead::new(
             parts.status,
@@ -1405,6 +1417,7 @@ fn response_to_protocol(response: Response<ProxyBody>) -> ProxyResponse {
         ),
         body,
     )
+    .with_informational(informational)
 }
 
 #[async_trait]
@@ -1586,7 +1599,12 @@ mod tests {
         let response = ProxyResponse::new(
             ResponseHead::new(StatusCode::OK, Version::HTTP_11, headers.clone()),
             body::empty(),
-        );
+        )
+        .with_informational(vec![ResponseHead::new(
+            StatusCode::EARLY_HINTS,
+            Version::HTTP_11,
+            HeaderBlock::from_fields([HeaderField::new("Link", "</style.css>").unwrap()]),
+        )]);
         let context = HttpContext {
             remote_addr: "127.0.0.1:12345".parse().unwrap(),
         };
@@ -1594,6 +1612,12 @@ mod tests {
         let forwarded = handler.handle_response(&context, response).await;
 
         assert_eq!(forwarded.head.headers, headers);
+        assert_eq!(forwarded.informational.len(), 1);
+        assert_eq!(forwarded.informational[0].status, StatusCode::EARLY_HINTS);
+        assert_eq!(
+            forwarded.informational[0].headers.get("link"),
+            Some(b"</style.css>".as_slice())
+        );
     }
 
     #[tokio::test]

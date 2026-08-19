@@ -194,8 +194,52 @@ async fn server_acknowledges_expect_continue_before_reading_the_body() {
     server.await.unwrap().unwrap();
 }
 
+#[derive(Clone)]
+struct InformationalService;
+
+impl HttpService for InformationalService {
+    fn call(
+        &mut self,
+        _request: ProxyRequest,
+    ) -> BoxFuture<'_, Result<ProxyResponse, ProtocolError>> {
+        Box::pin(async {
+            let mut headers = HeaderBlock::new();
+            headers.add("Link", "</style.css>; rel=preload").unwrap();
+            Ok(ProxyResponse::new(
+                ResponseHead::new(StatusCode::OK, Version::HTTP_11, HeaderBlock::new()),
+                ProxyBody::empty(),
+            )
+            .with_informational(vec![ResponseHead::new(
+                StatusCode::EARLY_HINTS,
+                Version::HTTP_11,
+                headers,
+            )]))
+        })
+    }
+}
+
 #[tokio::test]
-async fn client_skips_informational_responses_before_the_final_head() {
+async fn server_writes_informational_responses_before_the_final_head() {
+    let (mut peer, server_io) = tokio::io::duplex(1024);
+    let server = tokio::spawn(serve_connection(
+        server_io,
+        InformationalService,
+        ConnectionConfig::default(),
+    ));
+    peer.write_all(b"GET / HTTP/1.1\r\nHost: example.test\r\nConnection: close\r\n\r\n")
+        .await
+        .unwrap();
+
+    let mut wire = Vec::new();
+    peer.read_to_end(&mut wire).await.unwrap();
+    let text = String::from_utf8(wire).unwrap();
+    assert!(text.starts_with("HTTP/1.1 103 Early Hints\r\n"), "{text}");
+    assert!(text.contains("\r\n\r\nHTTP/1.1 200 OK\r\n"), "{text}");
+    server.await.unwrap().unwrap();
+}
+
+#[tokio::test]
+async fn client_preserves_informational_responses_before_the_final_head() {
     let (client_io, mut peer) = tokio::io::duplex(4096);
     let peer_task = tokio::spawn(async move {
         let mut request = Vec::new();
@@ -216,6 +260,12 @@ async fn client_skips_informational_responses_before_the_final_head() {
         .await
         .unwrap();
     assert_eq!(response.head.status, StatusCode::OK);
+    assert_eq!(response.informational.len(), 1);
+    assert_eq!(response.informational[0].status, StatusCode::EARLY_HINTS);
+    assert_eq!(
+        response.informational[0].headers.get("link"),
+        Some(b"</a.css>; rel=preload".as_slice())
+    );
     assert_eq!(
         response.body.collect().await.unwrap().data,
         Bytes::from_static(b"hello")

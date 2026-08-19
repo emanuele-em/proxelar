@@ -69,7 +69,8 @@ async fn request_and_response_heads_are_transport_neutral() {
     );
 
     let (request_head, request_body) = request.into_parts();
-    let (response_head, response_body) = response.into_parts();
+    let (informational, response_head, response_body) = response.into_parts();
+    assert!(informational.is_empty());
     assert_eq!(request_head.version, Version::HTTP_3);
     assert_eq!(response_head.status, StatusCode::CREATED);
     assert_eq!(request_body.collect().await.unwrap().data, b"request"[..]);

@@ -349,7 +349,7 @@ async fn handle_extended_websocket(
         Http2(tokio::io::DuplexStream),
     }
 
-    let (head, upstream_tunnel) = match result {
+    let (informational, head, upstream_tunnel) = match result {
         NativeWebSocketResponse::Http1(mut result) => {
             if result.response.head.status != StatusCode::SWITCHING_PROTOCOLS {
                 return Ok(handler.handle_response(&context, result.response).await);
@@ -361,7 +361,7 @@ async fn handle_extended_websocket(
                     Bytes::from_static(b"Bad Gateway: missing WebSocket upgrade"),
                 ));
             };
-            let (mut head, _) = result.response.into_parts();
+            let (informational, mut head, _) = result.response.into_parts();
             for name in [
                 b"connection".as_slice(),
                 b"upgrade".as_slice(),
@@ -373,13 +373,13 @@ async fn handle_extended_websocket(
             }
             head.status = StatusCode::OK;
             head.version = Version::HTTP_2;
-            (head, UpstreamTunnel::Http1(upgrade))
+            (informational, head, UpstreamTunnel::Http1(upgrade))
         }
         NativeWebSocketResponse::Http2(response) => {
             if !response.head.status.is_success() {
                 return Ok(handler.handle_response(&context, response).await);
             }
-            let (mut head, body) = response.into_parts();
+            let (informational, mut head, body) = response.into_parts();
             if upstream_response.send(body).is_err() {
                 return Ok(handler.synthetic_protocol_response(
                     StatusCode::BAD_GATEWAY,
@@ -394,7 +394,7 @@ async fn handle_extended_websocket(
                 head.headers.remove(name);
             }
             head.version = Version::HTTP_2;
-            (head, UpstreamTunnel::Http2(server_tunnel))
+            (informational, head, UpstreamTunnel::Http2(server_tunnel))
         }
     };
 
@@ -438,7 +438,7 @@ async fn handle_extended_websocket(
             }
         }
     });
-    Ok(ProxyResponse::new(head, outbound))
+    Ok(ProxyResponse::new(head, outbound).with_informational(informational))
 }
 
 fn is_extended_websocket(request: &ProxyRequest) -> bool {
