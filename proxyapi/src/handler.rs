@@ -3,7 +3,7 @@ use bytes::{Bytes, BytesMut};
 use futures_util::StreamExt as _;
 use http::{Request, Response};
 use proxelar_proto::{BodyFrame, ProxyRequest, ProxyResponse, RequestHead, ResponseHead};
-use proxyapi_models::{BodyMetadata, ProxiedRequest, ProxiedResponse};
+use proxyapi_models::{BodyMetadata, HeaderBlock, HeaderField, ProxiedRequest, ProxiedResponse};
 use std::sync::Arc;
 use tokio::sync::{mpsc, Notify};
 
@@ -31,6 +31,114 @@ enum RequestBody {
 enum CompatRequestOrResponse {
     Request(Request<ProxyBody>),
     Response(Response<ProxyBody>),
+}
+
+/// Lossless headers retained while a message passes through the temporary
+/// `http` compatibility layer.
+///
+/// `HeaderMap` groups duplicate field names, so it cannot represent global
+/// interleaving such as `A: 1, B: 2, A: 3`. The compatibility snapshot lets
+/// us detect whether a legacy consumer actually changed the map. If it did
+/// not, the original ordered block is forwarded and captured byte-for-byte.
+#[derive(Clone, Debug)]
+struct PreservedHeaders {
+    ordered: HeaderBlock,
+    compatibility: http::HeaderMap,
+}
+
+fn preserve_headers(
+    headers: &mut http::HeaderMap,
+    extensions: &mut http::Extensions,
+    ordered: HeaderBlock,
+) -> Result<(), crate::header::HeaderConversionError> {
+    let compatibility = crate::header::to_http(&ordered)?;
+    *headers = compatibility.clone();
+    extensions.insert(PreservedHeaders {
+        ordered,
+        compatibility,
+    });
+    Ok(())
+}
+
+fn ordered_headers(headers: &http::HeaderMap, extensions: &http::Extensions) -> HeaderBlock {
+    extensions
+        .get::<PreservedHeaders>()
+        .filter(|preserved| preserved.compatibility == *headers)
+        .map_or_else(
+            || crate::header::from_http(headers),
+            |preserved| preserved.ordered.clone(),
+        )
+}
+
+/// Apply mutations made through `HeaderMap` to the preserved block without
+/// disturbing unrelated fields. This keeps interleaved duplicates intact when
+/// a route rule or body-framing helper changes a different header.
+fn synchronize_preserved_headers(headers: &http::HeaderMap, extensions: &mut http::Extensions) {
+    let Some(preserved) = extensions.get_mut::<PreservedHeaders>() else {
+        return;
+    };
+    if preserved.compatibility == *headers {
+        return;
+    }
+
+    preserved.ordered =
+        apply_header_map_delta(&preserved.ordered, &preserved.compatibility, headers);
+    preserved.compatibility = headers.clone();
+}
+
+fn apply_header_map_delta(
+    ordered: &HeaderBlock,
+    before: &http::HeaderMap,
+    after: &http::HeaderMap,
+) -> HeaderBlock {
+    let mut changed_names = Vec::<http::HeaderName>::new();
+    for name in before.keys().chain(after.keys()) {
+        if changed_names.iter().any(|known| known == name) {
+            continue;
+        }
+        let before_values = before.get_all(name).iter().collect::<Vec<_>>();
+        let after_values = after.get_all(name).iter().collect::<Vec<_>>();
+        if before_values != after_values {
+            changed_names.push(name.clone());
+        }
+    }
+    if changed_names.is_empty() {
+        return ordered.clone();
+    }
+
+    let mut output = HeaderBlock::new();
+    let mut emitted = Vec::<http::HeaderName>::new();
+    for field in ordered {
+        let Ok(name) = http::HeaderName::from_bytes(field.name()) else {
+            output.push(field.clone());
+            continue;
+        };
+        if !changed_names.contains(&name) {
+            output.push(field.clone());
+            continue;
+        }
+        if emitted.contains(&name) {
+            continue;
+        }
+        emitted.push(name.clone());
+        for value in after.get_all(&name) {
+            if let Ok(field) = HeaderField::new(field.name(), value.as_bytes()) {
+                output.push(field);
+            }
+        }
+    }
+
+    for name in changed_names {
+        if emitted.contains(&name) {
+            continue;
+        }
+        for value in after.get_all(&name) {
+            if let Ok(field) = HeaderField::new(name.as_str(), value.as_bytes()) {
+                output.push(field);
+            }
+        }
+    }
+    output
 }
 
 impl RequestBody {
@@ -95,7 +203,7 @@ impl CapturedRequest {
             method: parts.method.clone(),
             uri: parts.uri.clone(),
             version: parts.version,
-            headers: crate::header::from_http(&parts.headers),
+            headers: ordered_headers(&parts.headers, &parts.extensions),
             body,
             done,
             time,
@@ -193,6 +301,14 @@ fn reconcile_edited_body_headers(headers: &mut http::HeaderMap, body: &Bytes) {
             headers.insert(http::header::CONTENT_LENGTH, length);
         }
         Err(error) => tracing::warn!("Could not update Content-Length after body edit: {error}"),
+    }
+}
+
+fn reconcile_edited_ordered_body_headers(headers: &mut HeaderBlock, body: &Bytes) {
+    headers.remove(b"transfer-encoding");
+    headers.remove(b"content-encoding");
+    if let Err(error) = headers.set(b"content-length", body.len().to_string().as_bytes()) {
+        tracing::warn!("Could not update Content-Length after body edit: {error}");
     }
 }
 
@@ -458,20 +574,14 @@ impl CapturingHandler {
         let mut method = req.method().clone();
         let mut uri = req.uri().clone();
         let version = req.version();
-        let mut headers = match crate::header::to_http(req.headers()) {
-            Ok(headers) => headers,
-            Err(error) => {
-                tracing::warn!("Captured replay has invalid compatibility headers: {error}");
-                return None;
-            }
-        };
+        let mut headers = req.headers().clone();
         let mut body_bytes = req.body().clone();
 
         self.captured_request = Some(CapturedRequest::buffered(ProxiedRequest::new(
             method.clone(),
             uri.clone(),
             version,
-            crate::header::from_http(&headers),
+            headers.clone(),
             body_bytes.clone(),
             now_millis(),
         )));
@@ -509,17 +619,9 @@ impl CapturingHandler {
                             if let Ok(u) = u.parse() {
                                 uri = u;
                             }
-                            headers = match crate::header::to_http(&h) {
-                                Ok(headers) => headers,
-                                Err(error) => {
-                                    tracing::warn!(
-                                        "Edited replay has invalid compatibility headers: {error}"
-                                    );
-                                    return None;
-                                }
-                            };
+                            headers = h;
                             if b != body_bytes {
-                                reconcile_edited_body_headers(&mut headers, &b);
+                                reconcile_edited_ordered_body_headers(&mut headers, &b);
                             }
                             body_bytes = b;
                             self.captured_request =
@@ -527,7 +629,7 @@ impl CapturingHandler {
                                     method.clone(),
                                     uri.clone(),
                                     version,
-                                    crate::header::from_http(&headers),
+                                    headers.clone(),
                                     body_bytes.clone(),
                                     now_millis(),
                                 )));
@@ -552,14 +654,10 @@ impl CapturingHandler {
             }
         }
 
-        let mut builder = Request::builder().method(method).uri(uri).version(version);
-        if let Some(h) = builder.headers_mut() {
-            *h = headers;
-        }
-        builder
-            .body(body::full(body_bytes))
-            .ok()
-            .map(request_to_protocol)
+        Some(ProxyRequest::new(
+            RequestHead::new(method, uri, version, headers),
+            body::full(body_bytes),
+        ))
     }
 
     pub(crate) fn send_event(&self, event: ProxyEvent) {
@@ -668,7 +766,7 @@ impl CapturingHandler {
     ) -> Response<ProxyBody> {
         let status = parts.status;
         let version = parts.version;
-        let headers = crate::header::from_http(&parts.headers);
+        let headers = ordered_headers(&parts.headers, &parts.extensions);
         let request = self.take_captured_request_state();
         let id = self.pending_id.take().unwrap_or_else(next_id);
         let event_tx = self.event_tx_clone();
@@ -733,7 +831,7 @@ impl CapturingHandler {
                 &req_method,
                 &req_url,
                 parts.status.as_u16(),
-                &crate::header::from_http(&parts.headers),
+                &ordered_headers(&parts.headers, &parts.extensions),
                 &hook_body,
             ) {
                 Ok(crate::scripting::ScriptResponseAction::Modified {
@@ -741,27 +839,26 @@ impl CapturingHandler {
                     headers,
                     body,
                 }) => {
-                    let headers = match crate::header::to_http(&headers) {
-                        Ok(headers) => headers,
-                        Err(error) => {
-                            tracing::warn!(
-                                "Lua on_response produced headers unsupported by the temporary Hyper adapter (passing through): {error}"
-                            );
-                            return HookedResponse {
-                                parts,
-                                body: HookedResponseBody::Original(captured_body),
-                            };
-                        }
-                    };
+                    if let Err(error) =
+                        preserve_headers(&mut parts.headers, &mut parts.extensions, headers)
+                    {
+                        tracing::warn!(
+                            "Lua on_response produced headers unsupported by the temporary Hyper adapter (passing through): {error}"
+                        );
+                        return HookedResponse {
+                            parts,
+                            body: HookedResponseBody::Original(captured_body),
+                        };
+                    }
                     if let Ok(s) = http::StatusCode::from_u16(status) {
                         parts.status = s;
                     }
-                    parts.headers = headers;
                     if body == hook_body {
                         if decoded_headers.as_ref().is_some_and(|headers| {
                             !crate::encoding::can_reuse_wire_body(headers, &parts.headers)
                         }) {
                             let wire = crate::encoding::encode_from_hook(&mut parts.headers, body);
+                            synchronize_preserved_headers(&parts.headers, &mut parts.extensions);
                             return HookedResponse {
                                 parts,
                                 body: HookedResponseBody::Replaced(wire),
@@ -778,7 +875,9 @@ impl CapturingHandler {
                     // Re-encode the script's plaintext back to the wire encoding
                     // (only when we decoded it in the first place).
                     let wire = if decoded.is_some() {
-                        crate::encoding::encode_from_hook(&mut parts.headers, body)
+                        let wire = crate::encoding::encode_from_hook(&mut parts.headers, body);
+                        synchronize_preserved_headers(&parts.headers, &mut parts.extensions);
+                        wire
                     } else {
                         body
                     };
@@ -816,7 +915,7 @@ impl CapturingHandler {
         let proxied_response = ProxiedResponse::new(
             parts.status,
             parts.version,
-            crate::header::from_http(&parts.headers),
+            ordered_headers(&parts.headers, &parts.extensions),
             body,
             now_millis(),
         );
@@ -846,7 +945,7 @@ impl CapturingHandler {
                     parts.method.clone(),
                     parts.uri.clone(),
                     parts.version,
-                    crate::header::from_http(&parts.headers),
+                    ordered_headers(&parts.headers, &parts.extensions),
                     body_bytes.clone(),
                     now_millis(),
                 )));
@@ -880,10 +979,11 @@ impl CapturingHandler {
 
         let (mut parts, incoming) = req.into_parts();
         if let Some(rules) = &self.route_rules {
-            match rules
+            let outcome = rules
                 .apply(&parts.method, &mut parts.uri, &mut parts.headers)
-                .await
-            {
+                .await;
+            synchronize_preserved_headers(&parts.headers, &mut parts.extensions);
+            match outcome {
                 Ok(crate::rules::RuleOutcome::Forward) => {}
                 Ok(crate::rules::RuleOutcome::Respond {
                     status,
@@ -909,7 +1009,7 @@ impl CapturingHandler {
                             parts.method,
                             parts.uri,
                             parts.version,
-                            crate::header::from_http(&parts.headers),
+                            ordered_headers(&parts.headers, &parts.extensions),
                             captured,
                             metadata,
                             now_millis(),
@@ -960,7 +1060,7 @@ impl CapturingHandler {
             match engine.on_request(
                 parts.method.as_str(),
                 &parts.uri.to_string(),
-                &crate::header::from_http(&parts.headers),
+                &ordered_headers(&parts.headers, &parts.extensions),
                 &hook_body,
             ) {
                 Ok(crate::scripting::ScriptRequestAction::Forward {
@@ -969,32 +1069,55 @@ impl CapturingHandler {
                     headers,
                     body,
                 }) => {
-                    match crate::header::to_http(&headers) {
-                        Ok(headers) => {
+                    match preserve_headers(
+                        &mut parts.headers,
+                        &mut parts.extensions,
+                        headers,
+                    ) {
+                        Ok(()) => {
                             if let Ok(m) = method.parse() {
                                 parts.method = m;
                             }
                             if let Ok(u) = url.parse() {
                                 parts.uri = u;
                             }
-                            parts.headers = headers;
                             // Re-encode the script's plaintext back to the wire encoding
                             // (only when we decoded it in the first place).
                             let wire = if body == hook_body {
                                 if decoded_headers.as_ref().is_some_and(|headers| {
                                     !crate::encoding::can_reuse_wire_body(headers, &parts.headers)
                                 }) {
-                                    crate::encoding::encode_from_hook(&mut parts.headers, body)
+                                    let wire = crate::encoding::encode_from_hook(
+                                        &mut parts.headers,
+                                        body,
+                                    );
+                                    synchronize_preserved_headers(
+                                        &parts.headers,
+                                        &mut parts.extensions,
+                                    );
+                                    wire
                                 } else {
                                     raw.clone()
                                 }
                             } else if decoded.is_some() {
-                                crate::encoding::encode_from_hook(&mut parts.headers, body)
+                                let wire = crate::encoding::encode_from_hook(
+                                    &mut parts.headers,
+                                    body,
+                                );
+                                synchronize_preserved_headers(
+                                    &parts.headers,
+                                    &mut parts.extensions,
+                                );
+                                wire
                             } else {
                                 body
                             };
                             if decoded.is_none() && wire != raw {
                                 reconcile_edited_body_headers(&mut parts.headers, &wire);
+                                synchronize_preserved_headers(
+                                    &parts.headers,
+                                    &mut parts.extensions,
+                                );
                             }
                             request_body.apply_modified_body(&raw, wire);
                         }
@@ -1013,7 +1136,7 @@ impl CapturingHandler {
                         parts.method.clone(),
                         parts.uri.clone(),
                         parts.version,
-                        crate::header::from_http(&parts.headers),
+                        ordered_headers(&parts.headers, &parts.extensions),
                         request_body.hook_bytes().clone(),
                         request_body.metadata(),
                         now_millis(),
@@ -1049,7 +1172,7 @@ impl CapturingHandler {
                     parts.method.clone(),
                     parts.uri.clone(),
                     parts.version,
-                    crate::header::from_http(&parts.headers),
+                    ordered_headers(&parts.headers, &parts.extensions),
                     request_body.hook_bytes().clone(),
                     request_body.metadata(),
                     now_millis(),
@@ -1085,23 +1208,24 @@ impl CapturingHandler {
                                 parts.uri = u;
                             }
                             let hook_body = request_body.hook_bytes().clone();
-                            parts.headers = match crate::header::to_http(&headers) {
-                                Ok(headers) => headers,
-                                Err(error) => {
-                                    tracing::warn!(
-                                        "Edited request has invalid compatibility headers: {error}"
-                                    );
-                                    return CompatRequestOrResponse::Response(
-                                        self.synthetic_response(
-                                            http::StatusCode::BAD_REQUEST,
-                                            http::HeaderMap::new(),
-                                            Bytes::from_static(b"Invalid edited headers"),
-                                        ),
-                                    );
-                                }
-                            };
+                            if let Err(error) =
+                                preserve_headers(&mut parts.headers, &mut parts.extensions, headers)
+                            {
+                                tracing::warn!(
+                                    "Edited request has invalid compatibility headers: {error}"
+                                );
+                                return CompatRequestOrResponse::Response(self.synthetic_response(
+                                    http::StatusCode::BAD_REQUEST,
+                                    http::HeaderMap::new(),
+                                    Bytes::from_static(b"Invalid edited headers"),
+                                ));
+                            }
                             if body != hook_body {
                                 reconcile_edited_body_headers(&mut parts.headers, &body);
+                                synchronize_preserved_headers(
+                                    &parts.headers,
+                                    &mut parts.extensions,
+                                );
                             }
                             request_body.apply_modified_body(&hook_body, body);
                         }
@@ -1146,7 +1270,12 @@ fn request_from_protocol(
     *request.method_mut() = head.method;
     *request.uri_mut() = head.uri;
     *request.version_mut() = head.version;
-    *request.headers_mut() = crate::header::to_http(&head.headers)?;
+    let compatibility = crate::header::to_http(&head.headers)?;
+    *request.headers_mut() = compatibility.clone();
+    request.extensions_mut().insert(PreservedHeaders {
+        ordered: head.headers,
+        compatibility,
+    });
     Ok(request)
 }
 
@@ -1157,7 +1286,7 @@ fn request_to_protocol(request: Request<ProxyBody>) -> ProxyRequest {
             parts.method,
             parts.uri,
             parts.version,
-            crate::header::from_http(&parts.headers),
+            ordered_headers(&parts.headers, &parts.extensions),
         ),
         body,
     )
@@ -1170,7 +1299,12 @@ fn response_from_protocol(
     let mut response = Response::new(body);
     *response.status_mut() = head.status;
     *response.version_mut() = head.version;
-    *response.headers_mut() = crate::header::to_http(&head.headers)?;
+    let compatibility = crate::header::to_http(&head.headers)?;
+    *response.headers_mut() = compatibility.clone();
+    response.extensions_mut().insert(PreservedHeaders {
+        ordered: head.headers,
+        compatibility,
+    });
     Ok(response)
 }
 
@@ -1180,7 +1314,7 @@ fn response_to_protocol(response: Response<ProxyBody>) -> ProxyResponse {
         ResponseHead::new(
             parts.status,
             parts.version,
-            crate::header::from_http(&parts.headers),
+            ordered_headers(&parts.headers, &parts.extensions),
         ),
         body,
     )
@@ -1240,6 +1374,14 @@ mod tests {
     use super::*;
     use http::{HeaderMap, Method, StatusCode, Uri, Version};
 
+    fn interleaved_headers() -> HeaderBlock {
+        HeaderBlock::from_fields([
+            HeaderField::new("X-Order", "first").unwrap(),
+            HeaderField::new("X-Middle", "second").unwrap(),
+            HeaderField::new("X-Order", "third").unwrap(),
+        ])
+    }
+
     fn proxied_request() -> ProxiedRequest {
         let mut headers = HeaderMap::new();
         headers.insert("x-original", "yes".parse().unwrap());
@@ -1293,6 +1435,115 @@ mod tests {
         assert!(!headers.contains_key(http::header::TRANSFER_ENCODING));
         assert!(!headers.contains_key(http::header::CONTENT_ENCODING));
         assert_eq!(headers[http::header::CONTENT_LENGTH], "6");
+    }
+
+    #[test]
+    fn compatibility_mutation_keeps_unrelated_interleaved_headers() {
+        let ordered = interleaved_headers();
+        let mut headers = crate::header::to_http(&ordered).unwrap();
+        let mut extensions = http::Extensions::new();
+        extensions.insert(PreservedHeaders {
+            ordered: ordered.clone(),
+            compatibility: headers.clone(),
+        });
+
+        headers.insert(http::header::CONTENT_LENGTH, "6".parse().unwrap());
+        synchronize_preserved_headers(&headers, &mut extensions);
+
+        let synchronized = ordered_headers(&headers, &extensions);
+        assert_eq!(
+            synchronized.iter().take(3).collect::<Vec<_>>(),
+            ordered.iter().collect::<Vec<_>>()
+        );
+        assert_eq!(synchronized.get(b"content-length"), Some(b"6".as_slice()));
+    }
+
+    #[tokio::test]
+    async fn native_handler_preserves_interleaved_request_headers() {
+        let (event_tx, _event_rx) = mpsc::channel(1);
+        let mut handler = CapturingHandler::new(event_tx);
+        let headers = interleaved_headers();
+        let request = ProxyRequest::new(
+            RequestHead::new(
+                Method::GET,
+                "http://example.test/".parse().unwrap(),
+                Version::HTTP_11,
+                headers.clone(),
+            ),
+            body::empty(),
+        );
+        let context = HttpContext {
+            remote_addr: "127.0.0.1:12345".parse().unwrap(),
+        };
+
+        let RequestOrResponse::Request(forwarded) = handler.handle_request(&context, request).await
+        else {
+            panic!("request should be forwarded");
+        };
+
+        assert_eq!(forwarded.head.headers, headers);
+    }
+
+    #[tokio::test]
+    async fn native_handler_preserves_interleaved_response_headers() {
+        let (event_tx, _event_rx) = mpsc::channel(1);
+        let mut handler = CapturingHandler::new(event_tx);
+        let headers = interleaved_headers();
+        let response = ProxyResponse::new(
+            ResponseHead::new(StatusCode::OK, Version::HTTP_11, headers.clone()),
+            body::empty(),
+        );
+        let context = HttpContext {
+            remote_addr: "127.0.0.1:12345".parse().unwrap(),
+        };
+
+        let forwarded = handler.handle_response(&context, response).await;
+
+        assert_eq!(forwarded.head.headers, headers);
+    }
+
+    #[tokio::test]
+    async fn captured_flow_preserves_interleaved_request_headers() {
+        let (event_tx, mut event_rx) = mpsc::channel(1);
+        let mut handler = CapturingHandler::new(event_tx);
+        let headers = interleaved_headers();
+        let request = ProxyRequest::new(
+            RequestHead::new(
+                Method::GET,
+                "http://example.test/".parse().unwrap(),
+                Version::HTTP_11,
+                headers.clone(),
+            ),
+            body::full(Bytes::from_static(b"request")),
+        );
+        let context = HttpContext {
+            remote_addr: "127.0.0.1:12345".parse().unwrap(),
+        };
+
+        let RequestOrResponse::Request(forwarded) = handler.handle_request(&context, request).await
+        else {
+            panic!("request should be forwarded");
+        };
+        forwarded.body.collect().await.unwrap();
+        let response = handler
+            .handle_response(
+                &context,
+                ProxyResponse::new(
+                    ResponseHead::new(StatusCode::OK, Version::HTTP_11, HeaderBlock::new()),
+                    body::empty(),
+                ),
+            )
+            .await;
+        response.body.collect().await.unwrap();
+
+        let event = tokio::time::timeout(std::time::Duration::from_secs(1), event_rx.recv())
+            .await
+            .unwrap()
+            .unwrap();
+        let ProxyEvent::RequestComplete { request, .. } = event else {
+            panic!("flow should complete");
+        };
+        assert_eq!(request.headers(), &headers);
     }
 
     #[tokio::test]
