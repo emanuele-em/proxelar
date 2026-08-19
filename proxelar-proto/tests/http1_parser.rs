@@ -89,9 +89,8 @@ fn accepts_safe_framing_and_rejects_smuggling_shapes() {
     );
     assert_eq!(identical.semantics.content_length, Some(5));
 
-    let chunked = request(
-        b"POST / HTTP/1.1\r\nHost: example.test\r\nTransfer-Encoding: gzip, chunked\r\n\r\n",
-    );
+    let chunked =
+        request(b"POST / HTTP/1.1\r\nHost: example.test\r\nTransfer-Encoding: chunked\r\n\r\n");
     assert!(chunked.semantics.transfer_encoded);
 
     let cases: &[(&[u8], Http1ErrorKind)] = &[
@@ -106,6 +105,10 @@ fn accepts_safe_framing_and_rejects_smuggling_shapes() {
         (
             b"POST / HTTP/1.1\r\nHost: example.test\r\nContent-Length: +5\r\n\r\n",
             Http1ErrorKind::InvalidContentLength,
+        ),
+        (
+            b"POST / HTTP/1.1\r\nHost: example.test\r\nTransfer-Encoding: gzip, chunked\r\n\r\n",
+            Http1ErrorKind::InvalidTransferEncoding,
         ),
         (
             b"POST / HTTP/1.1\r\nHost: example.test\r\nTransfer-Encoding: chunked, gzip\r\n\r\n",
