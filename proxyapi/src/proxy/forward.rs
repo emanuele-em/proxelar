@@ -15,10 +15,12 @@ use tokio_tungstenite::{tungstenite::Message, WebSocketStream};
 
 use proxyapi_models::{ProxiedRequest, ProxiedResponse, WsDirection, WsFrame, WsOpcode};
 
-use crate::body::{self, ProxyBody};
 use crate::ca::{cert_server, CertificateAuthority, Ssl};
 use crate::event::ProxyEvent;
 use crate::handler::{now_millis, CapturingHandler};
+use crate::hyper_adapter::{
+    from_hyper_request, from_hyper_response, to_hyper_request, to_hyper_response, HyperBody,
+};
 use crate::rewind::Rewind;
 use crate::{HttpContext, HttpHandler, RequestOrResponse};
 
@@ -55,7 +57,7 @@ enum TunnelRequestError {
 #[derive(Clone)]
 enum UpstreamClient {
     Shared(Arc<Client>),
-    Pinned(Arc<Mutex<hyper::client::conn::http1::SendRequest<ProxyBody>>>),
+    Pinned(Arc<Mutex<hyper::client::conn::http1::SendRequest<HyperBody>>>),
 }
 
 impl UpstreamClient {
@@ -78,7 +80,7 @@ impl UpstreamClient {
 
     async fn request(
         &self,
-        mut request: Request<ProxyBody>,
+        mut request: Request<HyperBody>,
     ) -> Result<Response<hyper::body::Incoming>, BoxError> {
         match self {
             Self::Shared(client) => client.request(request).await.map_err(Into::into),
@@ -144,13 +146,17 @@ pub async fn handle_connection(
             // requests are valid embedded-client traffic and are reconstructed
             // from their Host field below.
             if is_direct_cert_request(&req, listen_addr) {
-                let resp = cert_server::handle(&req, &ca.ca_cert_pem(), None);
+                let resp = wrap_protocol_body(cert_server::handle(&req, &ca.ca_cert_pem(), None));
                 return Ok::<_, hyper::Error>(resp);
             }
 
             // Proxied request to proxel.ar — serve cert page
             if cert_server::is_cert_request(&req) {
-                let resp = cert_server::handle(&req, &ca.ca_cert_pem(), Some(listen_addr));
+                let resp = wrap_protocol_body(cert_server::handle(
+                    &req,
+                    &ca.ca_cert_pem(),
+                    Some(listen_addr),
+                ));
                 return Ok::<_, hyper::Error>(resp);
             }
 
@@ -305,15 +311,17 @@ fn process_connect(
     client: Arc<Client>,
     remote_addr: SocketAddr,
     listen_addr: SocketAddr,
-) -> Result<Response<ProxyBody>, hyper::Error> {
+) -> Result<Response<HyperBody>, hyper::Error> {
     let authority = if let Some(a) = req.uri().authority().cloned() {
         a
     } else {
         tracing::warn!("CONNECT request missing authority");
         return Ok(Response::builder()
             .status(400)
-            .body(body::full(Bytes::from("Bad Request: missing authority")))
-            .unwrap_or_else(|_| Response::new(body::empty())));
+            .body(HyperBody::full(Bytes::from(
+                "Bad Request: missing authority",
+            )))
+            .unwrap_or_else(|_| Response::new(HyperBody::empty())));
     };
 
     tokio::spawn(async move {
@@ -415,7 +423,7 @@ fn process_connect(
         }
     });
 
-    Ok(Response::new(body::empty()))
+    Ok(Response::new(HyperBody::empty()))
 }
 
 /// Serve HTTP requests over an already-established stream (plain or TLS).
@@ -503,7 +511,11 @@ where
 
             // Check for proxel.ar cert request (inside CONNECT tunnel)
             if cert_server::is_cert_request(&req) {
-                let resp = cert_server::handle(&req, &ca.ca_cert_pem(), Some(listen_addr));
+                let resp = wrap_protocol_body(cert_server::handle(
+                    &req,
+                    &ca.ca_cert_pem(),
+                    Some(listen_addr),
+                ));
                 return Ok::<_, hyper::Error>(resp);
             }
 
@@ -519,7 +531,7 @@ async fn forward_http_request(
     handler: CapturingHandler,
     client: Arc<Client>,
     remote_addr: SocketAddr,
-) -> Result<Response<ProxyBody>, hyper::Error> {
+) -> Result<Response<HyperBody>, hyper::Error> {
     forward_http_request_with(req, handler, UpstreamClient::Shared(client), remote_addr).await
 }
 
@@ -528,7 +540,7 @@ async fn forward_http_request_with(
     mut handler: CapturingHandler,
     upstream: UpstreamClient,
     remote_addr: SocketAddr,
-) -> Result<Response<ProxyBody>, hyper::Error> {
+) -> Result<Response<HyperBody>, hyper::Error> {
     let client_version = req.version();
     let ctx = HttpContext { remote_addr };
 
@@ -540,9 +552,22 @@ async fn forward_http_request_with(
         None
     };
 
-    let req = match handler.handle_request(&ctx, req).await {
-        RequestOrResponse::Request(req) => req,
-        RequestOrResponse::Response(mut res) => {
+    let req = match handler.handle_request(&ctx, from_hyper_request(req)).await {
+        RequestOrResponse::Request(req) => match to_hyper_request(req) {
+            Ok(req) => req,
+            Err(error) => {
+                tracing::warn!("Could not adapt request for temporary Hyper client: {error}");
+                return Ok(protocol_response_to_hyper(
+                    handler.synthetic_protocol_response(
+                        http::StatusCode::BAD_REQUEST,
+                        http::HeaderMap::new(),
+                        Bytes::from_static(b"Invalid request headers"),
+                    ),
+                ));
+            }
+        },
+        RequestOrResponse::Response(res) => {
+            let mut res = protocol_response_to_hyper(res);
             sanitize_response_for_client(&mut res, client_version);
             return Ok(res);
         }
@@ -560,28 +585,48 @@ async fn forward_http_request_with(
                 return Ok(upgrade_websocket_response(res, handler, client_on_upgrade));
             }
 
-            let mut res = handler.handle_upstream_response(res).await;
+            let response = handler
+                .handle_response(&ctx, from_hyper_response(res))
+                .await;
+            let mut res = protocol_response_to_hyper(response);
             sanitize_response_for_client(&mut res, client_version);
             Ok(res)
         }
         Err(e) => {
             tracing::error!("Client request error: {e}");
-            let mut res = handler.synthetic_response(
+            let mut res = protocol_response_to_hyper(handler.synthetic_protocol_response(
                 http::StatusCode::BAD_GATEWAY,
                 http::HeaderMap::new(),
                 Bytes::from_static(b"Bad Gateway"),
-            );
+            ));
             sanitize_response_for_client(&mut res, client_version);
             Ok(res)
         }
     }
 }
 
+fn protocol_response_to_hyper(response: crate::ProxyResponse) -> Response<HyperBody> {
+    to_hyper_response(response).unwrap_or_else(|error| {
+        tracing::warn!("Could not adapt response for temporary Hyper server: {error}");
+        Response::builder()
+            .status(http::StatusCode::BAD_GATEWAY)
+            .body(HyperBody::full(Bytes::from_static(
+                b"Invalid response headers",
+            )))
+            .unwrap_or_else(|_| Response::new(HyperBody::empty()))
+    })
+}
+
+fn wrap_protocol_body(response: Response<crate::ProxyBody>) -> Response<HyperBody> {
+    let (parts, body) = response.into_parts();
+    Response::from_parts(parts, HyperBody::new(body))
+}
+
 fn upgrade_websocket_response(
     mut res: Response<hyper::body::Incoming>,
     mut handler: CapturingHandler,
     client_on_upgrade: Option<hyper::upgrade::OnUpgrade>,
-) -> Response<ProxyBody> {
+) -> Response<HyperBody> {
     let server_on_upgrade = hyper::upgrade::on(&mut res);
     let (parts, _body) = res.into_parts();
 
@@ -621,7 +666,7 @@ fn upgrade_websocket_response(
         });
     }
 
-    Response::from_parts(parts, body::empty())
+    Response::from_parts(parts, HyperBody::empty())
 }
 
 fn reconstruct_tunnel_uri(
@@ -659,11 +704,13 @@ fn tunnel_authority(parts: &http::request::Parts) -> Result<Authority, TunnelReq
 }
 
 impl TunnelRequestError {
-    fn into_response(self) -> Response<ProxyBody> {
+    fn into_response(self) -> Response<HyperBody> {
         Response::builder()
             .status(http::StatusCode::BAD_REQUEST)
-            .body(body::full(Bytes::from_static(self.message().as_bytes())))
-            .unwrap_or_else(|_| Response::new(body::empty()))
+            .body(HyperBody::full(Bytes::from_static(
+                self.message().as_bytes(),
+            )))
+            .unwrap_or_else(|_| Response::new(HyperBody::empty()))
     }
 
     const fn message(self) -> &'static str {
@@ -939,9 +986,25 @@ pub(crate) async fn handle_replay(
     let Some(fwd_req) = handler.handle_replayed_request(req).await else {
         return;
     };
+    let fwd_req = match to_hyper_request(fwd_req) {
+        Ok(request) => request,
+        Err(error) => {
+            tracing::warn!("Replay request has invalid compatibility headers: {error}");
+            handler.emit_synthetic_completion(
+                http::StatusCode::BAD_REQUEST,
+                http::HeaderMap::new(),
+                Bytes::from_static(b"Replay request has invalid headers"),
+            );
+            return;
+        }
+    };
     match client.request(prepare_upstream_request(fwd_req)).await {
         Ok(res) => {
-            handler.record_upstream_response(res).await;
+            handler
+                .record_upstream_response(response_from_protocol_for_capture(from_hyper_response(
+                    res,
+                )))
+                .await;
         }
         Err(e) => {
             tracing::warn!("Replay request failed: {e}");
@@ -954,10 +1017,20 @@ pub(crate) async fn handle_replay(
     }
 }
 
+fn response_from_protocol_for_capture(
+    response: crate::ProxyResponse,
+) -> Response<crate::ProxyBody> {
+    let (head, body) = response.into_parts();
+    let mut response = Response::new(body);
+    *response.status_mut() = head.status;
+    *response.version_mut() = head.version;
+    *response.headers_mut() = crate::header::to_http(&head.headers).unwrap_or_default();
+    response
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::body;
 
     #[test]
     fn websocket_upgrade_requires_upgrade_header_and_connection_token() {
@@ -994,7 +1067,7 @@ mod tests {
             .header(hyper::header::HOST, "wrong-host.test")
             .header(hyper::header::COOKIE, "a=1")
             .header(hyper::header::COOKIE, "b=2")
-            .body(body::empty())
+            .body(HyperBody::empty())
             .unwrap();
 
         let req = prepare_upstream_request(req);

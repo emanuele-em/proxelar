@@ -26,6 +26,13 @@ pub struct CollectedBody {
     pub trailers: Option<HeaderBlock>,
 }
 
+impl CollectedBody {
+    /// Return the collected data bytes, matching the common body-collector API.
+    pub fn to_bytes(self) -> Bytes {
+        self.data
+    }
+}
+
 /// A backpressure-aware stream of data and trailer frames.
 ///
 /// Pulling the next item is the only way to advance the producer, so protocol
@@ -33,6 +40,7 @@ pub struct CollectedBody {
 /// credit. No body buffering is implicit in this type.
 pub struct ProxyBody {
     inner: Pin<Box<dyn Stream<Item = BodyResult> + Send + 'static>>,
+    exact_length: Option<u64>,
 }
 
 impl ProxyBody {
@@ -42,6 +50,7 @@ impl ProxyBody {
     {
         Self {
             inner: Box::pin(stream),
+            exact_length: None,
         }
     }
 
@@ -50,13 +59,35 @@ impl ProxyBody {
     }
 
     pub fn full(data: impl Into<Bytes>) -> Self {
-        Self::from_frames([Ok(BodyFrame::Data(data.into()))])
+        let data = data.into();
+        let length = data.len() as u64;
+        Self::from_frames([Ok(BodyFrame::Data(data))]).with_exact_length(length)
     }
 
     pub fn from_frames(frames: impl IntoIterator<Item = BodyResult>) -> Self {
-        Self::new(ReadyFrames {
-            frames: frames.into_iter().collect(),
-        })
+        let frames = frames.into_iter().collect::<VecDeque<_>>();
+        let exact_length = frames.iter().try_fold(0_u64, |length, frame| match frame {
+            Ok(BodyFrame::Data(data)) => length.checked_add(data.len() as u64),
+            Ok(BodyFrame::Trailers(_)) => Some(length),
+            Err(_) => None,
+        });
+        Self {
+            inner: Box::pin(ReadyFrames { frames }),
+            exact_length,
+        }
+    }
+
+    /// Declare the exact number of data bytes produced by this body.
+    ///
+    /// Protocol adapters use this to select framing without polling the stream.
+    pub fn with_exact_length(mut self, length: u64) -> Self {
+        self.exact_length = Some(length);
+        self
+    }
+
+    /// Return the exact data length when the producer can determine it upfront.
+    pub const fn exact_length(&self) -> Option<u64> {
+        self.exact_length
     }
 
     /// Collect a body while retaining ordered trailers.

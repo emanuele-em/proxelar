@@ -57,6 +57,7 @@ futures-util = { version = "0.3", default-features = false, features = ["sink"] 
 boringtun = { version = "0.7.1", default-features = false }
 netstack-smoltcp = "0.2.4"
 proxyapi_models = { version = "0.5.1", path = "../proxyapi_models" }
+proxelar-proto = { path = "../proxelar-proto" }
 
 [dev-dependencies]
 tokio = { version = "1.52", features = ["full"] }
