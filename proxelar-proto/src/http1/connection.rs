@@ -12,7 +12,7 @@ use http::{Method, StatusCode, Version};
 use tokio::io::{
     split, AsyncRead, AsyncReadExt as _, AsyncWrite, AsyncWriteExt as _, ReadHalf, WriteHalf,
 };
-use tokio::sync::{mpsc, oneshot, Mutex};
+use tokio::sync::{mpsc, oneshot, Mutex, OwnedSemaphorePermit, Semaphore};
 use tokio::time::timeout;
 
 use crate::{
@@ -487,6 +487,7 @@ impl Stream for BodyChannel {
 struct ClientCommand {
     request: ProxyRequest,
     response_tx: oneshot::Sender<ClientOutcome>,
+    permit: OwnedSemaphorePermit,
 }
 
 enum ClientOutcome {
@@ -525,6 +526,7 @@ pub struct Http1ClientResponse {
 #[derive(Clone)]
 pub struct Http1Client {
     command_tx: mpsc::Sender<ClientCommand>,
+    availability: Arc<Semaphore>,
 }
 
 impl Http1Client {
@@ -533,8 +535,17 @@ impl Http1Client {
         I: AsyncRead + AsyncWrite + Unpin + Send + 'static,
     {
         let (command_tx, command_rx) = mpsc::channel(1);
-        tokio::spawn(run_client(Box::new(io), command_rx, config));
-        Self { command_tx }
+        let availability = Arc::new(Semaphore::new(1));
+        tokio::spawn(run_client(
+            Box::new(io),
+            command_rx,
+            config,
+            Arc::clone(&availability),
+        ));
+        Self {
+            command_tx,
+            availability,
+        }
     }
 
     pub async fn send_request(
@@ -557,12 +568,25 @@ impl Http1Client {
         &self,
         request: ProxyRequest,
     ) -> Result<Http1ClientResponse, ClientSendError> {
+        let permit = match Arc::clone(&self.availability).acquire_owned().await {
+            Ok(permit) => permit,
+            Err(_) => return Err(ClientSendError::NotSent(Box::new(request))),
+        };
+        self.send_reserved(request, permit).await
+    }
+
+    async fn send_reserved(
+        &self,
+        request: ProxyRequest,
+        permit: OwnedSemaphorePermit,
+    ) -> Result<Http1ClientResponse, ClientSendError> {
         let (response_tx, response_rx) = oneshot::channel();
         if let Err(error) = self
             .command_tx
             .send(ClientCommand {
                 request,
                 response_tx,
+                permit,
             })
             .await
         {
@@ -608,6 +632,7 @@ async fn run_client(
     mut io: BoxIo,
     mut command_rx: mpsc::Receiver<ClientCommand>,
     config: ConnectionConfig,
+    availability: Arc<Semaphore>,
 ) {
     let mut buffer = BytesMut::with_capacity(8 * 1024);
     while let Some(command) = command_rx.recv().await {
@@ -667,10 +692,13 @@ async fn run_client(
             // Continue draining the body so a cancelled caller does not poison
             // an otherwise reusable connection.
         }
-        if let Err(error) = read_client_body(&mut io, &mut buffer, framing, body_tx, config).await {
+        if let Err(error) = read_client_body(&mut io, &mut buffer, framing, &body_tx, config).await
+        {
             tracing_error(&error);
             break;
         }
+        drop(command.permit);
+        drop(body_tx);
         if request_close
             || response_close
             || framing == BodyFraming::UntilEof
@@ -684,6 +712,7 @@ async fn run_client(
     // request that was queued but never written. The pool may safely retry
     // only this explicit state; write/read failures remain non-retryable.
     command_rx.close();
+    availability.close();
     while let Some(command) = command_rx.recv().await {
         let _ = command
             .response_tx
@@ -770,13 +799,13 @@ async fn read_client_body<I>(
     io: &mut I,
     buffer: &mut BytesMut,
     framing: BodyFraming,
-    body_tx: mpsc::Sender<BodyResult>,
+    body_tx: &mpsc::Sender<BodyResult>,
     config: ConnectionConfig,
 ) -> Result<(), ProtocolError>
 where
     I: AsyncRead + Unpin,
 {
-    let result = read_client_body_inner(io, buffer, framing, &body_tx, config).await;
+    let result = read_client_body_inner(io, buffer, framing, body_tx, config).await;
     if let Err(error) = &result {
         let _ = body_tx.send(Err(error.clone())).await;
     }
@@ -957,7 +986,36 @@ pub trait Http1Connector: Send + Sync + 'static {
 pub struct Http1Pool<C> {
     connector: Arc<C>,
     config: ConnectionConfig,
-    clients: Mutex<HashMap<PoolKey, Http1Client>>,
+    entries: Mutex<HashMap<PoolKey, PoolEntry>>,
+}
+
+const MAX_CONNECTIONS_PER_KEY: usize = 5;
+
+struct PoolEntry {
+    clients: Vec<Http1Client>,
+    next: usize,
+    connect_lock: Arc<Mutex<()>>,
+}
+
+impl Default for PoolEntry {
+    fn default() -> Self {
+        Self {
+            clients: Vec::new(),
+            next: 0,
+            connect_lock: Arc::new(Mutex::new(())),
+        }
+    }
+}
+
+struct ClientReservation {
+    client: Http1Client,
+    permit: OwnedSemaphorePermit,
+}
+
+enum PoolChoice {
+    Reserved(ClientReservation),
+    Wait(Http1Client),
+    Connect(Arc<Mutex<()>>),
 }
 
 impl<C> Http1Pool<C>
@@ -968,7 +1026,7 @@ where
         Self {
             connector: Arc::new(connector),
             config,
-            clients: Mutex::new(HashMap::new()),
+            entries: Mutex::new(HashMap::new()),
         }
     }
 
@@ -986,18 +1044,22 @@ where
         mut request: ProxyRequest,
     ) -> Result<Http1ClientResponse, ProtocolError> {
         loop {
-            let client = {
-                let mut clients = self.clients.lock().await;
-                if let Some(client) = clients.get(&key) {
-                    client.clone()
-                } else {
-                    let io = self.connector.connect(key.clone()).await?;
-                    let client = Http1Client::new(io, self.config);
-                    clients.insert(key.clone(), client.clone());
-                    client
+            let choice = self.acquire(&key).await?;
+
+            let (client, outcome) = match choice {
+                PoolChoice::Reserved(reservation) => {
+                    let client = reservation.client.clone();
+                    let outcome = client.send_reserved(request, reservation.permit).await;
+                    (client, outcome)
                 }
+                PoolChoice::Wait(client) => {
+                    let outcome = client.send_request_recoverable(request).await;
+                    (client, outcome)
+                }
+                PoolChoice::Connect(_) => unreachable!("acquire resolves connection choices"),
             };
-            match client.send_request_recoverable(request).await {
+
+            match outcome {
                 Ok(response) => return Ok(response),
                 Err(ClientSendError::Failed(error)) => {
                     self.remove_if_current(&key, &client).await;
@@ -1011,21 +1073,85 @@ where
         }
     }
 
-    async fn remove_if_current(&self, key: &PoolKey, failed: &Http1Client) {
-        let mut clients = self.clients.lock().await;
-        if clients
-            .get(key)
-            .is_some_and(|current| current.same_connection(failed))
+    async fn acquire(&self, key: &PoolKey) -> Result<PoolChoice, ProtocolError> {
+        let choice = {
+            let mut entries = self.entries.lock().await;
+            choose_pool_client(entries.entry(key.clone()).or_default())
+        };
+        let PoolChoice::Connect(connect_lock) = choice else {
+            return Ok(choice);
+        };
+
+        let _connect_guard = connect_lock.lock().await;
         {
-            clients.remove(key);
+            let mut entries = self.entries.lock().await;
+            let choice = choose_pool_client(entries.entry(key.clone()).or_default());
+            if !matches!(choice, PoolChoice::Connect(_)) {
+                return Ok(choice);
+            }
+        }
+
+        let io = self.connector.connect(key.clone()).await?;
+        let client = Http1Client::new(io, self.config);
+        let permit = Arc::clone(&client.availability)
+            .try_acquire_owned()
+            .expect("new HTTP/1 client is available");
+        self.entries
+            .lock()
+            .await
+            .entry(key.clone())
+            .or_default()
+            .clients
+            .push(client.clone());
+        Ok(PoolChoice::Reserved(ClientReservation { client, permit }))
+    }
+
+    async fn remove_if_current(&self, key: &PoolKey, failed: &Http1Client) {
+        let mut entries = self.entries.lock().await;
+        if let Some(entry) = entries.get_mut(key) {
+            entry
+                .clients
+                .retain(|client| !client.same_connection(failed));
         }
     }
 
     pub async fn len(&self) -> usize {
-        self.clients.lock().await.len()
+        self.entries
+            .lock()
+            .await
+            .values()
+            .filter(|entry| !entry.clients.is_empty())
+            .count()
     }
 
     pub async fn is_empty(&self) -> bool {
-        self.clients.lock().await.is_empty()
+        self.entries
+            .lock()
+            .await
+            .values()
+            .all(|entry| entry.clients.is_empty())
     }
+}
+
+fn choose_pool_client(entry: &mut PoolEntry) -> PoolChoice {
+    entry
+        .clients
+        .retain(|client| !client.command_tx.is_closed());
+    if let Some(reservation) = entry.clients.iter().find_map(|client| {
+        Arc::clone(&client.availability)
+            .try_acquire_owned()
+            .ok()
+            .map(|permit| ClientReservation {
+                client: client.clone(),
+                permit,
+            })
+    }) {
+        return PoolChoice::Reserved(reservation);
+    }
+    if entry.clients.len() < MAX_CONNECTIONS_PER_KEY {
+        return PoolChoice::Connect(Arc::clone(&entry.connect_lock));
+    }
+    let client = entry.clients[entry.next % entry.clients.len()].clone();
+    entry.next = entry.next.wrapping_add(1);
+    PoolChoice::Wait(client)
 }

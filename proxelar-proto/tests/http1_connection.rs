@@ -309,6 +309,98 @@ impl Http1Connector for DuplexConnector {
 }
 
 #[derive(Clone)]
+struct BlockingConnector {
+    connections: Arc<AtomicUsize>,
+    slow_connect_started: Arc<AtomicBool>,
+    slow_connect_release: Arc<tokio::sync::Notify>,
+}
+
+impl Http1Connector for BlockingConnector {
+    fn connect(&self, key: PoolKey) -> BoxFuture<'static, Result<BoxIo, ProtocolError>> {
+        let connector = self.clone();
+        Box::pin(async move {
+            connector.connections.fetch_add(1, Ordering::SeqCst);
+            if key.destination == "slow.test:80" {
+                connector.slow_connect_started.store(true, Ordering::SeqCst);
+                connector.slow_connect_release.notified().await;
+            }
+            let (client_io, server_io): (DuplexStream, DuplexStream) = tokio::io::duplex(1024);
+            tokio::spawn(async move {
+                let _ = serve_connection(
+                    server_io,
+                    EchoService {
+                        calls: Arc::new(AtomicUsize::new(0)),
+                        trailers: false,
+                    },
+                    ConnectionConfig::default(),
+                )
+                .await;
+            });
+            Ok(Box::new(client_io) as BoxIo)
+        })
+    }
+}
+
+#[derive(Clone)]
+struct DelayedService {
+    slow_started: Arc<AtomicBool>,
+    slow_release: Arc<tokio::sync::Notify>,
+}
+
+impl HttpService for DelayedService {
+    fn call(
+        &mut self,
+        request: ProxyRequest,
+    ) -> BoxFuture<'_, Result<ProxyResponse, ProtocolError>> {
+        let slow_started = Arc::clone(&self.slow_started);
+        let slow_release = Arc::clone(&self.slow_release);
+        Box::pin(async move {
+            let path = request.head.uri.path().to_owned();
+            request.body.collect().await?;
+            if path == "/slow" {
+                slow_started.store(true, Ordering::SeqCst);
+                slow_release.notified().await;
+            }
+            Ok(ProxyResponse::new(
+                ResponseHead::new(StatusCode::OK, Version::HTTP_11, HeaderBlock::new()),
+                ProxyBody::full(Bytes::from(path)),
+            ))
+        })
+    }
+}
+
+#[derive(Clone)]
+struct DelayedConnector {
+    connections: Arc<AtomicUsize>,
+    service: DelayedService,
+}
+
+impl Http1Connector for DelayedConnector {
+    fn connect(&self, _key: PoolKey) -> BoxFuture<'static, Result<BoxIo, ProtocolError>> {
+        let connector = self.clone();
+        Box::pin(async move {
+            connector.connections.fetch_add(1, Ordering::SeqCst);
+            let (client_io, server_io): (DuplexStream, DuplexStream) = tokio::io::duplex(1024);
+            tokio::spawn(async move {
+                let _ = serve_connection(server_io, connector.service, ConnectionConfig::default())
+                    .await;
+            });
+            Ok(Box::new(client_io) as BoxIo)
+        })
+    }
+}
+
+async fn wait_for(flag: &AtomicBool) {
+    tokio::time::timeout(Duration::from_secs(1), async {
+        while !flag.load(Ordering::SeqCst) {
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .unwrap();
+}
+
+#[derive(Clone)]
 struct CloseAfterResponseService;
 
 impl HttpService for CloseAfterResponseService {
@@ -385,6 +477,98 @@ async fn pool_reuses_connections_by_destination_tls_and_route() {
         .unwrap();
     response.body.collect().await.unwrap();
     assert_eq!(connections.load(Ordering::SeqCst), 2);
+}
+
+#[tokio::test]
+async fn slow_connect_does_not_block_an_unrelated_destination() {
+    let slow_connect_started = Arc::new(AtomicBool::new(false));
+    let slow_connect_release = Arc::new(tokio::sync::Notify::new());
+    let pool = Arc::new(Http1Pool::new(
+        BlockingConnector {
+            connections: Arc::new(AtomicUsize::new(0)),
+            slow_connect_started: Arc::clone(&slow_connect_started),
+            slow_connect_release: Arc::clone(&slow_connect_release),
+        },
+        ConnectionConfig::default(),
+    ));
+    let slow_key = PoolKey {
+        destination: "slow.test:80".to_owned(),
+        tls: false,
+        outbound_route: None,
+    };
+    let fast_key = PoolKey {
+        destination: "fast.test:80".to_owned(),
+        tls: false,
+        outbound_route: None,
+    };
+
+    let slow_pool = Arc::clone(&pool);
+    let slow = tokio::spawn(async move {
+        let response = slow_pool
+            .send(slow_key, request(Method::GET, "/slow", ProxyBody::empty()))
+            .await
+            .unwrap();
+        response.body.collect().await.unwrap();
+    });
+    wait_for(&slow_connect_started).await;
+
+    let fast = tokio::time::timeout(
+        Duration::from_secs(1),
+        pool.send(fast_key, request(Method::GET, "/fast", ProxyBody::empty())),
+    )
+    .await
+    .expect("unrelated destination was blocked")
+    .unwrap();
+    assert_eq!(fast.body.collect().await.unwrap().data.as_ref(), b"");
+
+    slow_connect_release.notify_one();
+    slow.await.unwrap();
+}
+
+#[tokio::test]
+async fn concurrent_origin_requests_use_separate_http1_connections() {
+    let connections = Arc::new(AtomicUsize::new(0));
+    let slow_started = Arc::new(AtomicBool::new(false));
+    let slow_release = Arc::new(tokio::sync::Notify::new());
+    let pool = Arc::new(Http1Pool::new(
+        DelayedConnector {
+            connections: Arc::clone(&connections),
+            service: DelayedService {
+                slow_started: Arc::clone(&slow_started),
+                slow_release: Arc::clone(&slow_release),
+            },
+        },
+        ConnectionConfig::default(),
+    ));
+    let key = PoolKey {
+        destination: "example.test:80".to_owned(),
+        tls: false,
+        outbound_route: None,
+    };
+
+    let slow_pool = Arc::clone(&pool);
+    let slow_key = key.clone();
+    let slow = tokio::spawn(async move {
+        let response = slow_pool
+            .send(slow_key, request(Method::GET, "/slow", ProxyBody::empty()))
+            .await
+            .unwrap();
+        response.body.collect().await.unwrap().data
+    });
+    wait_for(&slow_started).await;
+
+    let fast = tokio::time::timeout(
+        Duration::from_secs(1),
+        pool.send(key, request(Method::GET, "/fast", ProxyBody::empty())),
+    )
+    .await
+    .expect("same-origin request was head-of-line blocked")
+    .unwrap();
+    assert_eq!(fast.body.collect().await.unwrap().data.as_ref(), b"/fast");
+    assert_eq!(connections.load(Ordering::SeqCst), 2);
+
+    slow_release.notify_one();
+    assert_eq!(slow.await.unwrap().as_ref(), b"/slow");
 }
 
 #[tokio::test]
