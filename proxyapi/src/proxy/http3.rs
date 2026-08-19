@@ -1,5 +1,5 @@
 use std::collections::HashMap;
-use std::net::{IpAddr, Ipv4Addr, Ipv6Addr};
+use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr};
 use std::path::PathBuf;
 use std::pin::Pin;
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -9,6 +9,7 @@ use std::time::Duration;
 
 use bytes::Bytes;
 use futures_util::{SinkExt as _, Stream, StreamExt as _};
+use http::uri::Authority;
 use proxelar_proto::{
     BodyFrame, BoxFuture, ErrorKind, HttpClient, HttpService, ProtocolError, ProxyBody,
     ProxyRequest, ProxyResponse,
@@ -54,6 +55,7 @@ pub(super) struct ReverseH3Upstream {
 
 struct ReverseH3UpstreamInner {
     target: http::Uri,
+    remote_addr: Option<SocketAddr>,
     verifier: Arc<dyn ServerCertVerifier>,
     tls_cert_path: PathBuf,
     tls_key_path: PathBuf,
@@ -67,9 +69,36 @@ impl ReverseH3Upstream {
         tls_cert_path: PathBuf,
         tls_key_path: PathBuf,
     ) -> Self {
+        Self::with_remote_addr(target, verifier, tls_cert_path, tls_key_path, None)
+    }
+
+    pub(super) fn new_with_remote(
+        target: http::Uri,
+        verifier: Arc<dyn ServerCertVerifier>,
+        tls_cert_path: PathBuf,
+        tls_key_path: PathBuf,
+        remote_addr: SocketAddr,
+    ) -> Self {
+        Self::with_remote_addr(
+            target,
+            verifier,
+            tls_cert_path,
+            tls_key_path,
+            Some(remote_addr),
+        )
+    }
+
+    fn with_remote_addr(
+        target: http::Uri,
+        verifier: Arc<dyn ServerCertVerifier>,
+        tls_cert_path: PathBuf,
+        tls_key_path: PathBuf,
+        remote_addr: Option<SocketAddr>,
+    ) -> Self {
         Self {
             inner: Arc::new(ReverseH3UpstreamInner {
                 target,
+                remote_addr,
                 verifier,
                 tls_cert_path,
                 tls_key_path,
@@ -106,11 +135,14 @@ impl ReverseH3Upstream {
             .ok_or_else(|| malformed("HTTP/3 upstream target has no authority"))?;
         let host = authority.host();
         let port = authority.port_u16().unwrap_or(443);
-        let remote_addr = tokio::net::lookup_host((host, port))
-            .await
-            .map_err(|error| protocol(ErrorKind::Io, error))?
-            .next()
-            .ok_or_else(|| malformed("HTTP/3 upstream target resolved to no addresses"))?;
+        let remote_addr = match self.inner.remote_addr {
+            Some(remote_addr) => remote_addr,
+            None => tokio::net::lookup_host((host, port))
+                .await
+                .map_err(|error| protocol(ErrorKind::Io, error))?
+                .next()
+                .ok_or_else(|| malformed("HTTP/3 upstream target resolved to no addresses"))?,
+        };
         let bind_addr = match remote_addr.ip() {
             IpAddr::V4(_) => (IpAddr::V4(Ipv4Addr::UNSPECIFIED), 0),
             IpAddr::V6(_) => (IpAddr::V6(Ipv6Addr::UNSPECIFIED), 0),
@@ -168,6 +200,68 @@ impl ReverseH3Upstream {
             .await
             .map_err(|error| protocol(ErrorKind::Io, error))?;
         Ok(H3Client::new(connection, controller))
+    }
+}
+
+pub(super) struct DynamicH3CertificateHook {
+    ca: Arc<crate::ca::Ssl>,
+    fallback_authority: Authority,
+}
+
+impl DynamicH3CertificateHook {
+    pub(super) fn new(ca: Arc<crate::ca::Ssl>, fallback_authority: Authority) -> Self {
+        Self {
+            ca,
+            fallback_authority,
+        }
+    }
+}
+
+impl ConnectionHook for DynamicH3CertificateHook {
+    fn create_custom_ssl_context_builder(
+        &self,
+        _settings: TlsCertificatePaths<'_>,
+    ) -> Option<boring::ssl::SslContextBuilder> {
+        use boring::ssl::{
+            AsyncSelectCertError, BoxSelectCertFinish, NameType, SslContextBuilder, SslMethod,
+        };
+
+        let mut builder = SslContextBuilder::new(SslMethod::tls_server()).ok()?;
+        let ca = Arc::clone(&self.ca);
+        let fallback_authority = self.fallback_authority.clone();
+        builder.set_async_select_certificate_callback(move |client_hello| {
+            let authority = client_hello
+                .servername(NameType::HOST_NAME)
+                .and_then(|server_name| server_name.parse::<Authority>().ok())
+                .unwrap_or_else(|| fallback_authority.clone());
+            let ca = Arc::clone(&ca);
+            Ok(Box::pin(async move {
+                let material = ca.gen_h3_certificate(&authority).await.map_err(|error| {
+                    tracing::debug!(
+                        "HTTP/3 dynamic certificate generation failed for {authority}: {error}"
+                    );
+                    AsyncSelectCertError
+                })?;
+                let certificate = boring::x509::X509::from_pem(&material.certificate_pem)
+                    .map_err(|_| AsyncSelectCertError)?;
+                let private_key =
+                    boring::pkey::PKey::private_key_from_pem(&material.private_key_pem)
+                        .map_err(|_| AsyncSelectCertError)?;
+                Ok(
+                    Box::new(move |mut client_hello: boring::ssl::ClientHello<'_>| {
+                        client_hello
+                            .ssl_mut()
+                            .set_certificate(&certificate)
+                            .map_err(|_| AsyncSelectCertError)?;
+                        client_hello
+                            .ssl_mut()
+                            .set_private_key(&private_key)
+                            .map_err(|_| AsyncSelectCertError)
+                    }) as BoxSelectCertFinish,
+                )
+            }))
+        });
+        Some(builder)
     }
 }
 
