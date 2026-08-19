@@ -6,7 +6,7 @@ Lua scripts define `on_request` and/or `on_response` hooks. Return a modified ta
 
 ```lua
 function on_request(request)
-    request.headers["X-Proxied-By"] = "proxelar"
+    request.headers:set("X-Proxied-By", "proxelar")
     return request
 end
 ```
@@ -15,7 +15,7 @@ end
 
 ```lua
 function on_request(request)
-    request.headers["cookie"] = nil
+    request.headers:remove("cookie")
     return request
 end
 ```
@@ -24,9 +24,9 @@ end
 
 ```lua
 function on_response(request, response)
-    response.headers["Access-Control-Allow-Origin"] = "*"
-    response.headers["Access-Control-Allow-Methods"] = "GET, POST, PUT, DELETE, OPTIONS"
-    response.headers["Access-Control-Allow-Headers"] = "Content-Type, Authorization"
+    response.headers:set("Access-Control-Allow-Origin", "*")
+    response.headers:set("Access-Control-Allow-Methods", "GET, POST, PUT, DELETE, OPTIONS")
+    response.headers:set("Access-Control-Allow-Headers", "Content-Type, Authorization")
     return response
 end
 ```
@@ -53,7 +53,7 @@ end
 
 ```lua
 function on_response(request, response)
-    local ct = response.headers["content-type"] or ""
+    local ct = response.headers:get("content-type") or ""
     if not string.find(ct, "application/json") then return end
 
     if string.sub(response.body, 1, 1) == "{" then

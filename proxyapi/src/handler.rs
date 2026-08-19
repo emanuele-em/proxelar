@@ -733,7 +733,7 @@ impl CapturingHandler {
                 &req_method,
                 &req_url,
                 parts.status.as_u16(),
-                &parts.headers,
+                &crate::header::from_http(&parts.headers),
                 &hook_body,
             ) {
                 Ok(crate::scripting::ScriptResponseAction::Modified {
@@ -741,6 +741,18 @@ impl CapturingHandler {
                     headers,
                     body,
                 }) => {
+                    let headers = match crate::header::to_http(&headers) {
+                        Ok(headers) => headers,
+                        Err(error) => {
+                            tracing::warn!(
+                                "Lua on_response produced headers unsupported by the temporary Hyper adapter (passing through): {error}"
+                            );
+                            return HookedResponse {
+                                parts,
+                                body: HookedResponseBody::Original(captured_body),
+                            };
+                        }
+                    };
                     if let Ok(s) = http::StatusCode::from_u16(status) {
                         parts.status = s;
                     }
@@ -948,7 +960,7 @@ impl CapturingHandler {
             match engine.on_request(
                 parts.method.as_str(),
                 &parts.uri.to_string(),
-                &parts.headers,
+                &crate::header::from_http(&parts.headers),
                 &hook_body,
             ) {
                 Ok(crate::scripting::ScriptRequestAction::Forward {
@@ -957,32 +969,39 @@ impl CapturingHandler {
                     headers,
                     body,
                 }) => {
-                    if let Ok(m) = method.parse() {
-                        parts.method = m;
-                    }
-                    if let Ok(u) = url.parse() {
-                        parts.uri = u;
-                    }
-                    parts.headers = headers;
-                    // Re-encode the script's plaintext back to the wire encoding
-                    // (only when we decoded it in the first place).
-                    let wire = if body == hook_body {
-                        if decoded_headers.as_ref().is_some_and(|headers| {
-                            !crate::encoding::can_reuse_wire_body(headers, &parts.headers)
-                        }) {
-                            crate::encoding::encode_from_hook(&mut parts.headers, body)
-                        } else {
-                            raw.clone()
+                    match crate::header::to_http(&headers) {
+                        Ok(headers) => {
+                            if let Ok(m) = method.parse() {
+                                parts.method = m;
+                            }
+                            if let Ok(u) = url.parse() {
+                                parts.uri = u;
+                            }
+                            parts.headers = headers;
+                            // Re-encode the script's plaintext back to the wire encoding
+                            // (only when we decoded it in the first place).
+                            let wire = if body == hook_body {
+                                if decoded_headers.as_ref().is_some_and(|headers| {
+                                    !crate::encoding::can_reuse_wire_body(headers, &parts.headers)
+                                }) {
+                                    crate::encoding::encode_from_hook(&mut parts.headers, body)
+                                } else {
+                                    raw.clone()
+                                }
+                            } else if decoded.is_some() {
+                                crate::encoding::encode_from_hook(&mut parts.headers, body)
+                            } else {
+                                body
+                            };
+                            if decoded.is_none() && wire != raw {
+                                reconcile_edited_body_headers(&mut parts.headers, &wire);
+                            }
+                            request_body.apply_modified_body(&raw, wire);
                         }
-                    } else if decoded.is_some() {
-                        crate::encoding::encode_from_hook(&mut parts.headers, body)
-                    } else {
-                        body
-                    };
-                    if decoded.is_none() && wire != raw {
-                        reconcile_edited_body_headers(&mut parts.headers, &wire);
+                        Err(error) => tracing::warn!(
+                            "Lua on_request produced headers unsupported by the temporary Hyper adapter (passing through): {error}"
+                        ),
                     }
-                    request_body.apply_modified_body(&raw, wire);
                 }
                 Ok(crate::scripting::ScriptRequestAction::ShortCircuit {
                     status,
@@ -1003,11 +1022,18 @@ impl CapturingHandler {
 
                     let status_code = http::StatusCode::from_u16(status)
                         .unwrap_or(http::StatusCode::INTERNAL_SERVER_ERROR);
-                    return CompatRequestOrResponse::Response(self.synthetic_response(
-                        status_code,
-                        headers,
-                        body,
-                    ));
+                    match crate::header::to_http(&headers) {
+                        Ok(headers) => {
+                            return CompatRequestOrResponse::Response(self.synthetic_response(
+                                status_code,
+                                headers,
+                                body,
+                            ));
+                        }
+                        Err(error) => tracing::warn!(
+                            "Lua short-circuit produced headers unsupported by the temporary Hyper adapter (passing through): {error}"
+                        ),
+                    }
                 }
                 Ok(crate::scripting::ScriptRequestAction::PassThrough) => {}
                 Err(e) => {
@@ -1917,6 +1943,47 @@ mod tests {
         headers.insert(http::header::CONTENT_ENCODING, "gzip".parse().unwrap());
         let decoded = crate::encoding::decode_for_hook(&headers, &wire).unwrap();
         assert_eq!(decoded.as_ref(), b"original plaintext");
+    }
+
+    #[cfg(feature = "scripting")]
+    #[tokio::test]
+    async fn request_script_error_passes_original_message_through() {
+        use std::io::Write;
+        use tempfile::NamedTempFile;
+
+        let mut file = NamedTempFile::new().unwrap();
+        file.write_all(
+            br#"
+            function on_request(req)
+                error("boom")
+            end
+            "#,
+        )
+        .unwrap();
+        file.flush().unwrap();
+
+        let engine = Arc::new(crate::scripting::ScriptEngine::new(file.path()).unwrap());
+        let (event_tx, _event_rx) = mpsc::channel(1);
+        let mut handler = CapturingHandler::new(event_tx).with_script_engine(engine);
+        let request = Request::builder()
+            .method(Method::POST)
+            .uri("http://example.test/pass-through")
+            .header("x-original", "yes")
+            .body(body::full(Bytes::from_static(b"original")))
+            .unwrap();
+
+        let CompatRequestOrResponse::Request(request) =
+            handler.handle_compat_request(request).await
+        else {
+            panic!("script error unexpectedly short-circuited request");
+        };
+        assert_eq!(request.method(), Method::POST);
+        assert_eq!(request.uri().path(), "/pass-through");
+        assert_eq!(request.headers()["x-original"], "yes");
+        assert_eq!(
+            request.into_body().collect().await.unwrap().data,
+            Bytes::from_static(b"original")
+        );
     }
 
     #[cfg(feature = "scripting")]

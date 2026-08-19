@@ -546,12 +546,12 @@ async fn reverse_proxy_runs_scripts_for_oversized_request_and_response() {
         .write_all(
             br#"
             function on_request(req)
-                req.headers["x-script"] = "yes"
+                req.headers:set("x-script", "yes")
                 return req
             end
 
             function on_response(req, res)
-                res.headers["x-response-script"] = "yes"
+                res.headers:set("x-response-script", "yes")
                 return res
             end
             "#,

@@ -8,9 +8,10 @@ use std::sync::{Mutex, MutexGuard};
 use std::time::SystemTime;
 
 use bytes::Bytes;
-use http::header::{HeaderName, HeaderValue};
-use http::HeaderMap;
-use mlua::{Lua, Result as LuaResult, Value};
+use mlua::{
+    AnyUserData, Lua, MetaMethod, MultiValue, Result as LuaResult, UserData, UserDataMethods, Value,
+};
+use proxyapi_models::HeaderBlock;
 
 /// Action returned by the Lua `on_request` hook.
 #[derive(Debug)]
@@ -19,13 +20,13 @@ pub enum ScriptRequestAction {
     Forward {
         method: String,
         url: String,
-        headers: HeaderMap,
+        headers: HeaderBlock,
         body: Bytes,
     },
     /// Short-circuit: return this response directly without contacting upstream.
     ShortCircuit {
         status: u16,
-        headers: HeaderMap,
+        headers: HeaderBlock,
         body: Bytes,
     },
     /// No script or script returned nil — pass through unchanged.
@@ -38,7 +39,7 @@ pub enum ScriptResponseAction {
     /// Return the modified response to the client.
     Modified {
         status: u16,
-        headers: HeaderMap,
+        headers: HeaderBlock,
         body: Bytes,
     },
     /// No script or script returned nil — pass through unchanged.
@@ -142,7 +143,7 @@ impl ScriptEngine {
         &self,
         method: &str,
         url: &str,
-        headers: &HeaderMap,
+        headers: &HeaderBlock,
         body: &[u8],
     ) -> Result<ScriptRequestAction, crate::Error> {
         let state = self.lock_reloaded();
@@ -169,9 +170,9 @@ impl ScriptEngine {
                     let status: u16 = t
                         .get("status")
                         .map_err(|e| crate::Error::Script(format!("Invalid status: {e}")))?;
-                    let headers = lua_table_to_headermap(
-                        &t.get::<mlua::Table>("headers")
-                            .unwrap_or_else(|_| lua.create_table().unwrap()),
+                    let headers = lua_value_to_header_block(
+                        lua,
+                        t.get::<Value>("headers").unwrap_or(Value::Nil),
                     )
                     .map_err(|e| crate::Error::Script(format!("Invalid response headers: {e}")))?;
                     let body: Bytes = t
@@ -191,9 +192,9 @@ impl ScriptEngine {
                     let url: String = t
                         .get("url")
                         .map_err(|e| crate::Error::Script(format!("Invalid url: {e}")))?;
-                    let headers = lua_table_to_headermap(
-                        &t.get::<mlua::Table>("headers")
-                            .unwrap_or_else(|_| lua.create_table().unwrap()),
+                    let headers = lua_value_to_header_block(
+                        lua,
+                        t.get::<Value>("headers").unwrap_or(Value::Nil),
                     )
                     .map_err(|e| crate::Error::Script(format!("Invalid request headers: {e}")))?;
                     let body: Bytes = t
@@ -220,7 +221,7 @@ impl ScriptEngine {
         req_method: &str,
         req_url: &str,
         status: u16,
-        headers: &HeaderMap,
+        headers: &HeaderBlock,
         body: &[u8],
     ) -> Result<ScriptResponseAction, crate::Error> {
         let state = self.lock_reloaded();
@@ -255,11 +256,11 @@ impl ScriptEngine {
                 let status: u16 = t
                     .get("status")
                     .map_err(|e| crate::Error::Script(format!("Invalid status: {e}")))?;
-                let headers = lua_table_to_headermap(
-                    &t.get::<mlua::Table>("headers")
-                        .unwrap_or_else(|_| lua.create_table().unwrap()),
-                )
-                .map_err(|e| crate::Error::Script(format!("Invalid response headers: {e}")))?;
+                let headers =
+                    lua_value_to_header_block(lua, t.get::<Value>("headers").unwrap_or(Value::Nil))
+                        .map_err(|e| {
+                            crate::Error::Script(format!("Invalid response headers: {e}"))
+                        })?;
                 let body: Bytes = t
                     .get::<mlua::LuaString>("body")
                     .map(|s| Bytes::copy_from_slice(&s.as_bytes()))
@@ -378,71 +379,175 @@ fn resolve_script_path(script_path: &Path) -> Result<PathBuf, crate::Error> {
     Ok(package.entrypoint().to_owned())
 }
 
-/// Convert an HTTP `HeaderMap` to a Lua table.
-///
-/// Single-value headers become plain strings, multi-value headers become arrays.
-fn headermap_to_lua_table(lua: &Lua, headers: &HeaderMap) -> LuaResult<mlua::Table> {
-    let table = lua.create_table()?;
+#[derive(Clone, Debug)]
+struct LuaHeaders(HeaderBlock);
 
-    // Group header values by name
-    let mut seen = std::collections::HashMap::<&str, Vec<&[u8]>>::new();
-    for (name, value) in headers.iter() {
-        seen.entry(name.as_str())
-            .or_default()
-            .push(value.as_bytes());
-    }
-
-    for (name, values) in seen {
-        if values.len() == 1 {
-            // Single value → plain string
-            table.set(name, lua.create_string(values[0])?)?;
-        } else {
-            // Multiple values → array
-            let arr = lua.create_table()?;
-            for (i, v) in values.iter().enumerate() {
-                arr.set(i + 1, lua.create_string(v)?)?;
+impl UserData for LuaHeaders {
+    fn add_methods<M: UserDataMethods<Self>>(methods: &mut M) {
+        methods.add_method("get", |lua, headers, name: mlua::LuaString| {
+            headers
+                .0
+                .get(name.as_bytes())
+                .map(|value| lua.create_string(value))
+                .transpose()
+        });
+        methods.add_method("get_all", |lua, headers, name: mlua::LuaString| {
+            let values = lua.create_table()?;
+            for (index, value) in headers.0.get_all(name.as_bytes()).enumerate() {
+                values.set(index + 1, lua.create_string(value)?)?;
             }
-            table.set(name, arr)?;
-        }
-    }
+            Ok(values)
+        });
+        methods.add_method_mut(
+            "set",
+            |_, headers, (name, value): (mlua::LuaString, mlua::LuaString)| {
+                headers
+                    .0
+                    .set(name.as_bytes(), value.as_bytes())
+                    .map_err(header_error)
+            },
+        );
+        methods.add_method_mut(
+            "add",
+            |_, headers, (name, value): (mlua::LuaString, mlua::LuaString)| {
+                headers
+                    .0
+                    .add(name.as_bytes(), value.as_bytes())
+                    .map_err(header_error)
+            },
+        );
+        methods.add_method_mut("remove", |_, headers, name: mlua::LuaString| {
+            Ok(headers.0.remove(name.as_bytes()))
+        });
+        methods.add_method("iter", |lua, headers, ()| {
+            ordered_header_iterator(lua, &headers.0)
+        });
 
-    Ok(table)
+        // Compatibility for existing scripts: bracket reads return the first
+        // value and assignments use `set`; assigning nil removes every value.
+        methods.add_meta_method(MetaMethod::Index, |lua, headers, name: mlua::LuaString| {
+            headers
+                .0
+                .get(name.as_bytes())
+                .map(|value| lua.create_string(value))
+                .transpose()
+        });
+        methods.add_meta_method_mut(
+            MetaMethod::NewIndex,
+            |_, headers, (name, value): (mlua::LuaString, Value)| {
+                set_legacy_header_value(&mut headers.0, &name, value)
+            },
+        );
+        methods.add_meta_method(MetaMethod::Len, |_, headers, ()| Ok(headers.0.len()));
+        methods.add_meta_method(MetaMethod::Pairs, |lua, headers, ()| {
+            Ok((
+                ordered_header_iterator(lua, &headers.0)?,
+                Value::Nil,
+                Value::Nil,
+            ))
+        });
+    }
 }
 
-/// Convert a Lua table back to an HTTP `HeaderMap`.
-///
-/// Accepts both plain strings and arrays of strings as values.
-fn lua_table_to_headermap(table: &mlua::Table) -> LuaResult<HeaderMap> {
-    let mut headers = HeaderMap::new();
+fn header_error(error: proxyapi_models::HeaderFieldError) -> mlua::Error {
+    mlua::Error::external(format!("Invalid header: {error}"))
+}
 
-    for pair in table.pairs::<mlua::LuaString, Value>() {
-        let (key, value) = pair?;
-        let header_name = HeaderName::from_bytes(&key.as_bytes())
-            .map_err(|e| mlua::Error::external(format!("Invalid header name: {e}")))?;
+fn ordered_header_iterator(lua: &Lua, headers: &HeaderBlock) -> LuaResult<mlua::Function> {
+    let fields = headers
+        .iter()
+        .map(|field| (field.name().to_vec(), field.value().to_vec()))
+        .collect::<Vec<_>>();
+    let mut index = 0;
+    lua.create_function_mut(move |lua, _: MultiValue| {
+        let Some((name, value)) = fields.get(index) else {
+            return Ok(MultiValue::new());
+        };
+        index += 1;
+        Ok(MultiValue::from_vec(vec![
+            Value::String(lua.create_string(name)?),
+            Value::String(lua.create_string(value)?),
+        ]))
+    })
+}
 
-        match value {
-            Value::String(s) => {
-                let header_value = HeaderValue::from_bytes(&s.as_bytes())
-                    .map_err(|e| mlua::Error::external(format!("Invalid header value: {e}")))?;
-                headers.append(header_name, header_value);
+fn set_legacy_header_value(
+    headers: &mut HeaderBlock,
+    name: &mlua::LuaString,
+    value: Value,
+) -> LuaResult<()> {
+    match value {
+        Value::Nil => {
+            headers.remove(name.as_bytes());
+            Ok(())
+        }
+        Value::String(value) => headers
+            .set(name.as_bytes(), value.as_bytes())
+            .map_err(header_error),
+        Value::Table(values) => {
+            let mut values = values.sequence_values::<mlua::LuaString>();
+            if let Some(value) = values.next() {
+                headers
+                    .set(name.as_bytes(), value?.as_bytes())
+                    .map_err(header_error)?;
+            } else {
+                headers.remove(name.as_bytes());
             }
-            Value::Table(arr) => {
-                for v in arr.sequence_values::<mlua::LuaString>() {
-                    let s = v?;
-                    let header_value = HeaderValue::from_bytes(&s.as_bytes())
-                        .map_err(|e| mlua::Error::external(format!("Invalid header value: {e}")))?;
-                    headers.append(header_name.clone(), header_value);
+            for value in values {
+                headers
+                    .add(name.as_bytes(), value?.as_bytes())
+                    .map_err(header_error)?;
+            }
+            Ok(())
+        }
+        other => Err(mlua::Error::external(format!(
+            "Header value for '{}' must be a string, array of strings, or nil; got {}",
+            name.to_string_lossy(),
+            other.type_name()
+        ))),
+    }
+}
+
+fn lua_value_to_header_block(lua: &Lua, value: Value) -> LuaResult<HeaderBlock> {
+    match value {
+        Value::Nil => Ok(HeaderBlock::new()),
+        Value::UserData(headers) => clone_lua_headers(&headers),
+        Value::Table(table) => legacy_lua_table_to_header_block(lua, &table),
+        other => Err(mlua::Error::external(format!(
+            "headers must be a header object or table, got {}",
+            other.type_name()
+        ))),
+    }
+}
+
+fn clone_lua_headers(headers: &AnyUserData) -> LuaResult<HeaderBlock> {
+    Ok(headers.borrow::<LuaHeaders>()?.0.clone())
+}
+
+fn legacy_lua_table_to_header_block(_lua: &Lua, table: &mlua::Table) -> LuaResult<HeaderBlock> {
+    let mut headers = HeaderBlock::new();
+    for pair in table.clone().pairs::<mlua::LuaString, Value>() {
+        let (name, value) = pair?;
+        match value {
+            Value::String(value) => headers
+                .add(name.as_bytes(), value.as_bytes())
+                .map_err(header_error)?,
+            Value::Table(values) => {
+                for value in values.sequence_values::<mlua::LuaString>() {
+                    headers
+                        .add(name.as_bytes(), value?.as_bytes())
+                        .map_err(header_error)?;
                 }
             }
-            _ => {
+            other => {
                 return Err(mlua::Error::external(format!(
-                    "Header value for '{}' must be a string or array of strings",
-                    key.to_string_lossy()
+                    "Header value for '{}' must be a string or array of strings, got {}",
+                    name.to_string_lossy(),
+                    other.type_name()
                 )));
             }
         }
     }
-
     Ok(headers)
 }
 
@@ -451,13 +556,13 @@ fn request_to_lua_table(
     lua: &Lua,
     method: &str,
     url: &str,
-    headers: &HeaderMap,
+    headers: &HeaderBlock,
     body: &[u8],
 ) -> LuaResult<mlua::Table> {
     let table = lua.create_table()?;
     table.set("method", method)?;
     table.set("url", url)?;
-    table.set("headers", headermap_to_lua_table(lua, headers)?)?;
+    table.set("headers", LuaHeaders(headers.clone()))?;
     table.set("body", lua.create_string(body)?)?;
     Ok(table)
 }
@@ -466,12 +571,12 @@ fn request_to_lua_table(
 fn response_to_lua_table(
     lua: &Lua,
     status: u16,
-    headers: &HeaderMap,
+    headers: &HeaderBlock,
     body: &[u8],
 ) -> LuaResult<mlua::Table> {
     let table = lua.create_table()?;
     table.set("status", status)?;
-    table.set("headers", headermap_to_lua_table(lua, headers)?)?;
+    table.set("headers", LuaHeaders(headers.clone()))?;
     table.set("body", lua.create_string(body)?)?;
     Ok(table)
 }
@@ -503,41 +608,95 @@ mod tests {
     }
 
     #[test]
-    fn test_headermap_roundtrip_single_value() {
-        let lua = Lua::new();
-        let mut headers = HeaderMap::new();
-        headers.insert("content-type", "application/json".parse().unwrap());
-        headers.insert("x-custom", "hello".parse().unwrap());
+    fn ordered_header_methods_preserve_duplicates_casing_binary_values_and_order() {
+        let engine = engine_from_script(
+            r#"
+            function on_request(req)
+                assert(req.headers:get("x-first") == "one")
+                local duplicates = req.headers:get_all("X-DUP")
+                assert(#duplicates == 2)
+                assert(duplicates[1] == "alpha")
+                assert(duplicates[2] == string.char(255, 128))
 
-        let table = headermap_to_lua_table(&lua, &headers).unwrap();
-        let back = lua_table_to_headermap(&table).unwrap();
+                local names = {}
+                for name, _ in req.headers:iter() do
+                    table.insert(names, name)
+                end
+                assert(table.concat(names, ",") == "X-First,X-Dup,X-Middle,x-dup")
 
-        assert_eq!(back.get("content-type").unwrap(), "application/json");
-        assert_eq!(back.get("x-custom").unwrap(), "hello");
+                local pair_names = {}
+                for name, _ in pairs(req.headers) do
+                    table.insert(pair_names, name)
+                end
+                assert(table.concat(pair_names, ",") == "X-First,X-Dup,X-Middle,x-dup")
+
+                req.headers:set("X-Dup", "replacement")
+                req.headers:add("X-Dup", "tail")
+                assert(req.headers:remove("x-first") == 1)
+                return req
+            end
+            "#,
+        );
+        let mut headers = HeaderBlock::new();
+        headers.add("X-First", "one").unwrap();
+        headers.add("X-Dup", "alpha").unwrap();
+        headers.add("X-Middle", "middle").unwrap();
+        headers.add("x-dup", [0xff, 0x80]).unwrap();
+
+        let action = engine
+            .on_request("GET", "http://example.test", &headers, b"")
+            .unwrap();
+        let ScriptRequestAction::Forward { headers, .. } = action else {
+            panic!("expected modified request");
+        };
+        let fields = headers
+            .iter()
+            .map(|field| (field.name(), field.value()))
+            .collect::<Vec<_>>();
+        assert_eq!(
+            fields,
+            vec![
+                (b"X-Dup".as_slice(), b"replacement".as_slice()),
+                (b"X-Middle".as_slice(), b"middle".as_slice()),
+                (b"X-Dup".as_slice(), b"tail".as_slice()),
+            ]
+        );
     }
 
     #[test]
-    fn test_headermap_roundtrip_multi_value() {
-        let lua = Lua::new();
-        let mut headers = HeaderMap::new();
-        headers.append("set-cookie", "a=1".parse().unwrap());
-        headers.append("set-cookie", "b=2".parse().unwrap());
+    fn bracket_assignment_remains_a_set_remove_compatibility_alias() {
+        let engine = engine_from_script(
+            r#"
+            function on_request(req)
+                assert(req.headers["x-test"] == "first")
+                req.headers["x-test"] = "replacement"
+                req.headers["x-remove"] = nil
+                return req
+            end
+            "#,
+        );
+        let mut headers = HeaderBlock::new();
+        headers.add("X-Test", "first").unwrap();
+        headers.add("x-test", "second").unwrap();
+        headers.add("X-Remove", "gone").unwrap();
 
-        let table = headermap_to_lua_table(&lua, &headers).unwrap();
-        let back = lua_table_to_headermap(&table).unwrap();
-
-        let values: Vec<&str> = back
-            .get_all("set-cookie")
-            .into_iter()
-            .map(|v| v.to_str().unwrap())
-            .collect();
-        assert_eq!(values, vec!["a=1", "b=2"]);
+        let action = engine
+            .on_request("GET", "http://example.test", &headers, b"")
+            .unwrap();
+        let ScriptRequestAction::Forward { headers, .. } = action else {
+            panic!("expected modified request");
+        };
+        assert_eq!(
+            headers.get_all("x-test").collect::<Vec<_>>(),
+            vec![b"replacement".as_slice()]
+        );
+        assert!(!headers.contains_key("x-remove"));
     }
 
     #[test]
     fn test_on_request_passthrough_no_function() {
         let engine = engine_from_script("-- empty script");
-        let headers = HeaderMap::new();
+        let headers = HeaderBlock::new();
         let result = engine
             .on_request("GET", "http://example.com", &headers, b"")
             .unwrap();
@@ -547,7 +706,7 @@ mod tests {
     #[test]
     fn test_on_request_passthrough_nil() {
         let engine = engine_from_script("function on_request(req) return nil end");
-        let headers = HeaderMap::new();
+        let headers = HeaderBlock::new();
         let result = engine
             .on_request("GET", "http://example.com", &headers, b"")
             .unwrap();
@@ -564,13 +723,13 @@ mod tests {
             end
             "#,
         );
-        let headers = HeaderMap::new();
+        let headers = HeaderBlock::new();
         let result = engine
             .on_request("GET", "http://example.com", &headers, b"")
             .unwrap();
         match result {
             ScriptRequestAction::Forward { headers, .. } => {
-                assert_eq!(headers.get("x-added").unwrap(), "yes");
+                assert_eq!(headers.get("x-added"), Some(b"yes".as_slice()));
             }
             _ => panic!("Expected Forward"),
         }
@@ -598,12 +757,12 @@ mod tests {
 
         let engine = ScriptEngine::new(directory.path()).unwrap();
         let action = engine
-            .on_request("GET", "http://example.test", &HeaderMap::new(), b"")
+            .on_request("GET", "http://example.test", &HeaderBlock::new(), b"")
             .unwrap();
         assert!(matches!(
             action,
             ScriptRequestAction::Forward { headers, .. }
-                if headers["x-addon"] == "community-addon"
+                if headers.get("x-addon") == Some(b"community-addon".as_slice())
         ));
         assert_eq!(engine.script_path(), directory.path().join("init.lua"));
     }
@@ -643,12 +802,12 @@ mod tests {
 
         let engine = ScriptEngine::new(directory.path()).unwrap();
         let action = engine
-            .on_request("GET", "http://example.test", &HeaderMap::new(), b"")
+            .on_request("GET", "http://example.test", &HeaderBlock::new(), b"")
             .unwrap();
         assert!(matches!(
             action,
             ScriptRequestAction::Forward { headers, .. }
-                if headers["x-addon"] == "manifested"
+                if headers.get("x-addon") == Some(b"manifested".as_slice())
         ));
         assert_eq!(
             engine.script_path(),
@@ -672,11 +831,11 @@ mod tests {
         )
         .unwrap();
         let action = engine
-            .on_request("GET", "http://example.test", &HeaderMap::new(), b"")
+            .on_request("GET", "http://example.test", &HeaderBlock::new(), b"")
             .unwrap();
         match action {
             ScriptRequestAction::Forward { headers, .. } => {
-                assert_eq!(headers["x-version"], "version-two");
+                assert_eq!(headers.get("x-version"), Some(b"version-two".as_slice()));
             }
             _ => panic!("expected modified request"),
         }
@@ -687,11 +846,11 @@ mod tests {
         )
         .unwrap();
         let action = engine
-            .on_request("GET", "http://example.test", &HeaderMap::new(), b"")
+            .on_request("GET", "http://example.test", &HeaderBlock::new(), b"")
             .unwrap();
         match action {
             ScriptRequestAction::Forward { headers, .. } => {
-                assert_eq!(headers["x-version"], "version-two");
+                assert_eq!(headers.get("x-version"), Some(b"version-two".as_slice()));
             }
             _ => panic!("expected last known-good request hook"),
         }
@@ -737,7 +896,7 @@ mod tests {
             end
             "#,
         );
-        let headers = HeaderMap::new();
+        let headers = HeaderBlock::new();
         let result = engine
             .on_request("GET", "http://example.com", &headers, b"")
             .unwrap();
@@ -759,7 +918,7 @@ mod tests {
             end
             "#,
         );
-        let headers = HeaderMap::new();
+        let headers = HeaderBlock::new();
 
         let err = engine
             .on_request("GET", "http://example.com", &headers, b"")
@@ -779,14 +938,14 @@ mod tests {
             end
             "#,
         );
-        let headers = HeaderMap::new();
+        let headers = HeaderBlock::new();
 
         let err = engine
             .on_request("GET", "http://example.com", &headers, b"")
             .unwrap_err()
             .to_string();
 
-        assert!(err.contains("Header value for 'x-bad' must be a string or array of strings"));
+        assert!(err.contains("Header value for 'x-bad' must be a string"));
     }
 
     #[test]
@@ -800,7 +959,7 @@ mod tests {
             end
             "#,
         );
-        let headers = HeaderMap::new();
+        let headers = HeaderBlock::new();
         let result = engine
             .on_response("GET", "http://example.com", 200, &headers, b"body")
             .unwrap();
@@ -809,7 +968,7 @@ mod tests {
                 status, headers, ..
             } => {
                 assert_eq!(status, 201);
-                assert_eq!(headers.get("x-proxy").unwrap(), "proxelar");
+                assert_eq!(headers.get("x-proxy"), Some(b"proxelar".as_slice()));
             }
             _ => panic!("Expected Modified"),
         }
@@ -818,7 +977,7 @@ mod tests {
     #[test]
     fn test_on_response_passthrough() {
         let engine = engine_from_script("-- no on_response defined");
-        let headers = HeaderMap::new();
+        let headers = HeaderBlock::new();
         let result = engine
             .on_response("GET", "http://example.com", 200, &headers, b"body")
             .unwrap();
@@ -834,7 +993,7 @@ mod tests {
             end
             "#,
         );
-        let headers = HeaderMap::new();
+        let headers = HeaderBlock::new();
         let result = engine
             .on_response("GET", "http://example.com", 200, &headers, b"body")
             .unwrap();
@@ -851,7 +1010,7 @@ mod tests {
             end
             "#,
         );
-        let headers = HeaderMap::new();
+        let headers = HeaderBlock::new();
 
         let err = engine
             .on_response("GET", "http://example.com", 200, &headers, b"body")
@@ -871,14 +1030,14 @@ mod tests {
             end
             "#,
         );
-        let headers = HeaderMap::new();
+        let headers = HeaderBlock::new();
 
         let err = engine
             .on_response("GET", "http://example.com", 200, &headers, b"body")
             .unwrap_err()
             .to_string();
 
-        assert!(err.contains("Header value for 'x-bad' must be a string or array of strings"));
+        assert!(err.contains("Header value for 'x-bad' must be a string"));
     }
 
     #[test]
@@ -890,7 +1049,7 @@ mod tests {
             end
             "#,
         );
-        let headers = HeaderMap::new();
+        let headers = HeaderBlock::new();
         let result = engine.on_request("GET", "http://example.com", &headers, b"");
         assert!(result.is_err());
         let err_msg = result.unwrap_err().to_string();
@@ -935,7 +1094,7 @@ mod tests {
             end
             "#,
         );
-        let headers = HeaderMap::new();
+        let headers = HeaderBlock::new();
         let binary_body = &[0u8, 1, 2, 255, 254, 253];
         let result = engine
             .on_request("POST", "http://example.com", &headers, binary_body)
@@ -961,8 +1120,8 @@ mod tests {
             end
             "#,
         );
-        let mut headers = HeaderMap::new();
-        headers.insert("content-type", "application/json".parse().unwrap());
+        let mut headers = HeaderBlock::new();
+        headers.add("content-type", "application/json").unwrap();
         let result = engine.on_request(
             "POST",
             "http://example.com/api",
@@ -984,13 +1143,13 @@ mod tests {
             end
             "#,
         );
-        let headers = HeaderMap::new();
+        let headers = HeaderBlock::new();
         let result = engine
             .on_response("GET", "http://example.com", 200, &headers, b"")
             .unwrap();
         match result {
             ScriptResponseAction::Modified { headers, .. } => {
-                assert_eq!(headers.get("x-req-method").unwrap(), "GET");
+                assert_eq!(headers.get("x-req-method"), Some(b"GET".as_slice()));
             }
             _ => panic!("Expected Modified"),
         }
