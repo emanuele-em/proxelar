@@ -14,7 +14,7 @@
 
 ### Changed
 
-- Remove Hyper from the `proxyapi` data path and public API; Hyper remains only as a transitive CLI dependency through Axum.
+- Remove Hyper from the `proxyapi` data path, public API, and production dependencies; it remains transitively in the CLI through Axum and as a dev-only protocol test dependency.
 - Bump native sessions to format v2 with ordered byte-safe header lists; v1 files are rejected explicitly instead of being decoded with lossy header semantics.
 
 ## [0.5.1] - 2026-07-31
