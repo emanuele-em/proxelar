@@ -2517,6 +2517,7 @@ dependencies = [
  "bytes",
  "futures-core",
  "futures-util",
+ "h2",
  "http",
  "httparse",
  "proptest",
