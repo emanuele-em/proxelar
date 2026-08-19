@@ -1,6 +1,7 @@
 use std::net::SocketAddr;
 use std::sync::Arc;
 
+use base64::Engine as _;
 use bytes::Bytes;
 use http::uri::{Authority, Scheme};
 use http::{Method, StatusCode, Uri, Version};
@@ -8,7 +9,7 @@ use proxelar_proto::http2::{body_tunnel, serve_connection, ConnectionConfig};
 use proxelar_proto::{
     BoxFuture, ErrorKind, HttpService, ProtocolError, ProxyRequest, ProxyResponse, ResponseHead,
 };
-use proxyapi_models::HeaderBlock;
+use proxyapi_models::{HeaderBlock, ProxiedResponse};
 use tokio::io::{AsyncRead, AsyncWrite};
 
 use crate::ca::{CertificateAuthority, Ssl};
@@ -18,8 +19,8 @@ use crate::{HttpContext, HttpHandler, RequestOrResponse};
 
 use super::forward::{
     handle_cert_protocol_request, is_cert_protocol_request, is_direct_cert_protocol_request,
-    is_h2_preface, reconstruct_protocol_uri, serve_native_stream, sniff_stream_protocol,
-    StreamProtocol,
+    is_h2_preface, pump_native_websocket, reconstruct_protocol_uri, serve_native_stream,
+    sniff_stream_protocol, StreamProtocol,
 };
 use super::http1::{NativePool, NativeUpstream};
 use super::BoxError;
@@ -79,7 +80,7 @@ where
         upstream,
         listen_addr,
     };
-    serve_connection(io, service, ConnectionConfig::default())
+    serve_connection(io, service, server_config())
         .await
         .map_err(|error| Box::new(error) as BoxError)
 }
@@ -129,7 +130,7 @@ where
         target,
         upstream,
     };
-    serve_connection(io, service, ConnectionConfig::default())
+    serve_connection(io, service, server_config())
         .await
         .map_err(|error| Box::new(error) as BoxError)
 }
@@ -169,6 +170,16 @@ impl ForwardH2Service {
         }
 
         if request.head.method == Method::CONNECT {
+            if is_extended_websocket(&request) {
+                return handle_extended_websocket(
+                    request,
+                    self.handler,
+                    self.upstream,
+                    self.remote_addr,
+                    None,
+                )
+                .await;
+            }
             let authority = request
                 .head
                 .uri
@@ -235,6 +246,16 @@ impl HttpService for ReverseH2Service {
         let remote_addr = self.remote_addr;
         Box::pin(async move {
             let context = HttpContext { remote_addr };
+            if is_extended_websocket(&request) {
+                return handle_extended_websocket(
+                    request,
+                    handler,
+                    upstream,
+                    remote_addr,
+                    Some(target),
+                )
+                .await;
+            }
             let request = match handler.handle_request(&context, request).await {
                 RequestOrResponse::Request(request) => request,
                 RequestOrResponse::Response(response) => return Ok(response),
@@ -262,6 +283,170 @@ impl HttpService for ReverseH2Service {
                 }
             }
         })
+    }
+}
+
+async fn handle_extended_websocket(
+    mut request: ProxyRequest,
+    mut handler: CapturingHandler,
+    upstream: NativeUpstream,
+    remote_addr: SocketAddr,
+    reverse_target: Option<Uri>,
+) -> Result<ProxyResponse, ProtocolError> {
+    let inbound = std::mem::replace(&mut request.body, crate::ProxyBody::empty());
+    // The general handler compatibility adapter targets `http::HeaderMap`,
+    // which cannot represent pseudo-headers. The protocol was validated by
+    // the h2 adapter and is restored immediately after the hooks run.
+    request.head.headers.remove(":protocol");
+    let context = HttpContext { remote_addr };
+    let mut request = match handler.handle_request(&context, request).await {
+        RequestOrResponse::Request(request) => request,
+        RequestOrResponse::Response(response) => return Ok(response),
+    };
+    request.body = inbound;
+    set_header(&mut request.head.headers, ":protocol", "websocket")?;
+    if !is_extended_websocket(&request)
+        || request.head.headers.get("sec-websocket-version") != Some(b"13".as_slice())
+    {
+        return Ok(handler.synthetic_protocol_response(
+            StatusCode::BAD_REQUEST,
+            http::HeaderMap::new(),
+            Bytes::from_static(b"Invalid RFC 8441 WebSocket request"),
+        ));
+    }
+    if let Some(target) = reverse_target {
+        request = match super::reverse::rewrite_uri(request, &target) {
+            Ok(request) => request,
+            Err(error) => {
+                tracing::error!("Failed to rewrite RFC 8441 WebSocket URI: {error}");
+                return Ok(handler.synthetic_protocol_response(
+                    StatusCode::BAD_GATEWAY,
+                    http::HeaderMap::new(),
+                    Bytes::from_static(b"Bad Gateway: URI rewrite failed"),
+                ));
+            }
+        };
+    }
+
+    let inbound = std::mem::replace(&mut request.body, crate::ProxyBody::empty());
+    request.head.method = Method::GET;
+    request.head.version = Version::HTTP_11;
+    for name in [
+        b":protocol".as_slice(),
+        b"connection".as_slice(),
+        b"upgrade".as_slice(),
+        b"sec-websocket-key".as_slice(),
+        b"sec-websocket-accept".as_slice(),
+        b"sec-websocket-extensions".as_slice(),
+    ] {
+        request.head.headers.remove(name);
+    }
+    let mut nonce = [0_u8; 16];
+    if let Err(error) = openssl::rand::rand_bytes(&mut nonce) {
+        return Err(ProtocolError::new(ErrorKind::Io, error.to_string()));
+    }
+    set_header(&mut request.head.headers, "connection", "Upgrade")?;
+    set_header(&mut request.head.headers, "upgrade", "websocket")?;
+    set_header(
+        &mut request.head.headers,
+        "sec-websocket-key",
+        base64::engine::general_purpose::STANDARD.encode(nonce),
+    )?;
+
+    let mut result = match upstream.send(request, true).await {
+        Ok(result) => result,
+        Err(error) => {
+            tracing::error!("RFC 8441 upstream handshake failed: {error}");
+            return Ok(handler.synthetic_protocol_response(
+                StatusCode::BAD_GATEWAY,
+                http::HeaderMap::new(),
+                Bytes::from_static(b"Bad Gateway"),
+            ));
+        }
+    };
+    if result.response.head.status != StatusCode::SWITCHING_PROTOCOLS {
+        return Ok(handler.handle_response(&context, result.response).await);
+    }
+    let Some(upstream_upgrade) = result.upgrade.take() else {
+        return Ok(handler.synthetic_protocol_response(
+            StatusCode::BAD_GATEWAY,
+            http::HeaderMap::new(),
+            Bytes::from_static(b"Bad Gateway: missing WebSocket upgrade"),
+        ));
+    };
+
+    let (client_tunnel, outbound) = body_tunnel(inbound, TUNNEL_BUFFER_CAPACITY);
+    for name in [
+        b"connection".as_slice(),
+        b"upgrade".as_slice(),
+        b"sec-websocket-accept".as_slice(),
+        b"content-length".as_slice(),
+        b"transfer-encoding".as_slice(),
+    ] {
+        result.response.head.headers.remove(name);
+    }
+    result.response.head.status = StatusCode::OK;
+    result.response.head.version = Version::HTTP_2;
+    let connected = ProxiedResponse::new(
+        StatusCode::OK,
+        Version::HTTP_2,
+        result.response.head.headers.clone(),
+        Bytes::new(),
+        crate::handler::now_millis(),
+    );
+    let connection_id = handler
+        .take_pending_id()
+        .unwrap_or_else(crate::event::next_id);
+    if let Some(captured_request) = handler.take_captured_request() {
+        handler.send_event(crate::event::ProxyEvent::WebSocketConnected {
+            id: connection_id,
+            request: Box::new(captured_request),
+            response: Box::new(connected),
+        });
+    }
+    tokio::spawn(async move {
+        match upstream_upgrade.wait().await {
+            Ok(server) => {
+                pump_native_websocket(
+                    connection_id,
+                    proxelar_proto::http1::UpgradedIo {
+                        io: client_tunnel,
+                        read_ahead: Bytes::new(),
+                    },
+                    server,
+                    handler,
+                )
+                .await;
+            }
+            Err(error) => tracing::debug!("RFC 8441 upstream upgrade failed: {error}"),
+        }
+    });
+    Ok(ProxyResponse::new(result.response.head, outbound))
+}
+
+fn is_extended_websocket(request: &ProxyRequest) -> bool {
+    request.head.method == Method::CONNECT
+        && request
+            .head
+            .headers
+            .get(":protocol")
+            .is_some_and(|value| value.eq_ignore_ascii_case(b"websocket"))
+}
+
+fn set_header(
+    headers: &mut HeaderBlock,
+    name: &str,
+    value: impl AsRef<[u8]>,
+) -> Result<(), ProtocolError> {
+    headers
+        .set(name, value)
+        .map_err(|error| malformed(error.to_string()))
+}
+
+fn server_config() -> ConnectionConfig {
+    ConnectionConfig {
+        enable_extended_connect: true,
+        ..ConnectionConfig::default()
     }
 }
 

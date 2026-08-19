@@ -160,6 +160,51 @@ async fn service_failures_reset_only_the_stream() {
     server.await.unwrap().unwrap();
 }
 
+#[tokio::test]
+async fn extended_connect_is_advertised_and_streams_bytes() {
+    let (client_io, server_io) = tokio::io::duplex(1024);
+    let server = tokio::spawn(serve_connection(
+        server_io,
+        EchoService,
+        ConnectionConfig {
+            enable_extended_connect: true,
+            ..ConnectionConfig::default()
+        },
+    ));
+    let client = H2Client::handshake(client_io, ConnectionConfig::default())
+        .await
+        .unwrap();
+    tokio::time::timeout(Duration::from_secs(2), async {
+        while !client.is_extended_connect_enabled() {
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .unwrap();
+
+    let response = client
+        .send_request(ProxyRequest::new(
+            proxelar_proto::RequestHead::new(
+                http::Method::CONNECT,
+                "https://example.test/chat".parse().unwrap(),
+                http::Version::HTTP_2,
+                HeaderBlock::from_fields([
+                    HeaderField::new(":protocol", "websocket").unwrap(),
+                    HeaderField::new("sec-websocket-version", "13").unwrap(),
+                ]),
+            ),
+            ProxyBody::full(Bytes::from_static(b"websocket bytes")),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(
+        response.body.collect().await.unwrap().data,
+        Bytes::from_static(b"websocket bytes")
+    );
+    drop(client);
+    server.await.unwrap().unwrap();
+}
+
 #[derive(Clone)]
 struct QueueConnector {
     streams: Arc<Mutex<VecDeque<DuplexStream>>>,

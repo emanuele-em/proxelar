@@ -204,6 +204,11 @@ impl H2Client {
         Ok(Self { sender })
     }
 
+    /// Return whether the peer has acknowledged RFC 8441 extended CONNECT.
+    pub fn is_extended_connect_enabled(&self) -> bool {
+        self.sender.is_extended_connect_protocol_enabled()
+    }
+
     pub async fn send_request(
         &self,
         request: ProxyRequest,

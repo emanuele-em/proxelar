@@ -145,7 +145,12 @@ pub fn decode_request_head(block: &HeaderBlock) -> Result<RequestHead, ProtocolE
     };
 
     if let Some(protocol) = protocol {
-        add(&mut headers, b":protocol", protocol)?;
+        let mut ordered = HeaderBlock::new();
+        add(&mut ordered, b":protocol", protocol)?;
+        for field in headers {
+            ordered.push(field);
+        }
+        headers = ordered;
     }
     Ok(RequestHead::new(method, uri, Version::HTTP_2, headers))
 }
