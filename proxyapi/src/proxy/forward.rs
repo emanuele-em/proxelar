@@ -62,11 +62,13 @@ enum TunnelRequestError {
 }
 
 #[derive(Clone)]
+#[allow(dead_code)]
 enum UpstreamClient {
     Shared(Arc<Client>),
     Pinned(Arc<Mutex<hyper::client::conn::http1::SendRequest<HyperBody>>>),
 }
 
+#[allow(dead_code)]
 impl UpstreamClient {
     async fn pinned<I>(stream: I) -> Result<Self, BoxError>
     where
@@ -172,12 +174,12 @@ pub(super) async fn handle_connection(
         return;
     }
 
-    if let Err(error) = serve_hyper_forward(
+    if let Err(error) = super::http2::serve_forward(
         stream,
+        Scheme::HTTP,
         remote_addr,
         handler,
         ca,
-        client,
         native_pool,
         route,
         listen_addr,
@@ -191,6 +193,7 @@ pub(super) async fn handle_connection(
 }
 
 #[allow(clippy::too_many_arguments)]
+#[allow(dead_code)]
 async fn serve_hyper_forward<I>(
     stream: I,
     remote_addr: SocketAddr,
@@ -381,7 +384,7 @@ impl HttpService for ForwardHttp1Service {
 }
 
 #[allow(clippy::too_many_arguments)]
-async fn serve_native_stream(
+pub(super) async fn serve_native_stream(
     stream: BoxIo,
     scheme: Scheme,
     handler: CapturingHandler,
@@ -442,7 +445,7 @@ fn protocol_bad_request(message: impl Into<String>) -> ProtocolError {
     ProtocolError::new(proxelar_proto::ErrorKind::MalformedMessage, message)
 }
 
-fn reconstruct_protocol_uri(
+pub(super) fn reconstruct_protocol_uri(
     mut request: ProxyRequest,
     scheme: Scheme,
 ) -> Result<ProxyRequest, ProtocolError> {
@@ -481,7 +484,7 @@ pub(super) fn is_protocol_websocket_upgrade(request: &ProxyRequest) -> bool {
             .any(|token| token.trim_ascii().eq_ignore_ascii_case(b"upgrade"))
 }
 
-fn is_cert_protocol_request(request: &ProxyRequest) -> bool {
+pub(super) fn is_cert_protocol_request(request: &ProxyRequest) -> bool {
     request
         .head
         .uri
@@ -495,7 +498,10 @@ fn is_cert_protocol_request(request: &ProxyRequest) -> bool {
         })
 }
 
-fn is_direct_cert_protocol_request(request: &ProxyRequest, listen_addr: SocketAddr) -> bool {
+pub(super) fn is_direct_cert_protocol_request(
+    request: &ProxyRequest,
+    listen_addr: SocketAddr,
+) -> bool {
     if request.head.uri.host().is_some() || request.head.uri.path().is_empty() {
         return false;
     }
@@ -523,7 +529,7 @@ fn is_direct_cert_protocol_request(request: &ProxyRequest, listen_addr: SocketAd
         })
 }
 
-fn handle_cert_protocol_request(
+pub(super) fn handle_cert_protocol_request(
     request: &ProxyRequest,
     ca_cert_pem: &[u8],
     proxy_addr: Option<SocketAddr>,
@@ -570,16 +576,12 @@ async fn handle_native_connect(
     match protocol {
         StreamProtocol::Http => {
             let result = if h2 {
-                let Some(hyper_client) = hyper_client else {
-                    tracing::debug!("HTTP/2 is unavailable on a pinned CONNECT tunnel");
-                    return;
-                };
                 serve_stream(
                     stream,
                     Scheme::HTTP,
                     handler,
                     ca,
-                    hyper_client,
+                    upstream,
                     remote_addr,
                     listen_addr,
                 )
@@ -618,16 +620,12 @@ async fn handle_native_connect(
             };
             let h2 = stream.get_ref().1.alpn_protocol() == Some(b"h2".as_slice());
             let result = if h2 {
-                let Some(hyper_client) = hyper_client else {
-                    tracing::debug!("HTTP/2 is unavailable on a pinned native H1 tunnel");
-                    return;
-                };
                 serve_stream(
                     stream,
                     Scheme::HTTPS,
                     handler,
                     ca,
-                    hyper_client,
+                    upstream,
                     remote_addr,
                     listen_addr,
                 )
@@ -760,7 +758,7 @@ pub(super) async fn handle_captured_stream<I>(
                     Scheme::HTTP,
                     handler,
                     ca,
-                    client,
+                    NativeUpstream::shared(Arc::clone(&native_pool), route.clone()),
                     remote_addr,
                     listen_addr,
                 )
@@ -804,7 +802,7 @@ pub(super) async fn handle_captured_stream<I>(
                     Scheme::HTTPS,
                     handler,
                     ca,
-                    client,
+                    NativeUpstream::shared(Arc::clone(&native_pool), route.clone()),
                     remote_addr,
                     listen_addr,
                 )
@@ -900,7 +898,7 @@ fn process_connect(
                                 Scheme::HTTP,
                                 handler,
                                 ca,
-                                client,
+                                NativeUpstream::shared(Arc::clone(&native_pool), route.clone()),
                                 remote_addr,
                                 listen_addr,
                             )
@@ -946,7 +944,7 @@ fn process_connect(
                                 Scheme::HTTPS,
                                 handler,
                                 ca,
-                                client,
+                                NativeUpstream::shared(Arc::clone(&native_pool), route.clone()),
                                 remote_addr,
                                 listen_addr,
                             )
@@ -1017,20 +1015,22 @@ pub(super) async fn serve_stream<I>(
     scheme: Scheme,
     handler: CapturingHandler,
     ca: Arc<Ssl>,
-    client: Arc<Client>,
+    upstream: NativeUpstream,
     remote_addr: SocketAddr,
     listen_addr: SocketAddr,
 ) -> Result<(), BoxError>
 where
     I: AsyncRead + AsyncWrite + Unpin + Send + 'static,
 {
-    serve_stream_with_upstream(
+    super::http2::serve_with_upstream(
         stream,
         scheme,
+        remote_addr,
         handler,
         ca,
-        UpstreamClient::Shared(client),
-        remote_addr,
+        upstream,
+        None,
+        None,
         listen_addr,
     )
     .await
@@ -1058,14 +1058,14 @@ where
     let h2 = is_h2_preface(&buffered);
     let stream = Rewind::new_buffered(stream, buffered);
     if h2 {
-        let upstream = UpstreamClient::pinned(upstream).await?;
-        return serve_stream_with_upstream(
+        return super::http2::serve_pinned(
             stream,
+            upstream,
+            authority,
             scheme,
+            remote_addr,
             handler,
             ca,
-            upstream,
-            remote_addr,
             listen_addr,
         )
         .await;
@@ -1084,6 +1084,7 @@ where
     .await
 }
 
+#[allow(dead_code)]
 async fn serve_stream_with_upstream<I>(
     stream: I,
     scheme: Scheme,

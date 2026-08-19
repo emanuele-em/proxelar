@@ -1,6 +1,7 @@
 mod dns;
 pub(crate) mod forward;
 mod http1;
+mod http2;
 mod outbound;
 mod raw;
 pub(crate) mod reverse;

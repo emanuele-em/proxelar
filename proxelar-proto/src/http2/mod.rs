@@ -4,6 +4,8 @@
 //! validates native HTTP/2 pseudo-headers, lowercases fields translated from
 //! HTTP/1, and keeps duplicate values in their original order.
 
+mod connection;
+
 use std::collections::HashSet;
 
 use h2::ext::Protocol;
@@ -12,6 +14,10 @@ use http::{HeaderMap, Method, Request, Response, StatusCode, Uri, Version};
 use proxyapi_models::{HeaderBlock, HeaderField};
 
 use crate::{ErrorKind, ProtocolError, RequestHead, ResponseHead};
+
+pub use connection::{
+    body_tunnel, serve_connection, ConnectionConfig, H2Client, H2Connector, H2Pool, H2PoolKey,
+};
 
 const CONNECTION_SPECIFIC: [&[u8]; 5] = [
     b"connection",
