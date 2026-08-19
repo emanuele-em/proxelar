@@ -249,6 +249,66 @@ async fn extended_connect_requires_the_peer_setting() {
 }
 
 #[derive(Clone)]
+struct InformationalService;
+
+impl HttpService for InformationalService {
+    fn call(
+        &mut self,
+        _request: ProxyRequest,
+    ) -> BoxFuture<'_, Result<ProxyResponse, ProtocolError>> {
+        Box::pin(async {
+            Ok(ProxyResponse::new(
+                ResponseHead::new(
+                    http::StatusCode::OK,
+                    http::Version::HTTP_2,
+                    HeaderBlock::new(),
+                ),
+                ProxyBody::empty(),
+            )
+            .with_informational(vec![ResponseHead::new(
+                http::StatusCode::EARLY_HINTS,
+                http::Version::HTTP_2,
+                HeaderBlock::from_fields([
+                    HeaderField::new("link", "</style.css>; rel=preload").unwrap()
+                ]),
+            )]))
+        })
+    }
+}
+
+#[tokio::test]
+async fn client_and_server_preserve_informational_responses() {
+    let (client_io, server_io) = tokio::io::duplex(1024);
+    let server = tokio::spawn(serve_connection(
+        server_io,
+        InformationalService,
+        ConnectionConfig::default(),
+    ));
+    let client = H2Client::handshake(client_io, ConnectionConfig::default())
+        .await
+        .unwrap();
+
+    let response = client
+        .send_request(request("/hints", ProxyBody::empty()))
+        .await
+        .unwrap();
+    assert_eq!(response.head.status, http::StatusCode::OK);
+    assert_eq!(response.informational.len(), 1);
+    assert_eq!(
+        response.informational[0].status,
+        http::StatusCode::EARLY_HINTS
+    );
+    assert_eq!(
+        response.informational[0].headers.get("link"),
+        Some(b"</style.css>; rel=preload".as_slice())
+    );
+
+    drop(response);
+    drop(client);
+    server.await.unwrap().unwrap();
+}
+
+#[derive(Clone)]
 struct QueueConnector {
     streams: Arc<Mutex<VecDeque<DuplexStream>>>,
     connects: Arc<AtomicUsize>,

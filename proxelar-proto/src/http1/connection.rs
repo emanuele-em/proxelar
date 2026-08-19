@@ -405,6 +405,19 @@ async fn write_response<W>(
 where
     W: AsyncRead + AsyncWrite + Unpin,
 {
+    for mut informational in std::mem::take(&mut response.informational) {
+        if !informational.status.is_informational()
+            || informational.status == StatusCode::SWITCHING_PROTOCOLS
+        {
+            return Err(ProtocolError::new(
+                ErrorKind::ProtocolViolation,
+                "HTTP/1 informational response must be 1xx other than 101",
+            ));
+        }
+        informational.version = request_version;
+        let head = encode_response_head(&informational).map_err(protocol_error)?;
+        write_bytes(writer, &head, config.write_timeout).await?;
+    }
     response.head.version = request_version;
     let mut close = request_close || response_requests_close(&response.head.headers);
     let framing =
@@ -662,22 +675,24 @@ async fn run_client(
             break;
         }
 
-        let (head, semantics) = match read_final_response_head(&mut io, &mut buffer, config).await {
-            Ok(parsed) => parsed,
-            Err(error) => {
-                let _ = command
-                    .response_tx
-                    .send(ClientOutcome::Response(Err(error)));
-                break;
-            }
-        };
+        let (informational, head, semantics) =
+            match read_final_response_head(&mut io, &mut buffer, config).await {
+                Ok(parsed) => parsed,
+                Err(error) => {
+                    let _ = command
+                        .response_tx
+                        .send(ClientOutcome::Response(Err(error)));
+                    break;
+                }
+            };
         let response_close = response_requests_close(&head.headers);
         let framing = BodyFraming::for_response(&method, head.status, semantics);
         let upgraded =
             framing == BodyFraming::Tunnel || head.status == StatusCode::SWITCHING_PROTOCOLS;
         if upgraded {
             let (upgrade_tx, upgrade_rx) = oneshot::channel();
-            let response = ProxyResponse::new(head, ProxyBody::empty());
+            let response =
+                ProxyResponse::new(head, ProxyBody::empty()).with_informational(informational);
             let _ = command
                 .response_tx
                 .send(ClientOutcome::Response(Ok(Http1ClientResponse {
@@ -700,7 +715,7 @@ async fn run_client(
         if command
             .response_tx
             .send(ClientOutcome::Response(Ok(Http1ClientResponse {
-                response: ProxyResponse::new(head, body),
+                response: ProxyResponse::new(head, body).with_informational(informational),
                 upgrade: None,
             })))
             .is_err()
@@ -782,11 +797,19 @@ async fn read_final_response_head<I>(
     io: &mut I,
     buffer: &mut BytesMut,
     config: ConnectionConfig,
-) -> Result<(crate::ResponseHead, super::HeaderSemantics), ProtocolError>
+) -> Result<
+    (
+        Vec<crate::ResponseHead>,
+        crate::ResponseHead,
+        super::HeaderSemantics,
+    ),
+    ProtocolError,
+>
 where
     I: AsyncRead + Unpin,
 {
     let parser = HeadParser::new(config.head_limits);
+    let mut informational = Vec::new();
     loop {
         match parser.response_head_len(buffer).map_err(protocol_error)? {
             Some(consumed) => {
@@ -795,9 +818,10 @@ where
                 if parsed.head.status.is_informational()
                     && parsed.head.status != StatusCode::SWITCHING_PROTOCOLS
                 {
+                    informational.push(parsed.head);
                     continue;
                 }
-                return Ok((parsed.head, parsed.semantics));
+                return Ok((informational, parsed.head, parsed.semantics));
             }
             None => {
                 if !read_more(io, buffer, config.read_timeout).await? {

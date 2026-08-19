@@ -81,17 +81,27 @@ impl ProxyRequest {
 /// A response head paired with its streaming body.
 #[derive(Debug)]
 pub struct ProxyResponse {
+    pub informational: Vec<ResponseHead>,
     pub head: ResponseHead,
     pub body: ProxyBody,
 }
 
 impl ProxyResponse {
     pub const fn new(head: ResponseHead, body: ProxyBody) -> Self {
-        Self { head, body }
+        Self {
+            informational: Vec::new(),
+            head,
+            body,
+        }
     }
 
-    pub fn into_parts(self) -> (ResponseHead, ProxyBody) {
-        (self.head, self.body)
+    pub fn with_informational(mut self, informational: Vec<ResponseHead>) -> Self {
+        self.informational = informational;
+        self
+    }
+
+    pub fn into_parts(self) -> (Vec<ResponseHead>, ResponseHead, ProxyBody) {
+        (self.informational, self.head, self.body)
     }
 
     pub const fn status(&self) -> StatusCode {
