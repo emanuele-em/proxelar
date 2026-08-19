@@ -600,16 +600,16 @@ mod tests {
     use super::*;
     use bytes::Bytes;
     use crossterm::event::KeyModifiers;
-    use http::{HeaderMap, Method, StatusCode, Version};
-    use proxyapi_models::{WsDirection, WsFrame, WsOpcode};
+    use http::{Method, StatusCode, Version};
+    use proxyapi_models::{HeaderBlock, WsDirection, WsFrame, WsOpcode};
 
     fn key(code: KeyCode) -> KeyEvent {
         KeyEvent::new(code, KeyModifiers::NONE)
     }
 
     fn request(method: Method, uri: &str, time: i64) -> Box<ProxiedRequest> {
-        let mut headers = HeaderMap::new();
-        headers.insert("x-test", "state".parse().unwrap());
+        let mut headers = HeaderBlock::new();
+        headers.add("x-test", "state").unwrap();
         Box::new(ProxiedRequest::new(
             method,
             uri.parse().unwrap(),
@@ -626,9 +626,9 @@ mod tests {
         body: Bytes,
         time: i64,
     ) -> Box<ProxiedResponse> {
-        let mut headers = HeaderMap::new();
+        let mut headers = HeaderBlock::new();
         if let Some(content_type) = content_type {
-            headers.insert(http::header::CONTENT_TYPE, content_type.parse().unwrap());
+            headers.add("content-type", content_type).unwrap();
         }
         Box::new(ProxiedResponse::new(
             status,

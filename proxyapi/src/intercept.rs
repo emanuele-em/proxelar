@@ -1,5 +1,5 @@
 use bytes::Bytes;
-use http::HeaderMap;
+use proxyapi_models::HeaderBlock;
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
@@ -20,7 +20,7 @@ pub enum InterceptDecision {
     Modified {
         method: String,
         uri: String,
-        headers: HeaderMap,
+        headers: HeaderBlock,
         body: Bytes,
     },
     /// Drop the request and return a synthetic response to the client.

@@ -6,7 +6,7 @@ use std::fmt;
 
 use base64::Engine as _;
 use bytes::Bytes;
-use http::{HeaderMap, Method, StatusCode, Uri, Version};
+use http::{Method, StatusCode, Uri, Version};
 use serde::{de, Deserialize, Deserializer, Serialize, Serializer};
 
 /// A validation error for an HTTP header field.
@@ -204,6 +204,11 @@ impl HeaderBlock {
             .map(HeaderField::value)
     }
 
+    /// Return whether the block contains at least one field with this name.
+    pub fn contains_key(&self, name: impl AsRef<[u8]>) -> bool {
+        self.get(name).is_some()
+    }
+
     /// Iterate through every value for a name in wire order.
     pub fn get_all(&self, name: impl AsRef<[u8]>) -> impl Iterator<Item = &[u8]> {
         let name = Bytes::copy_from_slice(name.as_ref());
@@ -343,8 +348,7 @@ pub struct ProxiedRequest {
     uri: Uri,
     #[serde(with = "http_serde::version")]
     version: Version,
-    #[serde(with = "http_serde::header_map")]
-    headers: HeaderMap,
+    headers: HeaderBlock,
     body: Bytes,
     #[serde(default)]
     body_metadata: BodyMetadata,
@@ -357,7 +361,7 @@ impl ProxiedRequest {
         method: Method,
         uri: Uri,
         version: Version,
-        headers: HeaderMap,
+        headers: HeaderBlock,
         body: Bytes,
         time: i64,
     ) -> Self {
@@ -370,7 +374,7 @@ impl ProxiedRequest {
         method: Method,
         uri: Uri,
         version: Version,
-        headers: HeaderMap,
+        headers: HeaderBlock,
         body: Bytes,
         body_metadata: BodyMetadata,
         time: i64,
@@ -402,7 +406,7 @@ impl ProxiedRequest {
     }
 
     /// Returns the request headers.
-    pub const fn headers(&self) -> &HeaderMap {
+    pub const fn headers(&self) -> &HeaderBlock {
         &self.headers
     }
 
@@ -498,8 +502,7 @@ pub struct ProxiedResponse {
     status: StatusCode,
     #[serde(with = "http_serde::version")]
     version: Version,
-    #[serde(with = "http_serde::header_map")]
-    headers: HeaderMap,
+    headers: HeaderBlock,
     body: Bytes,
     #[serde(default)]
     body_metadata: BodyMetadata,
@@ -511,7 +514,7 @@ impl ProxiedResponse {
     pub const fn new(
         status: StatusCode,
         version: Version,
-        headers: HeaderMap,
+        headers: HeaderBlock,
         body: Bytes,
         time: i64,
     ) -> Self {
@@ -523,7 +526,7 @@ impl ProxiedResponse {
     pub const fn new_with_body_metadata(
         status: StatusCode,
         version: Version,
-        headers: HeaderMap,
+        headers: HeaderBlock,
         body: Bytes,
         body_metadata: BodyMetadata,
         time: i64,
@@ -549,7 +552,7 @@ impl ProxiedResponse {
     }
 
     /// Returns the response headers.
-    pub const fn headers(&self) -> &HeaderMap {
+    pub const fn headers(&self) -> &HeaderBlock {
         &self.headers
     }
 
@@ -570,7 +573,7 @@ impl ProxiedResponse {
 }
 
 /// Current version of Proxelar's portable session format.
-pub const SESSION_FORMAT_VERSION: u32 = 1;
+pub const SESSION_FORMAT_VERSION: u32 = 2;
 
 /// A completed HTTP request/response exchange stored in a session.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]

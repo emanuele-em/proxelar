@@ -588,7 +588,7 @@ fn upgrade_websocket_response(
     let ws_response = ProxiedResponse::new(
         parts.status,
         parts.version,
-        parts.headers.clone(),
+        crate::header::from_http(&parts.headers),
         Bytes::new(),
         now_millis(),
     );

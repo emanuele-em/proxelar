@@ -1,7 +1,7 @@
 use bytes::Bytes;
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use proxyapi::{InterceptConfig, InterceptDecision};
-use proxyapi_models::ProxiedRequest;
+use proxyapi_models::{HeaderBlock, ProxiedRequest};
 use std::sync::Arc;
 use tokio::sync::mpsc;
 
@@ -210,11 +210,11 @@ pub fn handle_key_event(
 /// structured JSON marker and other invalid UTF-8 bodies use hexadecimal.
 fn request_to_text(req: &proxyapi_models::ProxiedRequest) -> (String, bool) {
     let mut text = format!("{} {} {:?}\n", req.method(), req.uri(), req.version());
-    for (name, value) in req.headers() {
+    for field in req.headers() {
         text.push_str(&format!(
             "{}: {}\n",
-            name,
-            String::from_utf8_lossy(value.as_bytes())
+            String::from_utf8_lossy(field.name()),
+            String::from_utf8_lossy(field.value())
         ));
     }
     text.push('\n');
@@ -247,7 +247,7 @@ fn request_to_text(req: &proxyapi_models::ProxiedRequest) -> (String, bool) {
 /// Parse a raw HTTP request text into (method, uri, headers, body).
 ///
 /// Both `\r\n` and `\n` line endings are accepted.
-fn parse_raw_http_request(text: &str) -> Result<(String, String, http::HeaderMap, Bytes), String> {
+fn parse_raw_http_request(text: &str) -> Result<(String, String, HeaderBlock, Bytes), String> {
     let normalised = text.replace("\r\n", "\n");
     let mut parts = normalised.splitn(2, "\n\n");
 
@@ -273,7 +273,7 @@ fn parse_raw_http_request(text: &str) -> Result<(String, String, http::HeaderMap
     uri.parse::<http::Uri>()
         .map_err(|error| format!("Invalid URI: {error}"))?;
 
-    let mut headers = http::HeaderMap::new();
+    let mut headers = HeaderBlock::new();
     for line in header_lines {
         let line = line.trim_end();
         if line.is_empty() {
@@ -282,11 +282,9 @@ fn parse_raw_http_request(text: &str) -> Result<(String, String, http::HeaderMap
         let (name, value) = line
             .split_once(':')
             .ok_or_else(|| format!("Invalid header line: {line}"))?;
-        let name = http::header::HeaderName::from_bytes(name.trim().as_bytes())
-            .map_err(|error| format!("Invalid header name: {error}"))?;
-        let value = http::header::HeaderValue::from_str(value.trim())
-            .map_err(|error| format!("Invalid header value: {error}"))?;
-        headers.append(name, value);
+        headers
+            .add(name.trim(), value.trim())
+            .map_err(|error| format!("Invalid header: {error}"))?;
     }
 
     let body = Bytes::copy_from_slice(body_str.as_bytes());
@@ -296,7 +294,7 @@ fn parse_raw_http_request(text: &str) -> Result<(String, String, http::HeaderMap
 fn parse_edited_http_request(
     text: &str,
     binary_body: bool,
-) -> Result<(String, String, http::HeaderMap, Bytes), String> {
+) -> Result<(String, String, HeaderBlock, Bytes), String> {
     let (method, uri, headers, body) = parse_raw_http_request(text)?;
     if !binary_body {
         return Ok((method, uri, headers, body));
@@ -337,18 +335,18 @@ fn parse_edited_http_request(
 mod tests {
     use super::*;
     use crossterm::event::KeyModifiers;
-    use http::{HeaderMap, Method, Version};
+    use http::{Method, Version};
     use proxyapi::ProxyEvent;
-    use proxyapi_models::{ProxiedRequest, ProxiedResponse};
+    use proxyapi_models::{HeaderBlock, ProxiedRequest, ProxiedResponse};
 
     fn key(code: KeyCode) -> KeyEvent {
         KeyEvent::new(code, KeyModifiers::NONE)
     }
 
     fn request(body: Bytes) -> ProxiedRequest {
-        let mut headers = HeaderMap::new();
-        headers.append("x-test", "one".parse().unwrap());
-        headers.append("x-test", "two".parse().unwrap());
+        let mut headers = HeaderBlock::new();
+        headers.add("x-test", "one").unwrap();
+        headers.add("x-test", "two").unwrap();
         ProxiedRequest::new(
             Method::POST,
             "http://api.test/path?x=1".parse().unwrap(),
@@ -372,7 +370,7 @@ mod tests {
 
         assert_eq!(method, "PATCH");
         assert_eq!(uri, "http://api.test/items");
-        assert_eq!(headers.get_all("x-test").iter().count(), 2);
+        assert_eq!(headers.get_all("x-test").count(), 2);
         assert_eq!(body.as_ref(), b"body");
     }
 
@@ -406,11 +404,10 @@ mod tests {
 
     #[test]
     fn request_to_text_roundtrips_structured_protobuf_fields() {
-        let mut headers = HeaderMap::new();
-        headers.insert(
-            http::header::CONTENT_TYPE,
-            "application/x-protobuf".parse().unwrap(),
-        );
+        let mut headers = HeaderBlock::new();
+        headers
+            .add("content-type", "application/x-protobuf")
+            .unwrap();
         let request = ProxiedRequest::new(
             Method::POST,
             "http://api.test/protobuf".parse().unwrap(),
@@ -464,7 +461,7 @@ mod tests {
             response: Box::new(ProxiedResponse::new(
                 http::StatusCode::OK,
                 Version::HTTP_11,
-                HeaderMap::new(),
+                HeaderBlock::new(),
                 Bytes::new(),
                 200,
             )),

@@ -1,10 +1,10 @@
 use std::collections::VecDeque;
 
 use chrono::{Local, TimeZone};
-use http::{HeaderMap, Uri};
+use http::Uri;
 use proxyapi_models::{
-    CapturedDnsExchange, CapturedTcpStream, CapturedUdpExchange, StreamDirection, WsDirection,
-    WsFrame, WsOpcode,
+    CapturedDnsExchange, CapturedTcpStream, CapturedUdpExchange, HeaderBlock, StreamDirection,
+    WsDirection, WsFrame, WsOpcode,
 };
 use ratatui::{
     layout::{Alignment, Constraint, Direction, Layout, Rect},
@@ -673,11 +673,14 @@ fn build_request_lines(request: &proxyapi_models::ProxiedRequest) -> Vec<Line<'s
         Line::from(""),
     ];
 
-    for (name, value) in request.headers() {
+    for field in request.headers() {
         lines.push(Line::from(vec![
-            Span::styled(name.as_str().to_owned(), Style::default().fg(Color::Cyan)),
+            Span::styled(
+                String::from_utf8_lossy(field.name()).into_owned(),
+                Style::default().fg(Color::Cyan),
+            ),
             Span::raw(": "),
-            Span::raw(String::from_utf8_lossy(value.as_bytes()).into_owned()),
+            Span::raw(String::from_utf8_lossy(field.value()).into_owned()),
         ]));
     }
 
@@ -715,11 +718,14 @@ fn build_response_lines(response: &proxyapi_models::ProxiedResponse) -> Vec<Line
         Line::from(""),
     ];
 
-    for (name, value) in response.headers() {
+    for field in response.headers() {
         lines.push(Line::from(vec![
-            Span::styled(name.as_str().to_owned(), Style::default().fg(Color::Cyan)),
+            Span::styled(
+                String::from_utf8_lossy(field.name()).into_owned(),
+                Style::default().fg(Color::Cyan),
+            ),
             Span::raw(": "),
-            Span::raw(String::from_utf8_lossy(value.as_bytes()).into_owned()),
+            Span::raw(String::from_utf8_lossy(field.value()).into_owned()),
         ]));
     }
 
@@ -742,7 +748,7 @@ fn build_response_lines(response: &proxyapi_models::ProxiedResponse) -> Vec<Line
     lines
 }
 
-fn render_body(headers: &http::HeaderMap, body: &[u8]) -> String {
+fn render_body(headers: &HeaderBlock, body: &[u8]) -> String {
     match proxyapi::content::content_view(headers, body) {
         Ok(view) => view.text,
         Err(error) => format!(
@@ -996,10 +1002,10 @@ fn proto_from_uri(uri: &Uri, is_ws: bool) -> &'static str {
     }
 }
 
-fn abbrev_content_type(headers: &HeaderMap) -> String {
+fn abbrev_content_type(headers: &HeaderBlock) -> String {
     headers
-        .get(http::header::CONTENT_TYPE)
-        .and_then(|v| v.to_str().ok())
+        .get(http::header::CONTENT_TYPE.as_str())
+        .and_then(|value| std::str::from_utf8(value).ok())
         .map(|s| s.split(';').next().unwrap_or(s).trim().to_owned())
         .unwrap_or_else(|| "[no content]".to_owned())
 }
@@ -1200,14 +1206,14 @@ fn draw_help_modal(f: &mut Frame) {
 mod tests {
     use super::*;
     use bytes::Bytes;
-    use http::{HeaderMap, Method, StatusCode, Version};
-    use proxyapi_models::{ProxiedRequest, ProxiedResponse};
+    use http::{Method, StatusCode, Version};
+    use proxyapi_models::{HeaderBlock, ProxiedRequest, ProxiedResponse};
     use ratatui::{backend::TestBackend, buffer::Buffer, Terminal};
 
     fn request(method: Method, uri: &str, body: Bytes, time: i64) -> Box<ProxiedRequest> {
-        let mut headers = HeaderMap::new();
-        headers.insert("content-type", "application/json".parse().unwrap());
-        headers.insert("x-test", "ui".parse().unwrap());
+        let mut headers = HeaderBlock::new();
+        headers.add("content-type", "application/json").unwrap();
+        headers.add("x-test", "ui").unwrap();
         Box::new(ProxiedRequest::new(
             method,
             uri.parse().unwrap(),
@@ -1224,9 +1230,9 @@ mod tests {
         body: Bytes,
         time: i64,
     ) -> Box<ProxiedResponse> {
-        let mut headers = HeaderMap::new();
+        let mut headers = HeaderBlock::new();
         if let Some(content_type) = content_type {
-            headers.insert(http::header::CONTENT_TYPE, content_type.parse().unwrap());
+            headers.add("content-type", content_type).unwrap();
         }
         Box::new(ProxiedResponse::new(
             status,

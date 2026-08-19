@@ -1,14 +1,14 @@
 use bytes::Bytes;
-use http::{HeaderMap, Method, StatusCode, Uri, Version};
+use http::{Method, StatusCode, Uri, Version};
 use proxyapi_models::{
-    BodyMetadata, CapturedDnsExchange, CapturedUdpExchange, ProxiedRequest, ProxiedResponse,
-    TrafficSession, WsDirection, WsFrame, WsOpcode, SESSION_FORMAT_VERSION,
+    BodyMetadata, CapturedDnsExchange, CapturedUdpExchange, HeaderBlock, ProxiedRequest,
+    ProxiedResponse, TrafficSession, WsDirection, WsFrame, WsOpcode, SESSION_FORMAT_VERSION,
 };
 
 #[test]
 fn test_proxied_request_serialization() {
-    let mut headers = HeaderMap::new();
-    headers.insert("content-type", "application/json".parse().unwrap());
+    let mut headers = HeaderBlock::new();
+    headers.add("content-type", "application/json").unwrap();
 
     let req = ProxiedRequest::new(
         Method::POST,
@@ -26,8 +26,8 @@ fn test_proxied_request_serialization() {
 
 #[test]
 fn test_proxied_response_serialization() {
-    let mut headers = HeaderMap::new();
-    headers.insert("content-type", "text/plain".parse().unwrap());
+    let mut headers = HeaderBlock::new();
+    headers.add("content-type", "text/plain").unwrap();
 
     let res = ProxiedResponse::new(
         StatusCode::OK,
@@ -48,7 +48,7 @@ fn test_proxied_request_empty_body() {
         Method::GET,
         "https://example.com/".parse().unwrap(),
         Version::HTTP_11,
-        HeaderMap::new(),
+        HeaderBlock::new(),
         Bytes::new(),
         0,
     );
@@ -60,8 +60,8 @@ fn test_proxied_request_empty_body() {
 
 #[test]
 fn test_proxied_response_accessors() {
-    let mut headers = HeaderMap::new();
-    headers.insert("x-custom", "value".parse().unwrap());
+    let mut headers = HeaderBlock::new();
+    headers.add("x-custom", "value").unwrap();
 
     let res = ProxiedResponse::new(
         StatusCode::NOT_FOUND,
@@ -80,8 +80,8 @@ fn test_proxied_response_accessors() {
 
 #[test]
 fn test_proxied_request_accessors() {
-    let mut headers = HeaderMap::new();
-    headers.insert("x-req", "value".parse().unwrap());
+    let mut headers = HeaderBlock::new();
+    headers.add("x-req", "value").unwrap();
 
     let req = ProxiedRequest::new(
         Method::PUT,
@@ -102,9 +102,9 @@ fn test_proxied_request_accessors() {
 
 #[test]
 fn test_proxied_request_multiple_headers_same_key() {
-    let mut headers = HeaderMap::new();
-    headers.append("set-cookie", "a=1".parse().unwrap());
-    headers.append("set-cookie", "b=2".parse().unwrap());
+    let mut headers = HeaderBlock::new();
+    headers.add("set-cookie", "a=1").unwrap();
+    headers.add("set-cookie", "b=2").unwrap();
 
     let req = ProxiedRequest::new(
         Method::GET,
@@ -118,10 +118,7 @@ fn test_proxied_request_multiple_headers_same_key() {
     let json = serde_json::to_string(&req).unwrap();
     let deserialized: ProxiedRequest = serde_json::from_str(&json).unwrap();
     assert_eq!(req, deserialized);
-    assert_eq!(
-        deserialized.headers().get_all("set-cookie").iter().count(),
-        2
-    );
+    assert_eq!(deserialized.headers().get_all("set-cookie").count(), 2);
 }
 
 #[test]
@@ -130,7 +127,7 @@ fn test_proxied_response_large_body() {
     let res = ProxiedResponse::new(
         StatusCode::OK,
         Version::HTTP_11,
-        HeaderMap::new(),
+        HeaderBlock::new(),
         body.clone(),
         0,
     );
@@ -203,7 +200,7 @@ fn body_metadata_distinguishes_captured_bytes_from_wire_bytes() {
         Method::POST,
         "https://example.com/upload".parse().unwrap(),
         Version::HTTP_11,
-        HeaderMap::new(),
+        HeaderBlock::new(),
         Bytes::from_static(b"prefix"),
         BodyMetadata {
             truncated: true,

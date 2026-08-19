@@ -684,7 +684,7 @@ mod tests {
             http::Method::GET,
             "http://example.test/".parse().unwrap(),
             http::Version::HTTP_11,
-            http::HeaderMap::new(),
+            proxyapi_models::HeaderBlock::new(),
             bytes::Bytes::new(),
             1,
         );

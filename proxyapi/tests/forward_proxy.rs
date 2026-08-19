@@ -101,7 +101,10 @@ async fn forward_proxy_forwards_absolute_http_and_emits_request_complete() {
             );
             assert_eq!(request.uri().path(), "/absolute");
             assert_eq!(request.uri().query(), Some("via=proxy"));
-            assert_eq!(request.headers()["x-client-test"], "absolute-roundtrip");
+            assert_eq!(
+                request.headers().get("x-client-test"),
+                Some(b"absolute-roundtrip".as_slice())
+            );
             assert_eq!(response.status(), http::StatusCode::OK);
             assert_eq!(response.body().as_ref(), b"forward response");
         }
@@ -162,7 +165,10 @@ async fn forward_proxy_forwards_h2c_absolute_http_and_emits_http2_capture() {
                 upstream_addr.to_string()
             );
             assert_eq!(request.uri().path(), "/h2c");
-            assert_eq!(request.headers()["x-client-test"], "h2c-absolute-roundtrip");
+            assert_eq!(
+                request.headers().get("x-client-test"),
+                Some(b"h2c-absolute-roundtrip".as_slice())
+            );
             assert_eq!(response.status(), http::StatusCode::OK);
             assert_eq!(response.body().as_ref(), b"forward response");
         }
@@ -234,7 +240,10 @@ async fn forward_proxy_connect_plain_http_reconstructs_uri_and_emits_request_com
             );
             assert_eq!(request.uri().path(), "/tunneled");
             assert_eq!(request.uri().query(), Some("via=connect"));
-            assert_eq!(request.headers()["x-client-test"], "connect-roundtrip");
+            assert_eq!(
+                request.headers().get("x-client-test"),
+                Some(b"connect-roundtrip".as_slice())
+            );
             assert_eq!(response.status(), http::StatusCode::OK);
             assert_eq!(response.body().as_ref(), b"forward response");
         }
@@ -299,7 +308,10 @@ async fn forward_proxy_h2_connect_tunnels_h2c_requests() {
             assert_eq!(request.method(), http::Method::POST);
             assert_eq!(request.uri().path(), "/h2-tunnel");
             assert_eq!(request.uri().query(), Some("via=connect"));
-            assert_eq!(request.headers()["x-client-test"], "h2-connect-roundtrip");
+            assert_eq!(
+                request.headers().get("x-client-test"),
+                Some(b"h2-connect-roundtrip".as_slice())
+            );
             assert_eq!(request.body().as_ref(), b"body through h2 connect");
             assert_eq!(response.status(), http::StatusCode::OK);
         }
@@ -546,7 +558,7 @@ async fn forward_proxy_replays_captured_request_through_proxy_loop() {
             .parse()
             .unwrap(),
         http::Version::HTTP_11,
-        headers,
+        proxyapi::header::from_http(&headers),
         Bytes::new(),
         10,
     );
@@ -558,7 +570,7 @@ async fn forward_proxy_replays_captured_request_through_proxy_loop() {
         } => {
             assert_eq!(request.uri().path(), "/replayed");
             assert_eq!(request.uri().query(), Some("from=ui"));
-            assert_eq!(request.headers()["x-replay"], "yes");
+            assert_eq!(request.headers().get("x-replay"), Some(b"yes".as_slice()));
             assert_eq!(response.status(), http::StatusCode::OK);
             assert_eq!(response.body().as_ref(), b"forward response");
         }
@@ -581,7 +593,7 @@ async fn forward_proxy_replay_failure_emits_request_complete() {
         http::Method::GET,
         format!("http://{unused_upstream}/missing").parse().unwrap(),
         http::Version::HTTP_11,
-        http::HeaderMap::new(),
+        proxyapi_models::HeaderBlock::new(),
         Bytes::new(),
         10,
     );

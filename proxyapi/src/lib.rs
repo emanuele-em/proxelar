@@ -16,6 +16,7 @@ pub mod error;
 pub mod event;
 pub mod filter;
 pub(crate) mod handler;
+pub mod header;
 pub mod intercept;
 pub mod proxy;
 mod rewind;
