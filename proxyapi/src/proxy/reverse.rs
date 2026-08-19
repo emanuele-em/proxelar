@@ -33,7 +33,7 @@ pub(super) async fn handle_connection(
     remote_addr: SocketAddr,
     handler: CapturingHandler,
     target: Uri,
-    client: Arc<Client>,
+    _client: Arc<Client>,
     native_pool: Arc<NativePool>,
     route: Option<String>,
 ) {
@@ -77,13 +77,22 @@ pub(super) async fn handle_connection(
         return;
     }
 
-    if let Err(error) = serve_hyper_connection(stream, remote_addr, handler, target, client).await {
+    if let Err(error) = super::http2::serve_reverse(
+        stream,
+        remote_addr,
+        handler,
+        target,
+        NativeUpstream::shared(native_pool, route),
+    )
+    .await
+    {
         if !is_benign_shutdown_error(error.as_ref()) {
             tracing::debug!("Reverse HTTP/2 connection error: {error}");
         }
     }
 }
 
+#[allow(dead_code)]
 async fn serve_hyper_connection<I>(
     stream: I,
     remote_addr: SocketAddr,
@@ -264,7 +273,7 @@ impl HttpService for ReverseHttp1Service {
 
 /// Rewrite the request URI to point at the reverse proxy target, preserving
 /// the original path and query. Also updates the `Host` header to match.
-fn rewrite_uri(
+pub(super) fn rewrite_uri(
     mut req: crate::ProxyRequest,
     target: &Uri,
 ) -> Result<crate::ProxyRequest, http::Error> {
