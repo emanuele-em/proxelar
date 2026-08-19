@@ -45,8 +45,7 @@ impl Http1Connector for NativeConnector {
             let stream = outbound
                 .call(destination.clone())
                 .await
-                .map_err(|error| io(error.to_string()))?
-                .into_inner();
+                .map_err(|error| io(error.to_string()))?;
             if !key.tls {
                 return Ok(Box::new(stream) as BoxIo);
             }

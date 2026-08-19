@@ -28,15 +28,11 @@ flate2 = "1.1"
 brotli = "8"
 zstd = "0.13"
 encoding_rs = "0.8"
-hyper = { version = "1.10", features = ["http1", "http2", "server", "client"] }
-hyper-util = { version = "0.1", features = ["tokio", "server-auto", "client-legacy", "http1", "http2"] }
 http = "1.4"
-http-body-util = "0.1"
 bytes = "1.9"
 tokio-rustls = "0.26"
 rustls = { version = "0.23", default-features = false, features = ["ring", "logging", "std", "tls12"] }
 rustls-pki-types = "1.14"
-hyper-rustls = { version = "0.27", features = ["http1", "logging", "tls12", "ring", "webpki-tokio"] }
 webpki-roots = "1.0"
 openssl = { version = "0.10.80", features = ["vendored"] }
 moka = { version = "0.12", features = ["future"] }
@@ -61,6 +57,9 @@ proxelar-proto = { path = "../proxelar-proto" }
 
 [dev-dependencies]
 tokio = { version = "1.52", features = ["full"] }
+hyper = { version = "1.10", features = ["http1", "http2", "server", "client"] }
+hyper-util = { version = "0.1", features = ["tokio", "http1", "http2"] }
+http-body-util = "0.1"
 reqwest = { version = "0.13", features = ["rustls"] }
 rustls = { version = "0.23", features = ["ring"] }
 tempfile = "3"

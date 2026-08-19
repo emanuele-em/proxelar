@@ -2,9 +2,7 @@ use std::net::SocketAddr;
 use std::sync::Arc;
 
 use bytes::Bytes;
-use hyper::service::service_fn;
-use hyper::{Request, Uri};
-use hyper_util::rt::TokioIo;
+use http::Uri;
 use proxelar_proto::http1::{
     serve_connection_with_upgrades, ConnectionConfig, ServerConnection, UpgradeReceiver,
 };
@@ -13,9 +11,6 @@ use tokio::net::TcpStream;
 use tokio::sync::Mutex;
 
 use crate::handler::CapturingHandler;
-use crate::hyper_adapter::{
-    from_hyper_request, from_hyper_response, to_hyper_request, to_hyper_response, HyperBody,
-};
 use crate::rewind::Rewind;
 use crate::{HttpContext, HttpHandler, RequestOrResponse};
 
@@ -24,8 +19,7 @@ use super::{
         is_h2_preface, is_protocol_websocket_upgrade, pump_native_websocket, sniff_stream_protocol,
     },
     http1::{NativePool, NativeUpstream},
-    is_benign_shutdown_error, prepare_upstream_request, sanitize_response_for_client,
-    serve_auto_connection, BoxError, Client,
+    is_benign_shutdown_error,
 };
 
 pub(super) async fn handle_connection(
@@ -33,7 +27,6 @@ pub(super) async fn handle_connection(
     remote_addr: SocketAddr,
     handler: CapturingHandler,
     target: Uri,
-    _client: Arc<Client>,
     native_pool: Arc<NativePool>,
     route: Option<String>,
 ) {
@@ -90,92 +83,6 @@ pub(super) async fn handle_connection(
             tracing::debug!("Reverse HTTP/2 connection error: {error}");
         }
     }
-}
-
-#[allow(dead_code)]
-async fn serve_hyper_connection<I>(
-    stream: I,
-    remote_addr: SocketAddr,
-    handler: CapturingHandler,
-    target: Uri,
-    client: Arc<Client>,
-) -> Result<(), BoxError>
-where
-    I: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin + Send + 'static,
-{
-    let io = TokioIo::new(stream);
-
-    let service = service_fn(move |req: Request<hyper::body::Incoming>| {
-        let mut handler = handler.clone();
-        let client = Arc::clone(&client);
-        let target = target.clone();
-
-        async move {
-            let client_version = req.version();
-            let ctx = HttpContext { remote_addr };
-
-            let req = match handler.handle_request(&ctx, from_hyper_request(req)).await {
-                RequestOrResponse::Request(req) => req,
-                RequestOrResponse::Response(res) => {
-                    let mut res = protocol_response_to_hyper(res);
-                    sanitize_response_for_client(&mut res, client_version);
-                    return Ok::<_, hyper::Error>(res);
-                }
-            };
-
-            // Rewrite URI to target, preserving path and query
-            let req = match rewrite_uri(req, &target) {
-                Ok(req) => req,
-                Err(e) => {
-                    tracing::error!("Failed to rewrite URI to target: {e}");
-                    return Ok(protocol_response_to_hyper(
-                        handler.synthetic_protocol_response(
-                            http::StatusCode::BAD_GATEWAY,
-                            http::HeaderMap::new(),
-                            Bytes::from_static(b"Bad Gateway: URI rewrite failed"),
-                        ),
-                    ));
-                }
-            };
-
-            let req = match to_hyper_request(req) {
-                Ok(request) => request,
-                Err(error) => {
-                    tracing::warn!("Could not adapt reverse request for Hyper: {error}");
-                    return Ok(protocol_response_to_hyper(
-                        handler.synthetic_protocol_response(
-                            http::StatusCode::BAD_REQUEST,
-                            http::HeaderMap::new(),
-                            Bytes::from_static(b"Invalid request headers"),
-                        ),
-                    ));
-                }
-            };
-
-            match client.request(prepare_upstream_request(req)).await {
-                Ok(res) => {
-                    let response = handler
-                        .handle_response(&ctx, from_hyper_response(res))
-                        .await;
-                    let mut res = protocol_response_to_hyper(response);
-                    sanitize_response_for_client(&mut res, client_version);
-                    Ok(res)
-                }
-                Err(e) => {
-                    tracing::error!("Reverse proxy error: {e}");
-                    let mut res = protocol_response_to_hyper(handler.synthetic_protocol_response(
-                        http::StatusCode::BAD_GATEWAY,
-                        http::HeaderMap::new(),
-                        Bytes::from_static(b"Bad Gateway"),
-                    ));
-                    sanitize_response_for_client(&mut res, client_version);
-                    Ok(res)
-                }
-            }
-        }
-    });
-
-    serve_auto_connection(io, service).await
 }
 
 struct ReverseHttp1Service {
@@ -290,18 +197,6 @@ pub(super) fn rewrite_uri(
     }
 
     Ok(req)
-}
-
-fn protocol_response_to_hyper(response: crate::ProxyResponse) -> http::Response<HyperBody> {
-    to_hyper_response(response).unwrap_or_else(|error| {
-        tracing::warn!("Could not adapt reverse response for Hyper: {error}");
-        http::Response::builder()
-            .status(http::StatusCode::BAD_GATEWAY)
-            .body(HyperBody::full(Bytes::from_static(
-                b"Invalid response headers",
-            )))
-            .unwrap_or_else(|_| http::Response::new(HyperBody::empty()))
-    })
 }
 
 #[cfg(test)]

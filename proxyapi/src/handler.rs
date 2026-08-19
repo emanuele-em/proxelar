@@ -1,7 +1,7 @@
 use async_trait::async_trait;
 use bytes::{Bytes, BytesMut};
 use futures_util::StreamExt as _;
-use hyper::{Request, Response};
+use http::{Request, Response};
 use proxelar_proto::{BodyFrame, ProxyRequest, ProxyResponse, RequestHead, ResponseHead};
 use proxyapi_models::{BodyMetadata, ProxiedRequest, ProxiedResponse};
 use std::sync::Arc;
