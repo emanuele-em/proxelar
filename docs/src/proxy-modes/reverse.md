@@ -20,6 +20,12 @@ The target scheme selects listeners and upstream transports deterministically:
 
 Client ALPN offers are propagated upstream in their original order. Proxelar does not probe QUIC heuristically or switch protocols after a timeout.
 
+An `https://` target also makes the client-facing TCP listener use TLS. Proxelar
+mints its listener certificate for the target hostname, so point that hostname
+at the Proxelar listener and trust the Proxelar CA in the client. The negotiated
+client ALPN selects H1 or H2 on TCP; clients offering H3 can use the UDP listener
+on the same port.
+
 ## How it works
 
 1. The client sends a request to `127.0.0.1:8080`
