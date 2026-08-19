@@ -4,11 +4,16 @@
 //! bytes arrive. A complete parse reports the exact number of consumed bytes,
 //! leaving pipelined messages untouched for the connection driver.
 
+mod connection;
 mod framing;
 mod parser;
 mod serialize;
 mod validation;
 
+pub use connection::{
+    serve_connection, AsyncIo, BoxIo, ConnectionConfig, Http1Client, Http1Connector, Http1Pool,
+    PoolKey,
+};
 pub use framing::{
     BodyDecodeStatus, BodyDecoder, BodyDecoderLimits, BodyFraming, DecodedBodyFrame,
 };
