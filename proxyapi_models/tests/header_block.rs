@@ -1,3 +1,4 @@
+use bytes::Bytes;
 use proptest::collection::vec;
 use proptest::prelude::*;
 use proxyapi_models::{HeaderBlock, HeaderField, HeaderFieldError};
@@ -105,6 +106,25 @@ fn json_uses_text_or_value_base64_and_rejects_ambiguous_values() {
         {"name": "x-test", "value": "a", "value_base64": "Yg=="}
     ]);
     assert!(serde_json::from_value::<HeaderBlock>(ambiguous).is_err());
+}
+
+#[test]
+fn inline_and_shared_fields_have_identical_value_semantics() {
+    let short = HeaderField::new("x-short", "value").unwrap();
+    let short_owned =
+        HeaderField::from_bytes(Bytes::from_static(b"x-short"), Bytes::from_static(b"value"))
+            .unwrap();
+    assert_eq!(short, short_owned);
+
+    let long_value = vec![0x80; 128];
+    let long = HeaderField::new("x-long", &long_value).unwrap();
+    let long_owned = HeaderField::from_bytes(
+        Bytes::from_static(b"x-long"),
+        Bytes::from(long_value.clone()),
+    )
+    .unwrap();
+    assert_eq!(long, long_owned);
+    assert_eq!(long.clone().value(), long_value);
 }
 
 fn token_name() -> impl Strategy<Value = String> {

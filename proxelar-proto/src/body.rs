@@ -39,7 +39,7 @@ impl CollectedBody {
 /// drivers can couple stream polling directly to H1 reads or H2/H3 flow-control
 /// credit. No body buffering is implicit in this type.
 pub struct ProxyBody {
-    inner: Pin<Box<dyn Stream<Item = BodyResult> + Send + 'static>>,
+    inner: BodyInner,
     exact_length: Option<u64>,
     may_have_trailers: bool,
 }
@@ -50,20 +50,28 @@ impl ProxyBody {
         S: Stream<Item = BodyResult> + Send + 'static,
     {
         Self {
-            inner: Box::pin(stream),
+            inner: BodyInner::Stream(Box::pin(stream)),
             exact_length: None,
             may_have_trailers: true,
         }
     }
 
     pub fn empty() -> Self {
-        Self::from_frames([])
+        Self {
+            inner: BodyInner::Empty,
+            exact_length: Some(0),
+            may_have_trailers: false,
+        }
     }
 
     pub fn full(data: impl Into<Bytes>) -> Self {
         let data = data.into();
         let length = data.len() as u64;
-        Self::from_frames([Ok(BodyFrame::Data(data))]).with_exact_length(length)
+        Self {
+            inner: BodyInner::Once(Some(Ok(BodyFrame::Data(data)))),
+            exact_length: Some(length),
+            may_have_trailers: false,
+        }
     }
 
     pub fn from_frames(frames: impl IntoIterator<Item = BodyResult>) -> Self {
@@ -77,7 +85,7 @@ impl ProxyBody {
             .iter()
             .any(|frame| matches!(frame, Ok(BodyFrame::Trailers(_))));
         Self {
-            inner: Box::pin(ReadyFrames { frames }),
+            inner: BodyInner::Stream(Box::pin(ReadyFrames { frames })),
             exact_length,
             may_have_trailers,
         }
@@ -115,11 +123,24 @@ impl ProxyBody {
     /// Protocols permit at most one trailer block. A second block is rejected
     /// instead of being silently merged or reordered.
     pub async fn collect(mut self) -> Result<CollectedBody, ProtocolError> {
-        let mut data = BytesMut::new();
+        let mut first_data = None::<Bytes>;
+        let mut combined_data = None::<BytesMut>;
         let mut trailers = None;
         while let Some(frame) = self.next().await {
             match frame? {
-                BodyFrame::Data(bytes) => data.extend_from_slice(&bytes),
+                BodyFrame::Data(bytes) if bytes.is_empty() => {}
+                BodyFrame::Data(bytes) => {
+                    if let Some(combined) = &mut combined_data {
+                        combined.extend_from_slice(&bytes);
+                    } else if let Some(first) = first_data.take() {
+                        let mut combined = BytesMut::with_capacity(first.len() + bytes.len());
+                        combined.extend_from_slice(&first);
+                        combined.extend_from_slice(&bytes);
+                        combined_data = Some(combined);
+                    } else {
+                        first_data = Some(bytes);
+                    }
+                }
                 BodyFrame::Trailers(headers) if trailers.is_none() => trailers = Some(headers),
                 BodyFrame::Trailers(_) => {
                     return Err(ProtocolError::new(
@@ -130,7 +151,8 @@ impl ProxyBody {
             }
         }
         Ok(CollectedBody {
-            data: data.freeze(),
+            data: combined_data
+                .map_or_else(|| first_data.unwrap_or_default(), bytes::BytesMut::freeze),
             trailers,
         })
     }
@@ -140,7 +162,11 @@ impl Stream for ProxyBody {
     type Item = BodyResult;
 
     fn poll_next(mut self: Pin<&mut Self>, context: &mut Context<'_>) -> Poll<Option<Self::Item>> {
-        self.inner.as_mut().poll_next(context)
+        match &mut self.inner {
+            BodyInner::Empty => Poll::Ready(None),
+            BodyInner::Once(frame) => Poll::Ready(frame.take()),
+            BodyInner::Stream(stream) => stream.as_mut().poll_next(context),
+        }
     }
 }
 
@@ -152,6 +178,12 @@ impl fmt::Debug for ProxyBody {
 
 struct ReadyFrames {
     frames: VecDeque<BodyResult>,
+}
+
+enum BodyInner {
+    Empty,
+    Once(Option<BodyResult>),
+    Stream(Pin<Box<dyn Stream<Item = BodyResult> + Send + 'static>>),
 }
 
 impl Stream for ReadyFrames {

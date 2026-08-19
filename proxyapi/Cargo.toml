@@ -75,3 +75,7 @@ x509-parser = "0.18"
 [[bench]]
 name = "protocol_baseline"
 harness = false
+
+[[bench]]
+name = "protocol_final"
+harness = false

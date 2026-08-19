@@ -22,7 +22,7 @@ use crate::{
 
 use super::{
     encode_request_head, encode_response_head, BodyDecodeStatus, BodyDecoder, BodyDecoderLimits,
-    BodyEncoder, BodyFraming, HeadParser, HeadParserLimits, Http1Error, ParseStatus,
+    BodyEncoder, BodyFraming, HeadParser, HeadParserLimits, Http1Error,
 };
 
 /// Runtime limits and timeouts shared by client and server HTTP/1 drivers.
@@ -247,9 +247,12 @@ where
     let mut buffer = BytesMut::with_capacity(8 * 1024);
     loop {
         let parsed = loop {
-            match parser.parse_request(&buffer).map_err(protocol_error)? {
-                ParseStatus::Complete(parsed) => break parsed,
-                ParseStatus::Incomplete => {
+            match parser.request_head_len(&buffer).map_err(protocol_error)? {
+                Some(consumed) => {
+                    let head = buffer.split_to(consumed).freeze();
+                    break parser.parse_request_bytes(head).map_err(protocol_error)?;
+                }
+                None => {
                     if !read_more(&mut reader, &mut buffer, config.read_timeout).await? {
                         if buffer.is_empty() {
                             return Ok(ReaderExit::Closed);
@@ -263,7 +266,6 @@ where
             }
         };
 
-        buffer.advance(parsed.consumed);
         let close_after_response = !request_keep_alive(&parsed.head.headers, parsed.head.version);
         let upgrade_requested = request_wants_upgrade(&parsed.head.method, &parsed.head.headers);
         let framing = BodyFraming::for_request(parsed.semantics);
@@ -323,7 +325,7 @@ where
 {
     let mut decoder = BodyDecoder::with_limits(framing, config.body_limits);
     loop {
-        match decoder.decode(buffer).map_err(protocol_error)? {
+        match decoder.decode_buffer(buffer).map_err(protocol_error)? {
             BodyDecodeStatus::Incomplete { consumed } => {
                 buffer.advance(consumed);
                 if !read_more(reader, buffer, config.read_timeout).await? {
@@ -663,9 +665,10 @@ where
 {
     let parser = HeadParser::new(config.head_limits);
     loop {
-        match parser.parse_response(buffer).map_err(protocol_error)? {
-            ParseStatus::Complete(parsed) => {
-                buffer.advance(parsed.consumed);
+        match parser.response_head_len(buffer).map_err(protocol_error)? {
+            Some(consumed) => {
+                let head = buffer.split_to(consumed).freeze();
+                let parsed = parser.parse_response_bytes(head).map_err(protocol_error)?;
                 if parsed.head.status.is_informational()
                     && parsed.head.status != StatusCode::SWITCHING_PROTOCOLS
                 {
@@ -673,7 +676,7 @@ where
                 }
                 return Ok((parsed.head, parsed.semantics));
             }
-            ParseStatus::Incomplete => {
+            None => {
                 if !read_more(io, buffer, config.read_timeout).await? {
                     return Err(ProtocolError::new(
                         ErrorKind::MalformedMessage,
@@ -714,7 +717,7 @@ where
 {
     let mut decoder = BodyDecoder::with_limits(framing, config.body_limits);
     loop {
-        match decoder.decode(buffer).map_err(protocol_error)? {
+        match decoder.decode_buffer(buffer).map_err(protocol_error)? {
             BodyDecodeStatus::Incomplete { consumed } => {
                 buffer.advance(consumed);
                 if !read_more(io, buffer, config.read_timeout).await? {

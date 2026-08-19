@@ -1,4 +1,6 @@
-use bytes::Bytes;
+use std::ops::Range;
+
+use bytes::{Buf as _, Bytes, BytesMut};
 use http::{Method, StatusCode};
 use proxyapi_models::{HeaderBlock, HeaderField};
 
@@ -110,6 +112,7 @@ pub struct BodyDecoder {
     chunk_state: ChunkState,
     limits: BodyDecoderLimits,
     complete: bool,
+    data_range: Option<Range<usize>>,
 }
 
 impl BodyDecoder {
@@ -135,6 +138,7 @@ impl BodyDecoder {
             chunk_state,
             limits,
             complete,
+            data_range: None,
         }
     }
 
@@ -147,6 +151,49 @@ impl BodyDecoder {
     }
 
     pub fn decode(&mut self, input: &[u8]) -> Result<BodyDecodeStatus, Http1Error> {
+        self.decode_inner(input, true)
+    }
+
+    pub(crate) fn decode_buffer(
+        &mut self,
+        input: &mut BytesMut,
+    ) -> Result<BodyDecodeStatus, Http1Error> {
+        let mut status = self.decode_inner(input, false)?;
+        let consumed = match &status {
+            BodyDecodeStatus::Incomplete { consumed } | BodyDecodeStatus::Complete { consumed } => {
+                *consumed
+            }
+            BodyDecodeStatus::Frame(frame) => frame.consumed,
+        };
+        if let BodyDecodeStatus::Frame(frame) = &mut status {
+            if matches!(frame.frame, BodyFrame::Data(_)) {
+                let range = self
+                    .data_range
+                    .take()
+                    .expect("data frames always retain their source range");
+                let source = input.split_to(consumed).freeze();
+                frame.frame = BodyFrame::Data(source.slice(range));
+            } else {
+                input.advance(consumed);
+            }
+            frame.consumed = 0;
+        } else {
+            input.advance(consumed);
+            match &mut status {
+                BodyDecodeStatus::Incomplete { consumed }
+                | BodyDecodeStatus::Complete { consumed } => *consumed = 0,
+                BodyDecodeStatus::Frame(_) => unreachable!(),
+            }
+        }
+        Ok(status)
+    }
+
+    fn decode_inner(
+        &mut self,
+        input: &[u8],
+        copy_data: bool,
+    ) -> Result<BodyDecodeStatus, Http1Error> {
+        self.data_range = None;
         if self.complete {
             return Ok(BodyDecodeStatus::Complete { consumed: 0 });
         }
@@ -155,17 +202,13 @@ impl BodyDecoder {
                 self.complete = true;
                 Ok(BodyDecodeStatus::Complete { consumed: 0 })
             }
-            BodyFraming::ContentLength(_) => self.decode_fixed(input),
-            BodyFraming::Chunked => self.decode_chunked(input),
+            BodyFraming::ContentLength(_) => self.decode_fixed(input, copy_data),
+            BodyFraming::Chunked => self.decode_chunked(input, copy_data),
             BodyFraming::UntilEof => {
                 if input.is_empty() {
                     Ok(BodyDecodeStatus::Incomplete { consumed: 0 })
                 } else {
-                    Ok(BodyDecodeStatus::Frame(DecodedBodyFrame {
-                        frame: BodyFrame::Data(Bytes::copy_from_slice(input)),
-                        consumed: input.len(),
-                        end_stream: false,
-                    }))
+                    Ok(self.data_frame(input, 0..input.len(), input.len(), false, copy_data))
                 }
             }
         }
@@ -199,7 +242,11 @@ impl BodyDecoder {
         }
     }
 
-    fn decode_fixed(&mut self, input: &[u8]) -> Result<BodyDecodeStatus, Http1Error> {
+    fn decode_fixed(
+        &mut self,
+        input: &[u8],
+        copy_data: bool,
+    ) -> Result<BodyDecodeStatus, Http1Error> {
         if self.fixed_remaining == 0 {
             self.complete = true;
             return Ok(BodyDecodeStatus::Complete { consumed: 0 });
@@ -213,14 +260,14 @@ impl BodyDecoder {
         self.fixed_remaining -= consumed as u64;
         let end_stream = self.fixed_remaining == 0;
         self.complete = end_stream;
-        Ok(BodyDecodeStatus::Frame(DecodedBodyFrame {
-            frame: BodyFrame::Data(Bytes::copy_from_slice(&input[..consumed])),
-            consumed,
-            end_stream,
-        }))
+        Ok(self.data_frame(input, 0..consumed, consumed, end_stream, copy_data))
     }
 
-    fn decode_chunked(&mut self, input: &[u8]) -> Result<BodyDecodeStatus, Http1Error> {
+    fn decode_chunked(
+        &mut self,
+        input: &[u8],
+        copy_data: bool,
+    ) -> Result<BodyDecodeStatus, Http1Error> {
         let mut offset = 0;
         loop {
             match self.chunk_state {
@@ -266,13 +313,13 @@ impl BodyDecoder {
                     } else {
                         ChunkState::Data(next_remaining)
                     };
-                    return Ok(BodyDecodeStatus::Frame(DecodedBodyFrame {
-                        frame: BodyFrame::Data(Bytes::copy_from_slice(
-                            &input[offset..offset + consumed],
-                        )),
-                        consumed: offset + consumed,
-                        end_stream: false,
-                    }));
+                    return Ok(self.data_frame(
+                        input,
+                        offset..offset + consumed,
+                        offset + consumed,
+                        false,
+                        copy_data,
+                    ));
                 }
                 ChunkState::DataTerminator => {
                     if input.len() - offset < 2 {
@@ -324,6 +371,27 @@ impl BodyDecoder {
                 }
             }
         }
+    }
+
+    fn data_frame(
+        &mut self,
+        input: &[u8],
+        range: Range<usize>,
+        consumed: usize,
+        end_stream: bool,
+        copy_data: bool,
+    ) -> BodyDecodeStatus {
+        self.data_range = Some(range.clone());
+        let data = if copy_data {
+            Bytes::copy_from_slice(&input[range])
+        } else {
+            Bytes::new()
+        };
+        BodyDecodeStatus::Frame(DecodedBodyFrame {
+            frame: BodyFrame::Data(data),
+            consumed,
+            end_stream,
+        })
     }
 }
 

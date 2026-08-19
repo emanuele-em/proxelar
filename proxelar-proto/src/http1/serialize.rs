@@ -19,7 +19,12 @@ pub fn encode_request_head(head: &RequestHead) -> Result<Bytes, Http1Error> {
             "request URI has no serializable target",
         ));
     }
-    let mut output = BytesMut::new();
+    let mut output = BytesMut::with_capacity(
+        head.method.as_str().len()
+            + target.len()
+            + version.len()
+            + encoded_headers_len(&head.headers),
+    );
     output.extend_from_slice(head.method.as_str().as_bytes());
     output.extend_from_slice(b" ");
     output.extend_from_slice(target.as_bytes());
@@ -44,7 +49,12 @@ pub fn encode_request_head(head: &RequestHead) -> Result<Bytes, Http1Error> {
 /// use the same function and do not imply a final response or a body.
 pub fn encode_response_head(head: &ResponseHead) -> Result<Bytes, Http1Error> {
     let version = version_bytes(head.version)?;
-    let mut output = BytesMut::new();
+    let mut output = BytesMut::with_capacity(
+        version.len()
+            + head.status.as_str().len()
+            + head.status.canonical_reason().map_or(0, str::len)
+            + encoded_headers_len(&head.headers),
+    );
     output.extend_from_slice(version);
     output.extend_from_slice(b" ");
     output.extend_from_slice(head.status.as_str().as_bytes());
@@ -99,6 +109,14 @@ fn encode_headers(
         output.extend_from_slice(b"\r\n");
     }
     Ok(())
+}
+
+fn encoded_headers_len(headers: &HeaderBlock) -> usize {
+    headers
+        .iter()
+        .map(|field| field.name().len() + field.value().len() + 4)
+        .sum::<usize>()
+        + 16
 }
 
 /// Stateful frame serializer that enforces the framing selected from a head.
@@ -163,7 +181,8 @@ impl BodyEncoder {
                     return Ok(Bytes::new());
                 }
                 let mut output = BytesMut::with_capacity(data.len() + 32);
-                output.put(format!("{:X}\r\n", data.len()).as_bytes());
+                put_hex(&mut output, data.len());
+                output.put_slice(b"\r\n");
                 output.extend_from_slice(&data);
                 output.extend_from_slice(b"\r\n");
                 Ok(output.freeze())
@@ -211,4 +230,19 @@ impl BodyEncoder {
             }
         }
     }
+}
+
+fn put_hex(output: &mut BytesMut, mut value: usize) {
+    const HEX: &[u8; 16] = b"0123456789ABCDEF";
+    let mut digits = [0_u8; usize::BITS as usize / 4];
+    let mut index = digits.len();
+    loop {
+        index -= 1;
+        digits[index] = HEX[value & 0x0f];
+        value >>= 4;
+        if value == 0 {
+            break;
+        }
+    }
+    output.extend_from_slice(&digits[index..]);
 }
