@@ -253,6 +253,7 @@ impl Proxy {
                 ca,
                 native_pool,
                 native_route,
+                self.config.upstream_tls.clone(),
                 self.config.event_tx.clone(),
                 replay_rx,
                 shutdown,
