@@ -91,16 +91,26 @@ pub(super) enum NativeUpstream {
 pub(super) struct NegotiatedUpstream {
     outbound: OutboundConnector,
     tls: Arc<rustls::ClientConfig>,
-    client: tokio::sync::Mutex<Option<NegotiatedClient>>,
+    client: tokio::sync::Mutex<Option<Arc<NegotiatedClient>>>,
 }
 
-#[derive(Clone)]
 enum NegotiatedClient {
     Http1 {
         client: Http1Client,
         authority: Authority,
     },
     Http2(H2Client),
+}
+
+fn should_evict(client: &NegotiatedClient, error: &ProtocolError) -> bool {
+    !matches!(client, NegotiatedClient::Http2(_)) || h2_error_closes_connection(error.kind())
+}
+
+fn h2_error_closes_connection(kind: ErrorKind) -> bool {
+    matches!(
+        kind,
+        ErrorKind::Io | ErrorKind::Timeout | ErrorKind::ProtocolViolation
+    )
 }
 
 pub(super) enum NativeWebSocketResponse {
@@ -211,16 +221,16 @@ impl NegotiatedUpstream {
             if let Some(client) = state.as_ref() {
                 client.clone()
             } else {
-                let client = self.connect(authority.clone()).await?;
+                let client = Arc::new(self.connect(authority.clone()).await?);
                 *state = Some(client.clone());
                 client
             }
         };
 
-        let result = match client {
+        let result = match client.as_ref() {
             NegotiatedClient::Http1 { client, authority } => {
                 let mut request = request;
-                prepare_http1_request(&mut request, &authority, preserve_upgrade)?;
+                prepare_http1_request(&mut request, authority, preserve_upgrade)?;
                 client.send_request_with_upgrade(request).await
             }
             NegotiatedClient::Http2(client) => {
@@ -230,17 +240,27 @@ impl NegotiatedUpstream {
                         "HTTP/1 Upgrade cannot be forwarded over a negotiated HTTP/2 upstream",
                     ));
                 }
-                let response = client.send_request(request).await?;
-                Ok(Http1ClientResponse {
-                    response,
-                    upgrade: None,
-                })
+                client
+                    .send_request(request)
+                    .await
+                    .map(|response| Http1ClientResponse {
+                        response,
+                        upgrade: None,
+                    })
             }
         };
-        if result.is_err() {
-            *self.client.lock().await = None;
+        if result
+            .as_ref()
+            .is_err_and(|error| should_evict(&client, error))
+        {
+            self.remove_if_current(&client).await;
         }
         result
+    }
+
+    async fn remove_if_current(&self, failed: &Arc<NegotiatedClient>) {
+        let mut state = self.client.lock().await;
+        clear_if_current(&mut state, failed);
     }
 
     async fn connect(&self, authority: Authority) -> Result<NegotiatedClient, ProtocolError> {
@@ -289,29 +309,36 @@ impl NegotiatedUpstream {
             if let Some(client) = state.as_ref() {
                 client.clone()
             } else {
-                let client = self.connect(authority.clone()).await?;
+                let client = Arc::new(self.connect(authority.clone()).await?);
                 *state = Some(client.clone());
                 client
             }
         };
 
-        match client {
+        let result = match client.as_ref() {
             NegotiatedClient::Http1 { client, authority } => {
                 prepare_http1_websocket_upgrade(&mut request)?;
-                prepare_http1_request(&mut request, &authority, true)?;
+                prepare_http1_request(&mut request, authority, true)?;
                 client
                     .send_request_with_upgrade(request)
                     .await
                     .map(NativeWebSocketResponse::Http1)
             }
-            NegotiatedClient::Http2(client) => {
-                client.ensure_extended_connect().await?;
-                client
+            NegotiatedClient::Http2(client) => match client.ensure_extended_connect().await {
+                Ok(()) => client
                     .send_request(request)
                     .await
-                    .map(NativeWebSocketResponse::Http2)
-            }
+                    .map(NativeWebSocketResponse::Http2),
+                Err(error) => Err(error),
+            },
+        };
+        if result
+            .as_ref()
+            .is_err_and(|error| should_evict(&client, error))
+        {
+            self.remove_if_current(&client).await;
         }
+        result
     }
 }
 
@@ -385,4 +412,43 @@ fn malformed(message: impl Into<String>) -> ProtocolError {
 
 fn io(message: impl Into<String>) -> ProtocolError {
     ProtocolError::new(ErrorKind::Io, message)
+}
+
+fn clear_if_current<T>(cached: &mut Option<Arc<T>>, failed: &Arc<T>) {
+    if cached
+        .as_ref()
+        .is_some_and(|current| Arc::ptr_eq(current, failed))
+    {
+        *cached = None;
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn h2_stream_errors_do_not_evict_the_connection() {
+        assert!(!h2_error_closes_connection(ErrorKind::Reset));
+        assert!(!h2_error_closes_connection(ErrorKind::MalformedMessage));
+        assert!(!h2_error_closes_connection(ErrorKind::Unsupported));
+        assert!(h2_error_closes_connection(ErrorKind::Io));
+        assert!(h2_error_closes_connection(ErrorKind::Timeout));
+        assert!(h2_error_closes_connection(ErrorKind::ProtocolViolation));
+    }
+
+    #[test]
+    fn stale_failure_does_not_remove_a_newer_negotiated_connection() {
+        let current = Arc::new(());
+        let stale = Arc::new(());
+        let mut cached = Some(Arc::clone(&current));
+
+        clear_if_current(&mut cached, &stale);
+        assert!(cached
+            .as_ref()
+            .is_some_and(|cached| Arc::ptr_eq(cached, &current)));
+
+        clear_if_current(&mut cached, &current);
+        assert!(cached.is_none());
+    }
 }
