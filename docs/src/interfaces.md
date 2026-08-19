@@ -12,6 +12,8 @@ proxelar -i tui
 
 An interactive terminal interface built with [ratatui](https://github.com/ratatui/ratatui). Shows a table of all captured requests and WebSocket connections with nine columns: time, protocol, method, host, path, status, content-type, size, and duration.
 
+While the alternate-screen TUI is active, tracing output is written to `~/.proxelar/proxelar.log` (or `CA_DIR/proxelar.log` when `--ca-dir` is set) so log lines cannot corrupt the display. Set `RUST_LOG` as usual and inspect the file in another terminal, for example `tail -f ~/.proxelar/proxelar.log`.
+
 In WireGuard mode, an empty capture displays the generated client profile as a QR code. Scan it from the WireGuard mobile app; the table replaces it when the first event arrives.
 
 ### Key bindings

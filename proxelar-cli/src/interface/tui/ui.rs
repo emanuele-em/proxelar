@@ -1,4 +1,5 @@
 use std::collections::VecDeque;
+use std::ops::Range;
 
 use chrono::{Local, TimeZone};
 use http::Uri;
@@ -10,7 +11,7 @@ use ratatui::{
     layout::{Alignment, Constraint, Direction, Layout, Rect},
     style::{Color, Modifier, Style},
     text::{Line, Span},
-    widgets::{Block, Borders, Cell, Clear, Paragraph, Row, Table, Wrap},
+    widgets::{Block, Borders, Cell, Clear, Paragraph, Row, Table, TableState, Wrap},
     Frame,
 };
 
@@ -52,6 +53,26 @@ pub fn draw(f: &mut Frame, state: &mut AppState, wireguard_setup: Option<&WireGu
         env!("CARGO_PKG_VERSION")
     );
 
+    // `Table` owns and collects every supplied row. Limit construction to the
+    // current terminal viewport while keeping selection/offset in global
+    // filtered coordinates.
+    let visible_capacity = usize::from(chunks[0].height.saturating_sub(3)).max(1);
+    let visible_range = visible_row_range(
+        req_count,
+        state.table_state.selected(),
+        state.table_state.offset(),
+        visible_capacity,
+    );
+    *state.table_state.offset_mut() = visible_range.start;
+    let mut visible_table_state = TableState::default();
+    visible_table_state.select(
+        state
+            .table_state
+            .selected()
+            .filter(|selected| visible_range.contains(selected))
+            .map(|selected| selected - visible_range.start),
+    );
+
     // Request table
     let header = Row::new(vec![
         Cell::from("Time"),
@@ -70,7 +91,7 @@ pub fn draw(f: &mut Frame, state: &mut AppState, wireguard_setup: Option<&WireGu
             .add_modifier(Modifier::BOLD),
     );
 
-    let rows: Vec<Row> = filtered
+    let rows: Vec<Row> = filtered[visible_range.clone()]
         .iter()
         .map(|(_idx, entry)| match entry {
             FlowEntry::Complete {
@@ -270,10 +291,10 @@ pub fn draw(f: &mut Frame, state: &mut AppState, wireguard_setup: Option<&WireGu
         if let Some(setup) = wireguard_setup {
             draw_wireguard_setup(f, chunks[0], setup);
         } else {
-            f.render_stateful_widget(table, chunks[0], &mut state.table_state);
+            f.render_stateful_widget(table, chunks[0], &mut visible_table_state);
         }
     } else {
-        f.render_stateful_widget(table, chunks[0], &mut state.table_state);
+        f.render_stateful_widget(table, chunks[0], &mut visible_table_state);
     }
 
     // Detail panel
@@ -297,6 +318,28 @@ pub fn draw(f: &mut Frame, state: &mut AppState, wireguard_setup: Option<&WireGu
     if state.show_help {
         draw_help_modal(f);
     }
+}
+
+fn visible_row_range(
+    total: usize,
+    selected: Option<usize>,
+    current_offset: usize,
+    capacity: usize,
+) -> Range<usize> {
+    if total == 0 {
+        return 0..0;
+    }
+    let capacity = capacity.max(1).min(total);
+    let max_start = total - capacity;
+    let mut start = current_offset.min(max_start);
+    if let Some(selected) = selected.map(|selected| selected.min(total - 1)) {
+        if selected < start {
+            start = selected;
+        } else if selected >= start + capacity {
+            start = selected + 1 - capacity;
+        }
+    }
+    start..(start + capacity).min(total)
 }
 
 fn draw_wireguard_setup(f: &mut Frame, area: Rect, setup: &WireGuardSetup) {
@@ -1263,6 +1306,16 @@ mod tests {
             .map(|row| row.iter().map(|cell| cell.symbol()).collect::<String>())
             .collect::<Vec<_>>()
             .join("\n")
+    }
+
+    #[test]
+    fn visible_rows_are_bounded_and_follow_selection() {
+        assert_eq!(visible_row_range(0, None, 0, 10), 0..0);
+        assert_eq!(visible_row_range(5, None, 0, 10), 0..5);
+        assert_eq!(visible_row_range(10_000, None, 0, 20), 0..20);
+        assert_eq!(visible_row_range(100, Some(75), 0, 20), 56..76);
+        assert_eq!(visible_row_range(100, Some(10), 56, 20), 10..30);
+        assert_eq!(visible_row_range(100, Some(99), 90, 20), 80..100);
     }
 
     #[test]

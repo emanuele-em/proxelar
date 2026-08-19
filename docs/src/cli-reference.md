@@ -46,7 +46,7 @@ proxelar addon <list|inspect|verify|install> [OPTIONS]
 
 | Variable | Description |
 |----------|-------------|
-| `RUST_LOG` | Controls log verbosity. Examples: `debug`, `proxyapi=trace`, `warn` |
+| `RUST_LOG` | Controls log verbosity. Examples: `debug`, `proxyapi=trace`, `warn`. TUI logs go to `CA_DIR/proxelar.log`; other interfaces log to stderr. |
 
 ## Examples
 

@@ -251,6 +251,51 @@ impl Http1Connector for DuplexConnector {
     }
 }
 
+#[derive(Clone)]
+struct CloseAfterResponseService;
+
+impl HttpService for CloseAfterResponseService {
+    fn call(
+        &mut self,
+        request: ProxyRequest,
+    ) -> BoxFuture<'_, Result<ProxyResponse, ProtocolError>> {
+        Box::pin(async move {
+            let path = request.head.uri.path().to_owned();
+            request.body.collect().await?;
+            let mut headers = HeaderBlock::new();
+            headers.add("Connection", "close").unwrap();
+            Ok(ProxyResponse::new(
+                ResponseHead::new(StatusCode::OK, Version::HTTP_11, headers),
+                ProxyBody::full(Bytes::from(path)),
+            ))
+        })
+    }
+}
+
+#[derive(Clone)]
+struct ClosingConnector {
+    connections: Arc<AtomicUsize>,
+}
+
+impl Http1Connector for ClosingConnector {
+    fn connect(&self, _key: PoolKey) -> BoxFuture<'static, Result<BoxIo, ProtocolError>> {
+        let connections = Arc::clone(&self.connections);
+        Box::pin(async move {
+            connections.fetch_add(1, Ordering::SeqCst);
+            let (client_io, server_io): (DuplexStream, DuplexStream) = tokio::io::duplex(1024);
+            tokio::spawn(async move {
+                let _ = serve_connection(
+                    server_io,
+                    CloseAfterResponseService,
+                    ConnectionConfig::default(),
+                )
+                .await;
+            });
+            Ok(Box::new(client_io) as BoxIo)
+        })
+    }
+}
+
 #[tokio::test]
 async fn pool_reuses_connections_by_destination_tls_and_route() {
     let connections = Arc::new(AtomicUsize::new(0));
@@ -283,4 +328,51 @@ async fn pool_reuses_connections_by_destination_tls_and_route() {
         .unwrap();
     response.body.collect().await.unwrap();
     assert_eq!(connections.load(Ordering::SeqCst), 2);
+}
+
+#[tokio::test]
+async fn pool_retries_concurrent_requests_that_were_queued_but_never_written() {
+    let connections = Arc::new(AtomicUsize::new(0));
+    let pool = Arc::new(Http1Pool::new(
+        ClosingConnector {
+            connections: Arc::clone(&connections),
+        },
+        ConnectionConfig::default(),
+    ));
+    let key = PoolKey {
+        destination: "example.test:80".to_owned(),
+        tls: false,
+        outbound_route: None,
+    };
+
+    let paths = [
+        "/one", "/two", "/three", "/four", "/five", "/six", "/seven", "/eight",
+    ];
+    let mut requests = Vec::new();
+    for path in paths {
+        let pool = Arc::clone(&pool);
+        let key = key.clone();
+        requests.push(tokio::spawn(async move {
+            pool.send(key, request(Method::GET, path, ProxyBody::empty()))
+                .await
+                .unwrap()
+                .body
+                .collect()
+                .await
+                .unwrap()
+                .data
+        }));
+    }
+
+    let mut bodies = Vec::new();
+    for request in requests {
+        bodies.push(request.await.unwrap());
+    }
+    bodies.sort();
+    let mut expected = paths
+        .map(|path| Bytes::from_static(path.as_bytes()))
+        .to_vec();
+    expected.sort();
+    assert_eq!(bodies, expected);
+    assert_eq!(connections.load(Ordering::SeqCst), paths.len());
 }

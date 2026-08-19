@@ -117,6 +117,54 @@ async fn forward_proxy_forwards_absolute_http_and_emits_request_complete() {
 }
 
 #[tokio::test]
+async fn forward_proxy_capture_preserves_interleaved_duplicate_header_order() {
+    let _ = rustls::crypto::ring::default_provider().install_default();
+    let (upstream_addr, upstream_shutdown) = start_upstream_server().await;
+    let (proxy_addr, shutdown_tx, handle, mut event_rx, _ca_dir) = start_forward_proxy().await;
+
+    let raw_response = send_raw_request(
+        proxy_addr,
+        format!(
+            "GET http://{upstream_addr}/ordered HTTP/1.1\r\n\
+             Host: {upstream_addr}\r\n\
+             X-Order: first\r\n\
+             X-Middle: second\r\n\
+             X-Order: third\r\n\
+             Connection: close\r\n\
+             \r\n"
+        ),
+    )
+    .await;
+
+    assert!(
+        raw_response.starts_with("HTTP/1.1 200 OK"),
+        "unexpected response:\n{raw_response}"
+    );
+    let ProxyEvent::RequestComplete { request, .. } = recv_request_complete(&mut event_rx).await
+    else {
+        panic!("expected RequestComplete event");
+    };
+    let observed = request
+        .headers()
+        .iter()
+        .filter(|field| field.name_eq("x-order") || field.name_eq("x-middle"))
+        .map(|field| (field.name().to_vec(), field.value().to_vec()))
+        .collect::<Vec<_>>();
+    assert_eq!(
+        observed,
+        vec![
+            (b"X-Order".to_vec(), b"first".to_vec()),
+            (b"X-Middle".to_vec(), b"second".to_vec()),
+            (b"X-Order".to_vec(), b"third".to_vec()),
+        ]
+    );
+
+    let _ = shutdown_tx.send(());
+    let _ = upstream_shutdown.send(());
+    assert!(handle.await.unwrap().is_ok());
+}
+
+#[tokio::test]
 async fn forward_proxy_forwards_h2c_absolute_http_and_emits_http2_capture() {
     let _ = rustls::crypto::ring::default_provider().install_default();
     let (upstream_addr, upstream_shutdown) = start_upstream_server().await;

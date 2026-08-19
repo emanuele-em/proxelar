@@ -464,7 +464,17 @@ impl Stream for BodyChannel {
 
 struct ClientCommand {
     request: ProxyRequest,
-    response_tx: oneshot::Sender<Result<Http1ClientResponse, ProtocolError>>,
+    response_tx: oneshot::Sender<ClientOutcome>,
+}
+
+enum ClientOutcome {
+    Response(Result<Http1ClientResponse, ProtocolError>),
+    NotSent(ProxyRequest),
+}
+
+enum ClientSendError {
+    Failed(ProtocolError),
+    NotSent(Box<ProxyRequest>),
 }
 
 /// Receiver for a raw stream accepted by CONNECT or `101 Switching Protocols`.
@@ -516,20 +526,50 @@ impl Http1Client {
         &self,
         request: ProxyRequest,
     ) -> Result<Http1ClientResponse, ProtocolError> {
+        self.send_request_recoverable(request)
+            .await
+            .map_err(ClientSendError::into_protocol_error)
+    }
+
+    async fn send_request_recoverable(
+        &self,
+        request: ProxyRequest,
+    ) -> Result<Http1ClientResponse, ClientSendError> {
         let (response_tx, response_rx) = oneshot::channel();
-        self.command_tx
+        if let Err(error) = self
+            .command_tx
             .send(ClientCommand {
                 request,
                 response_tx,
             })
             .await
-            .map_err(|_| ProtocolError::new(ErrorKind::Io, "HTTP/1 client connection is closed"))?;
-        response_rx.await.map_err(|_| {
-            ProtocolError::new(
+        {
+            return Err(ClientSendError::NotSent(Box::new(error.0.request)));
+        }
+        match response_rx.await {
+            Ok(ClientOutcome::Response(result)) => result.map_err(ClientSendError::Failed),
+            Ok(ClientOutcome::NotSent(request)) => Err(ClientSendError::NotSent(Box::new(request))),
+            Err(_) => Err(ClientSendError::Failed(ProtocolError::new(
                 ErrorKind::Io,
                 "HTTP/1 client closed before producing a response",
-            )
-        })?
+            ))),
+        }
+    }
+
+    fn same_connection(&self, other: &Self) -> bool {
+        self.command_tx.same_channel(&other.command_tx)
+    }
+}
+
+impl ClientSendError {
+    fn into_protocol_error(self) -> ProtocolError {
+        match self {
+            Self::Failed(error) => error,
+            Self::NotSent(_) => ProtocolError::new(
+                ErrorKind::Io,
+                "HTTP/1 client connection closed before accepting the request",
+            ),
+        }
     }
 }
 
@@ -553,15 +593,19 @@ async fn run_client(
         let request_close =
             !request_keep_alive(&command.request.head.headers, command.request.head.version);
         if let Err(error) = write_request(&mut io, command.request, config).await {
-            let _ = command.response_tx.send(Err(error));
-            return;
+            let _ = command
+                .response_tx
+                .send(ClientOutcome::Response(Err(error)));
+            break;
         }
 
         let (head, semantics) = match read_final_response_head(&mut io, &mut buffer, config).await {
             Ok(parsed) => parsed,
             Err(error) => {
-                let _ = command.response_tx.send(Err(error));
-                return;
+                let _ = command
+                    .response_tx
+                    .send(ClientOutcome::Response(Err(error)));
+                break;
             }
         };
         let response_close = response_requests_close(&head.headers);
@@ -571,17 +615,19 @@ async fn run_client(
         if upgraded {
             let (upgrade_tx, upgrade_rx) = oneshot::channel();
             let response = ProxyResponse::new(head, ProxyBody::empty());
-            let _ = command.response_tx.send(Ok(Http1ClientResponse {
-                response,
-                upgrade: Some(UpgradeReceiver {
-                    receiver: upgrade_rx,
-                }),
-            }));
+            let _ = command
+                .response_tx
+                .send(ClientOutcome::Response(Ok(Http1ClientResponse {
+                    response,
+                    upgrade: Some(UpgradeReceiver {
+                        receiver: upgrade_rx,
+                    }),
+                })));
             let _ = upgrade_tx.send(UpgradedIo {
                 io,
                 read_ahead: buffer.split().freeze(),
             });
-            return;
+            break;
         }
         let (body_tx, body_rx) = mpsc::channel(config.body_channel_capacity.max(1));
         let mut body = ProxyBody::new(BodyChannel { receiver: body_rx });
@@ -590,10 +636,10 @@ async fn run_client(
         }
         if command
             .response_tx
-            .send(Ok(Http1ClientResponse {
+            .send(ClientOutcome::Response(Ok(Http1ClientResponse {
                 response: ProxyResponse::new(head, body),
                 upgrade: None,
-            }))
+            })))
             .is_err()
         {
             // Continue draining the body so a cancelled caller does not poison
@@ -601,15 +647,25 @@ async fn run_client(
         }
         if let Err(error) = read_client_body(&mut io, &mut buffer, framing, body_tx, config).await {
             tracing_error(&error);
-            return;
+            break;
         }
         if request_close
             || response_close
             || framing == BodyFraming::UntilEof
             || framing == BodyFraming::Tunnel
         {
-            return;
+            break;
         }
+    }
+
+    // Prevent new commands from entering, then return ownership of every
+    // request that was queued but never written. The pool may safely retry
+    // only this explicit state; write/read failures remain non-retryable.
+    command_rx.close();
+    while let Some(command) = command_rx.recv().await {
+        let _ = command
+            .response_tx
+            .send(ClientOutcome::NotSent(command.request));
     }
 }
 
@@ -905,24 +961,42 @@ where
     pub async fn send_with_upgrade(
         &self,
         key: PoolKey,
-        request: ProxyRequest,
+        mut request: ProxyRequest,
     ) -> Result<Http1ClientResponse, ProtocolError> {
-        let client = {
-            let mut clients = self.clients.lock().await;
-            if let Some(client) = clients.get(&key) {
-                client.clone()
-            } else {
-                let io = self.connector.connect(key.clone()).await?;
-                let client = Http1Client::new(io, self.config);
-                clients.insert(key.clone(), client.clone());
-                client
+        loop {
+            let client = {
+                let mut clients = self.clients.lock().await;
+                if let Some(client) = clients.get(&key) {
+                    client.clone()
+                } else {
+                    let io = self.connector.connect(key.clone()).await?;
+                    let client = Http1Client::new(io, self.config);
+                    clients.insert(key.clone(), client.clone());
+                    client
+                }
+            };
+            match client.send_request_recoverable(request).await {
+                Ok(response) => return Ok(response),
+                Err(ClientSendError::Failed(error)) => {
+                    self.remove_if_current(&key, &client).await;
+                    return Err(error);
+                }
+                Err(ClientSendError::NotSent(returned_request)) => {
+                    self.remove_if_current(&key, &client).await;
+                    request = *returned_request;
+                }
             }
-        };
-        let result = client.send_request_with_upgrade(request).await;
-        if result.is_err() {
-            self.clients.lock().await.remove(&key);
         }
-        result
+    }
+
+    async fn remove_if_current(&self, key: &PoolKey, failed: &Http1Client) {
+        let mut clients = self.clients.lock().await;
+        if clients
+            .get(key)
+            .is_some_and(|current| current.same_connection(failed))
+        {
+            clients.remove(key);
+        }
     }
 
     pub async fn len(&self) -> usize {
