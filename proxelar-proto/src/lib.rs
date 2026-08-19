@@ -8,6 +8,7 @@
 
 mod body;
 mod error;
+pub mod http1;
 mod message;
 mod service;
 

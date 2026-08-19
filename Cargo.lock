@@ -2508,6 +2508,8 @@ dependencies = [
  "futures-core",
  "futures-util",
  "http",
+ "httparse",
+ "proptest",
  "proxyapi_models",
  "tokio",
 ]
