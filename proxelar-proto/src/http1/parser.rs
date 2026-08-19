@@ -1,3 +1,4 @@
+use bytes::Bytes;
 use http::{Method, StatusCode, Uri, Version};
 use proxyapi_models::{HeaderBlock, HeaderField};
 
@@ -64,8 +65,60 @@ impl HeadParser {
         input: &[u8],
     ) -> Result<ParseStatus<ParsedRequestHead>, Http1Error> {
         self.check_prefix_limits(input)?;
+        if self.limits.max_headers <= 128 {
+            let mut headers = [httparse::EMPTY_HEADER; 128];
+            return self.parse_request_with_headers(
+                input,
+                &mut headers[..self.limits.max_headers],
+                None,
+            );
+        }
         let mut headers = vec![httparse::EMPTY_HEADER; self.limits.max_headers];
-        let mut request = httparse::Request::new(&mut headers);
+        self.parse_request_with_headers(input, &mut headers, None)
+    }
+
+    pub(crate) fn request_head_len(&self, input: &[u8]) -> Result<Option<usize>, Http1Error> {
+        self.check_prefix_limits(input)?;
+        if self.limits.max_headers <= 128 {
+            let mut headers = [httparse::EMPTY_HEADER; 128];
+            return probe_request(input, &mut headers[..self.limits.max_headers]);
+        }
+        let mut headers = vec![httparse::EMPTY_HEADER; self.limits.max_headers];
+        probe_request(input, &mut headers)
+    }
+
+    pub(crate) fn parse_request_bytes(
+        &self,
+        input: Bytes,
+    ) -> Result<ParsedRequestHead, Http1Error> {
+        self.check_prefix_limits(&input)?;
+        let status = if self.limits.max_headers <= 128 {
+            let mut headers = [httparse::EMPTY_HEADER; 128];
+            self.parse_request_with_headers(
+                &input,
+                &mut headers[..self.limits.max_headers],
+                Some(&input),
+            )?
+        } else {
+            let mut headers = vec![httparse::EMPTY_HEADER; self.limits.max_headers];
+            self.parse_request_with_headers(&input, &mut headers, Some(&input))?
+        };
+        match status {
+            ParseStatus::Complete(parsed) => Ok(parsed),
+            ParseStatus::Incomplete => Err(Http1Error::new(
+                Http1ErrorKind::MalformedStartLine,
+                "owned HTTP/1 request head is incomplete",
+            )),
+        }
+    }
+
+    fn parse_request_with_headers<'a>(
+        &self,
+        input: &'a [u8],
+        headers: &mut [httparse::Header<'a>],
+        source: Option<&Bytes>,
+    ) -> Result<ParseStatus<ParsedRequestHead>, Http1Error> {
+        let mut request = httparse::Request::new(headers);
         let consumed = match request.parse(input).map_err(map_httparse_error)? {
             httparse::Status::Partial => return Ok(ParseStatus::Incomplete),
             httparse::Status::Complete(consumed) => consumed,
@@ -96,7 +149,7 @@ impl HeadParser {
             )
         })?;
         let version = parse_version(request.version)?;
-        let headers = parse_headers(request.headers)?;
+        let headers = parse_headers(request.headers, source)?;
         let semantics = validation::validate_request(
             &input[..consumed],
             &method,
@@ -118,8 +171,60 @@ impl HeadParser {
         input: &[u8],
     ) -> Result<ParseStatus<ParsedResponseHead>, Http1Error> {
         self.check_prefix_limits(input)?;
+        if self.limits.max_headers <= 128 {
+            let mut headers = [httparse::EMPTY_HEADER; 128];
+            return self.parse_response_with_headers(
+                input,
+                &mut headers[..self.limits.max_headers],
+                None,
+            );
+        }
         let mut headers = vec![httparse::EMPTY_HEADER; self.limits.max_headers];
-        let mut response = httparse::Response::new(&mut headers);
+        self.parse_response_with_headers(input, &mut headers, None)
+    }
+
+    pub(crate) fn response_head_len(&self, input: &[u8]) -> Result<Option<usize>, Http1Error> {
+        self.check_prefix_limits(input)?;
+        if self.limits.max_headers <= 128 {
+            let mut headers = [httparse::EMPTY_HEADER; 128];
+            return probe_response(input, &mut headers[..self.limits.max_headers]);
+        }
+        let mut headers = vec![httparse::EMPTY_HEADER; self.limits.max_headers];
+        probe_response(input, &mut headers)
+    }
+
+    pub(crate) fn parse_response_bytes(
+        &self,
+        input: Bytes,
+    ) -> Result<ParsedResponseHead, Http1Error> {
+        self.check_prefix_limits(&input)?;
+        let status = if self.limits.max_headers <= 128 {
+            let mut headers = [httparse::EMPTY_HEADER; 128];
+            self.parse_response_with_headers(
+                &input,
+                &mut headers[..self.limits.max_headers],
+                Some(&input),
+            )?
+        } else {
+            let mut headers = vec![httparse::EMPTY_HEADER; self.limits.max_headers];
+            self.parse_response_with_headers(&input, &mut headers, Some(&input))?
+        };
+        match status {
+            ParseStatus::Complete(parsed) => Ok(parsed),
+            ParseStatus::Incomplete => Err(Http1Error::new(
+                Http1ErrorKind::MalformedStartLine,
+                "owned HTTP/1 response head is incomplete",
+            )),
+        }
+    }
+
+    fn parse_response_with_headers<'a>(
+        &self,
+        input: &'a [u8],
+        headers: &mut [httparse::Header<'a>],
+        source: Option<&Bytes>,
+    ) -> Result<ParseStatus<ParsedResponseHead>, Http1Error> {
+        let mut response = httparse::Response::new(headers);
         let consumed = match response.parse(input).map_err(map_httparse_error)? {
             httparse::Status::Partial => return Ok(ParseStatus::Incomplete),
             httparse::Status::Complete(consumed) => consumed,
@@ -137,7 +242,7 @@ impl HeadParser {
                 format!("invalid response status: {error}"),
             )
         })?;
-        let headers = parse_headers(response.headers)?;
+        let headers = parse_headers(response.headers, source)?;
         let semantics =
             validation::validate_response(&input[..consumed], status, version, &headers)?;
 
@@ -173,11 +278,21 @@ impl HeadParser {
     }
 }
 
-fn parse_headers(headers: &[httparse::Header<'_>]) -> Result<HeaderBlock, Http1Error> {
+fn parse_headers(
+    headers: &[httparse::Header<'_>],
+    source: Option<&Bytes>,
+) -> Result<HeaderBlock, Http1Error> {
     headers
         .iter()
         .map(|header| {
-            HeaderField::new(header.name.as_bytes(), header.value).map_err(|error| {
+            let field = if let Some(source) = source {
+                let name = source_range(source, header.name.as_bytes())?;
+                let value = source_range(source, header.value)?;
+                HeaderField::from_bytes(name, value)
+            } else {
+                HeaderField::new(header.name.as_bytes(), header.value)
+            };
+            field.map_err(|error| {
                 Http1Error::new(
                     Http1ErrorKind::MalformedHeader,
                     format!("invalid header field: {error}"),
@@ -185,6 +300,55 @@ fn parse_headers(headers: &[httparse::Header<'_>]) -> Result<HeaderBlock, Http1E
             })
         })
         .collect::<Result<HeaderBlock, _>>()
+}
+
+fn source_range(source: &Bytes, range: &[u8]) -> Result<Bytes, Http1Error> {
+    let source_start = source.as_ptr() as usize;
+    let start = (range.as_ptr() as usize)
+        .checked_sub(source_start)
+        .filter(|start| *start <= source.len())
+        .ok_or_else(|| {
+            Http1Error::new(
+                Http1ErrorKind::MalformedHeader,
+                "HTTP/1 parser returned a header outside its source buffer",
+            )
+        })?;
+    let end = start
+        .checked_add(range.len())
+        .filter(|end| *end <= source.len())
+        .ok_or_else(|| {
+            Http1Error::new(
+                Http1ErrorKind::MalformedHeader,
+                "HTTP/1 parser returned a header outside its source buffer",
+            )
+        })?;
+    Ok(source.slice(start..end))
+}
+
+fn probe_request<'a>(
+    input: &'a [u8],
+    headers: &mut [httparse::Header<'a>],
+) -> Result<Option<usize>, Http1Error> {
+    match httparse::Request::new(headers)
+        .parse(input)
+        .map_err(map_httparse_error)?
+    {
+        httparse::Status::Partial => Ok(None),
+        httparse::Status::Complete(consumed) => Ok(Some(consumed)),
+    }
+}
+
+fn probe_response<'a>(
+    input: &'a [u8],
+    headers: &mut [httparse::Header<'a>],
+) -> Result<Option<usize>, Http1Error> {
+    match httparse::Response::new(headers)
+        .parse(input)
+        .map_err(map_httparse_error)?
+    {
+        httparse::Status::Partial => Ok(None),
+        httparse::Status::Complete(consumed) => Ok(Some(consumed)),
+    }
 }
 
 fn parse_version(version: Option<u8>) -> Result<Version, Http1Error> {

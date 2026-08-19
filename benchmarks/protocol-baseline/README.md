@@ -21,3 +21,22 @@ the measured region.
 Raw results include the Git commit, Rust compiler, target triple, scenario
 configuration, and schema version. Results are machine-dependent; compare final
 results on the same host with background load minimized.
+
+Run the native protocol stack and enforce the final gates with:
+
+```sh
+benchmarks/protocol-baseline/run-final.sh
+```
+
+The command preserves the native raw measurements in `final-results.json` and
+the scenario-by-scenario ratios in `comparison.json`. Every scenario must keep
+or improve throughput, keep p99 latency within 5% of the baseline, and perform
+no more allocations per request. The comparison refuses results from a
+different target or benchmark configuration.
+
+For profiling one native scenario without comparison, pass its recorded name:
+
+```sh
+cargo bench -p proxyapi --bench protocol_final -- \
+    --scenario h1_plain_complex_headers
+```

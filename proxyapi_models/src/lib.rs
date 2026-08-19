@@ -8,6 +8,7 @@ use base64::Engine as _;
 use bytes::Bytes;
 use http::{Method, StatusCode, Uri, Version};
 use serde::{de, Deserialize, Deserializer, Serialize, Serializer};
+use smallvec::SmallVec;
 
 /// A validation error for an HTTP header field.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -47,8 +48,22 @@ impl std::error::Error for HeaderFieldError {}
 /// tabs, and RFC 9110 `obs-text`, so non-UTF-8 wire values remain lossless.
 #[derive(Clone, PartialEq, Eq, Hash)]
 pub struct HeaderField {
-    name: Bytes,
-    value: Bytes,
+    storage: HeaderStorage,
+}
+
+const INLINE_HEADER_BYTES: usize = 64;
+
+#[derive(Clone, PartialEq, Eq, Hash)]
+enum HeaderStorage {
+    Inline {
+        bytes: [u8; INLINE_HEADER_BYTES],
+        name_len: u8,
+        total_len: u8,
+    },
+    Shared {
+        name: Bytes,
+        value: Bytes,
+    },
 }
 
 impl HeaderField {
@@ -59,25 +74,68 @@ impl HeaderField {
         validate_name(name)?;
         validate_value(value)?;
         Ok(Self {
-            name: Bytes::copy_from_slice(name),
-            value: Bytes::copy_from_slice(value),
+            storage: make_storage(name, value),
         })
+    }
+
+    /// Construct a field from already-owned byte ranges without copying them.
+    ///
+    /// Protocol parsers use this to retain slices of an immutable wire buffer.
+    pub fn from_bytes(name: Bytes, value: Bytes) -> Result<Self, HeaderFieldError> {
+        validate_name(&name)?;
+        validate_value(&value)?;
+        let storage = if name.len().saturating_add(value.len()) <= INLINE_HEADER_BYTES {
+            make_storage(&name, &value)
+        } else {
+            HeaderStorage::Shared { name, value }
+        };
+        Ok(Self { storage })
     }
 
     /// Return the original, case-preserving field name bytes.
     pub fn name(&self) -> &[u8] {
-        &self.name
+        match &self.storage {
+            HeaderStorage::Inline {
+                bytes, name_len, ..
+            } => &bytes[..usize::from(*name_len)],
+            HeaderStorage::Shared { name, .. } => name,
+        }
     }
 
     /// Return the field value bytes.
     pub fn value(&self) -> &[u8] {
-        &self.value
+        match &self.storage {
+            HeaderStorage::Inline {
+                bytes,
+                name_len,
+                total_len,
+            } => &bytes[usize::from(*name_len)..usize::from(*total_len)],
+            HeaderStorage::Shared { value, .. } => value,
+        }
     }
 
     /// Return whether this field has the supplied name, using HTTP's ASCII
     /// case-insensitive comparison rules.
     pub fn name_eq(&self, name: impl AsRef<[u8]>) -> bool {
-        self.name.eq_ignore_ascii_case(name.as_ref())
+        self.name().eq_ignore_ascii_case(name.as_ref())
+    }
+}
+
+fn make_storage(name: &[u8], value: &[u8]) -> HeaderStorage {
+    let total_len = name.len().saturating_add(value.len());
+    if total_len <= INLINE_HEADER_BYTES {
+        let mut bytes = [0_u8; INLINE_HEADER_BYTES];
+        bytes[..name.len()].copy_from_slice(name);
+        bytes[name.len()..total_len].copy_from_slice(value);
+        return HeaderStorage::Inline {
+            bytes,
+            name_len: name.len() as u8,
+            total_len: total_len as u8,
+        };
+    }
+    HeaderStorage::Shared {
+        name: Bytes::copy_from_slice(name),
+        value: Bytes::copy_from_slice(value),
     }
 }
 
@@ -85,8 +143,8 @@ impl fmt::Debug for HeaderField {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         formatter
             .debug_struct("HeaderField")
-            .field("name", &String::from_utf8_lossy(&self.name))
-            .field("value", &String::from_utf8_lossy(&self.value))
+            .field("name", &String::from_utf8_lossy(self.name()))
+            .field("value", &String::from_utf8_lossy(self.value()))
             .finish()
     }
 }
@@ -99,14 +157,14 @@ impl Serialize for HeaderField {
         use serde::ser::SerializeStruct as _;
 
         let mut state = serializer.serialize_struct("HeaderField", 2)?;
-        let name = std::str::from_utf8(&self.name).expect("validated header names are ASCII");
+        let name = std::str::from_utf8(self.name()).expect("validated header names are ASCII");
         state.serialize_field("name", name)?;
-        if let Ok(value) = std::str::from_utf8(&self.value) {
+        if let Ok(value) = std::str::from_utf8(self.value()) {
             state.serialize_field("value", value)?;
         } else {
             state.serialize_field(
                 "value_base64",
-                &base64::engine::general_purpose::STANDARD.encode(&self.value),
+                &base64::engine::general_purpose::STANDARD.encode(self.value()),
             )?;
         }
         state.end()
@@ -152,12 +210,12 @@ impl<'de> Deserialize<'de> for HeaderField {
 /// An ordered HTTP header block that preserves duplicates and field casing.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(transparent)]
-pub struct HeaderBlock(Vec<HeaderField>);
+pub struct HeaderBlock(SmallVec<[HeaderField; 1]>);
 
 impl HeaderBlock {
     /// Construct an empty header block.
     pub const fn new() -> Self {
-        Self(Vec::new())
+        Self(SmallVec::new_const())
     }
 
     /// Construct a header block from fields without reordering them.
@@ -166,12 +224,12 @@ impl HeaderBlock {
     }
 
     /// Return the number of fields, including duplicates.
-    pub const fn len(&self) -> usize {
+    pub fn len(&self) -> usize {
         self.0.len()
     }
 
     /// Return whether the block contains no fields.
-    pub const fn is_empty(&self) -> bool {
+    pub fn is_empty(&self) -> bool {
         self.0.is_empty()
     }
 
@@ -210,11 +268,13 @@ impl HeaderBlock {
     }
 
     /// Iterate through every value for a name in wire order.
-    pub fn get_all(&self, name: impl AsRef<[u8]>) -> impl Iterator<Item = &[u8]> {
-        let name = Bytes::copy_from_slice(name.as_ref());
+    pub fn get_all<N>(&self, name: N) -> impl Iterator<Item = &[u8]>
+    where
+        N: AsRef<[u8]>,
+    {
         self.0
             .iter()
-            .filter(move |field| field.name_eq(&name))
+            .filter(move |field| field.name_eq(name.as_ref()))
             .map(HeaderField::value)
     }
 
@@ -253,7 +313,7 @@ impl FromIterator<HeaderField> for HeaderBlock {
 
 impl IntoIterator for HeaderBlock {
     type Item = HeaderField;
-    type IntoIter = std::vec::IntoIter<HeaderField>;
+    type IntoIter = smallvec::IntoIter<[HeaderField; 1]>;
 
     fn into_iter(self) -> Self::IntoIter {
         self.0.into_iter()
