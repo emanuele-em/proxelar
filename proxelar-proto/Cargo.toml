@@ -9,6 +9,7 @@ publish = false
 bytes = "1.9"
 futures-core = "0.3"
 futures-util = { version = "0.3", default-features = false, features = ["alloc"] }
+h2 = "0.4.15"
 http = "1.4"
 httparse = "1.10"
 proxyapi_models = { version = "0.5.1", path = "../proxyapi_models" }
