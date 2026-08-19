@@ -5,7 +5,8 @@ use std::time::Duration;
 use bytes::Bytes;
 use http::{Method, StatusCode, Uri, Version};
 use proxelar_proto::http1::{
-    serve_connection, BoxIo, ConnectionConfig, Http1Client, Http1Connector, Http1Pool, PoolKey,
+    serve_connection, serve_connection_with_upgrades, BoxIo, ConnectionConfig, Http1Client,
+    Http1Connector, Http1Pool, PoolKey, ServerConnection,
 };
 use proxelar_proto::{
     BodyFrame, BoxFuture, ErrorKind, HttpService, ProtocolError, ProxyBody, ProxyRequest,
@@ -183,6 +184,44 @@ async fn idle_read_timeout_is_reported() {
     .await
     .unwrap_err();
     assert_eq!(error.kind(), ErrorKind::Timeout);
+}
+
+struct ConnectService;
+
+impl HttpService for ConnectService {
+    fn call(
+        &mut self,
+        _request: ProxyRequest,
+    ) -> BoxFuture<'_, Result<ProxyResponse, ProtocolError>> {
+        Box::pin(async {
+            Ok(ProxyResponse::new(
+                ResponseHead::new(StatusCode::OK, Version::HTTP_11, HeaderBlock::new()),
+                ProxyBody::empty(),
+            ))
+        })
+    }
+}
+
+#[tokio::test]
+async fn accepted_connect_returns_raw_io_and_preserves_read_ahead() {
+    let (mut peer, server_io) = tokio::io::duplex(1024);
+    let server = tokio::spawn(serve_connection_with_upgrades(
+        server_io,
+        ConnectService,
+        ConnectionConfig::default(),
+    ));
+    peer.write_all(b"CONNECT example.test:443 HTTP/1.1\r\nHost: example.test:443\r\n\r\nPING")
+        .await
+        .unwrap();
+    let mut response = [0_u8; 19];
+    peer.read_exact(&mut response).await.unwrap();
+    assert_eq!(&response, b"HTTP/1.1 200 OK\r\n\r\n");
+
+    let outcome = server.await.unwrap().unwrap();
+    let ServerConnection::Upgraded(upgraded) = outcome else {
+        panic!("CONNECT did not return the raw stream");
+    };
+    assert_eq!(upgraded.read_ahead, Bytes::from_static(b"PING"));
 }
 
 #[derive(Clone)]

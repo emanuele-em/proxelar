@@ -23,7 +23,7 @@ use crate::ca::Ssl;
 use crate::event::ProxyEvent;
 use crate::handler::CapturingHandler;
 
-use super::{dns, forward, udp, Client, DnsConfig};
+use super::{dns, forward, http1::NativePool, udp, Client, DnsConfig};
 
 const MAX_PACKET_SIZE: usize = 65_535;
 const WIREGUARD_OVERHEAD: usize = 80;
@@ -184,6 +184,8 @@ pub async fn serve(
     handler: CapturingHandler,
     ca: Arc<Ssl>,
     client: Arc<Client>,
+    native_pool: Arc<NativePool>,
+    native_route: Option<String>,
     event_tx: mpsc::Sender<ProxyEvent>,
     replay_rx: Option<mpsc::Receiver<ProxiedRequest>>,
     shutdown: impl Future<Output = ()>,
@@ -227,10 +229,18 @@ pub async fn serve(
         handler.clone(),
         ca,
         Arc::clone(&client),
+        Arc::clone(&native_pool),
+        native_route.clone(),
         cancel.clone(),
     ));
     tasks.spawn(udp_loop(virtual_udp, config.dns, event_tx, cancel.clone()));
-    tasks.spawn(replay_loop(handler, client, replay_rx, cancel.clone()));
+    tasks.spawn(replay_loop(
+        handler,
+        native_pool,
+        native_route,
+        replay_rx,
+        cancel.clone(),
+    ));
 
     tokio::pin!(shutdown);
     let result = tokio::select! {
@@ -249,7 +259,8 @@ pub async fn serve(
 
 async fn replay_loop(
     handler: CapturingHandler,
-    client: Arc<Client>,
+    native_pool: Arc<NativePool>,
+    native_route: Option<String>,
     mut replay_rx: Option<mpsc::Receiver<ProxiedRequest>>,
     cancel: CancellationToken,
 ) -> io::Result<()> {
@@ -261,7 +272,8 @@ async fn replay_loop(
                     tokio::spawn(forward::handle_replay(
                         request,
                         handler.clone(),
-                        Arc::clone(&client),
+                        Arc::clone(&native_pool),
+                        native_route.clone(),
                     ));
                 }
             }
@@ -430,6 +442,8 @@ async fn tcp_loop(
     handler: CapturingHandler,
     ca: Arc<Ssl>,
     client: Arc<Client>,
+    native_pool: Arc<NativePool>,
+    native_route: Option<String>,
     cancel: CancellationToken,
 ) -> io::Result<()> {
     loop {
@@ -447,6 +461,8 @@ async fn tcp_loop(
                     handler.clone(),
                     Arc::clone(&ca),
                     Arc::clone(&client),
+                    Arc::clone(&native_pool),
+                    native_route.clone(),
                     SocketAddr::new(IpAddr::V4(SERVER_ADDRESS), 80),
                     authority,
                 ));

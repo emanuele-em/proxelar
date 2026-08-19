@@ -69,6 +69,7 @@ pub async fn handle_connection(
             if let Err(error) = serve_pinned_stream(
                 stream,
                 upstream,
+                authority.clone(),
                 Scheme::HTTP,
                 handler,
                 ca,
@@ -115,6 +116,7 @@ pub async fn handle_connection(
             if let Err(error) = serve_pinned_stream(
                 stream,
                 upstream,
+                authority.clone(),
                 Scheme::HTTPS,
                 handler,
                 ca,
