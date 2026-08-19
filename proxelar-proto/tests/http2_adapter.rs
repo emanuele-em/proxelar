@@ -126,6 +126,7 @@ fn standard_and_extended_connect_use_native_h2_shapes() {
         "websocket"
     );
     let decoded = from_h2_request(&request).unwrap();
+    assert_eq!(decoded.headers.iter().next().unwrap().name(), b":protocol");
     assert_eq!(
         decoded.headers.get(":protocol"),
         Some(b"websocket".as_slice())
