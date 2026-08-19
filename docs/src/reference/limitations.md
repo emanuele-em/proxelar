@@ -20,7 +20,7 @@ Unknown TCP streams can be observed as directional chunks, but there is no proto
 
 ## HTTP versions
 
-HTTP/2 client connections are accepted, but intercepted requests are deliberately normalized and forwarded upstream as HTTP/1.1. HTTP/3/QUIC interception is not supported.
+HTTP/1 and HTTP/2 are supported end to end in TCP proxy modes, including ordered duplicate headers, streaming bodies, trailers, and WebSockets. HTTP/3/QUIC interception is currently limited to reverse and WireGuard modes. In reverse mode, an `https://` target enables TCP and UDP listeners on the same port; an `http3://` target is UDP-only and uses H3 upstream. Proxelar selects these paths from explicit configuration and ALPN, never by speculative QUIC attempts or timeout fallback.
 
 ## HTTPS and mobile apps
 

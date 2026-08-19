@@ -7,6 +7,15 @@
 
 ## [Unreleased]
 
+### Added
+
+- Add a native transport-neutral HTTP core with custom HTTP/1, direct HTTP/2, and ordered byte-safe headers across capture, replay, REST, and Lua.
+- Enable HTTP/3 by default in official CLI artifacts for reverse and WireGuard interception, including RFC 9220 WebSockets.
+
+### Changed
+
+- Remove Hyper from the `proxyapi` data path and public API; Hyper remains only as a transitive CLI dependency through Axum.
+
 ## [0.5.1] - 2026-07-31
 
 ### Added

@@ -15,7 +15,8 @@ It is not a promise of delivery order. It is the public source of truth for larg
 - WebSocket connection and frame inspection.
 - Body capture limits for large traffic, with passthrough streaming after the configured limit.
 - Upstream TLS trust policies for default roots, extra CA files, CA-only trust, and insecure debugging.
-- HTTP/2 client connection acceptance while preserving HTTP/1.1 upstream forwarding invariants.
+- Native end-to-end HTTP/1 and HTTP/2 with transport-neutral messages and ordered byte-safe headers.
+- HTTP/3 reverse and WireGuard interception, including RFC 9220 WebSockets.
 - Versioned native sessions plus HAR import/export, curl export, and raw HTTP export with default secret redaction.
 - Shared expression filters across the TUI and REST API, including body/header terms and boolean operators.
 - Content-aware views with gzip, br, zstd, deflate, charsets, formatted JSON/XML/HTML/forms/multipart, CSS/JavaScript highlighting, safe raster-image rendering, Protobuf/MessagePack JSON, and bounded binary previews.
@@ -31,8 +32,7 @@ It is not a promise of delivery order. It is the public source of truth for larg
 
 ### Protocol depth
 
-- Preserve end-to-end HTTP/2 semantics during MITM instead of normalizing upstream requests to HTTP/1.1.
-- Investigate HTTP/3/QUIC and document a safe fallback story.
+- Expand HTTP/3 beyond reverse and WireGuard modes while keeping protocol selection explicit and deterministic.
 - Add optional descriptors that give Protobuf wire fields semantic names and define raw-TCP schemas; descriptorless Protobuf and MessagePack editing is already available.
 - Expand WireGuard identity management beyond the generated single-client configuration.
 

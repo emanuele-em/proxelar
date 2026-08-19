@@ -144,8 +144,8 @@ core.
 
 ## Feature flag
 
-Lua scripting is behind the `scripting` feature flag, enabled by default. To build without it:
+Lua scripting is behind the `scripting` feature flag, enabled by default. To build without Lua while retaining the default HTTP/3 engine:
 
 ```bash
-cargo install proxelar --no-default-features
+cargo install proxelar --no-default-features --features http3
 ```

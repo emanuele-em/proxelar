@@ -3,7 +3,11 @@ name = "proxelar-proto"
 version = "0.5.1"
 edition = "2021"
 rust-version.workspace = true
-publish = false
+authors = ["Emanuele Micheletti <micheletti.emanuele@hotmail.com>"]
+description = "Internal transport-neutral HTTP protocol core for Proxelar"
+license = "MIT"
+repository = "https://github.com/emanuele-em/proxelar"
+homepage = "https://proxelar.micheletti.io"
 
 [dependencies]
 bytes = "1.9"
