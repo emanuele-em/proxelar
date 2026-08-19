@@ -181,6 +181,12 @@ where
 #[derive(Clone)]
 pub struct H2Client {
     sender: h2::client::SendRequest<Bytes>,
+    identity: Arc<()>,
+}
+
+enum H2SendError {
+    NotSent(Box<ProxyRequest>, ProtocolError),
+    Failed(ProtocolError),
 }
 
 impl H2Client {
@@ -201,7 +207,10 @@ impl H2Client {
                 tracing_error(&map_h2_error(error));
             }
         });
-        Ok(Self { sender })
+        Ok(Self {
+            sender,
+            identity: Arc::new(()),
+        })
     }
 
     /// Return whether the peer has acknowledged RFC 8441 extended CONNECT.
@@ -213,13 +222,28 @@ impl H2Client {
         &self,
         request: ProxyRequest,
     ) -> Result<ProxyResponse, ProtocolError> {
-        let (head, body) = request.into_parts();
-        let request = to_h2_request(&head)?;
+        self.send_request_recoverable(request)
+            .await
+            .map_err(H2SendError::into_protocol_error)
+    }
+
+    async fn send_request_recoverable(
+        &self,
+        request: ProxyRequest,
+    ) -> Result<ProxyResponse, H2SendError> {
+        let encoded = to_h2_request(&request.head).map_err(H2SendError::Failed)?;
+        let mut sender = match self.sender.clone().ready().await {
+            Ok(sender) => sender,
+            Err(error) => {
+                return Err(H2SendError::NotSent(Box::new(request), map_h2_error(error)));
+            }
+        };
+        let (_, body) = request.into_parts();
         let end_stream = body_is_known_empty(&body);
-        let mut sender = self.sender.clone().ready().await.map_err(map_h2_error)?;
         let (response, mut send) = sender
-            .send_request(request, end_stream)
-            .map_err(map_h2_error)?;
+            .send_request(encoded, end_stream)
+            .map_err(map_h2_error)
+            .map_err(H2SendError::Failed)?;
         if !end_stream {
             tokio::spawn(async move {
                 if let Err(error) = send_body(&mut send, body).await {
@@ -228,9 +252,24 @@ impl H2Client {
                 }
             });
         }
-        let response = response.await.map_err(map_h2_error)?;
-        let head = from_h2_response(&response)?;
+        let response = response
+            .await
+            .map_err(map_h2_error)
+            .map_err(H2SendError::Failed)?;
+        let head = from_h2_response(&response).map_err(H2SendError::Failed)?;
         Ok(ProxyResponse::new(head, recv_body(response.into_body())))
+    }
+
+    fn same_connection(&self, other: &Self) -> bool {
+        Arc::ptr_eq(&self.identity, &other.identity)
+    }
+}
+
+impl H2SendError {
+    fn into_protocol_error(self) -> ProtocolError {
+        match self {
+            Self::NotSent(_, error) | Self::Failed(error) => error,
+        }
     }
 }
 
@@ -280,30 +319,48 @@ where
     pub async fn send(
         &self,
         key: H2PoolKey,
-        request: ProxyRequest,
+        mut request: ProxyRequest,
     ) -> Result<ProxyResponse, ProtocolError> {
-        let existing = {
-            let clients = self.clients.lock().await;
-            clients.get(&key).cloned()
-        };
-        let client = if let Some(client) = existing {
-            client
-        } else {
-            let io = self.connector.connect(key.clone()).await?;
-            let client = H2Client::handshake(io, self.config).await?;
-            self.clients
-                .lock()
-                .await
-                .entry(key.clone())
-                .or_insert_with(|| client.clone())
-                .clone()
-        };
-        match client.send_request(request).await {
-            Ok(response) => Ok(response),
-            Err(error) => {
-                self.clients.lock().await.remove(&key);
-                Err(error)
+        let mut retried = false;
+        loop {
+            let existing = {
+                let clients = self.clients.lock().await;
+                clients.get(&key).cloned()
+            };
+            let client = if let Some(client) = existing {
+                client
+            } else {
+                let io = self.connector.connect(key.clone()).await?;
+                let client = H2Client::handshake(io, self.config).await?;
+                self.clients
+                    .lock()
+                    .await
+                    .entry(key.clone())
+                    .or_insert_with(|| client.clone())
+                    .clone()
+            };
+            match client.send_request_recoverable(request).await {
+                Ok(response) => return Ok(response),
+                Err(H2SendError::Failed(error)) => return Err(error),
+                Err(H2SendError::NotSent(returned, error)) => {
+                    self.remove_if_current(&key, &client).await;
+                    if retried {
+                        return Err(error);
+                    }
+                    retried = true;
+                    request = *returned;
+                }
             }
+        }
+    }
+
+    async fn remove_if_current(&self, key: &H2PoolKey, failed: &H2Client) {
+        let mut clients = self.clients.lock().await;
+        if clients
+            .get(key)
+            .is_some_and(|current| current.same_connection(failed))
+        {
+            clients.remove(key);
         }
     }
 

@@ -140,6 +140,30 @@ impl HttpService for FailingService {
     }
 }
 
+#[derive(Clone)]
+struct SelectiveFailureService;
+
+impl HttpService for SelectiveFailureService {
+    fn call(
+        &mut self,
+        request: ProxyRequest,
+    ) -> BoxFuture<'_, Result<ProxyResponse, ProtocolError>> {
+        Box::pin(async move {
+            if request.head.uri.path() == "/reset" {
+                return Err(ProtocolError::new(ErrorKind::Reset, "reset stream"));
+            }
+            Ok(ProxyResponse::new(
+                ResponseHead::new(
+                    http::StatusCode::OK,
+                    http::Version::HTTP_2,
+                    HeaderBlock::new(),
+                ),
+                request.body,
+            ))
+        })
+    }
+}
+
 #[tokio::test]
 async fn service_failures_reset_only_the_stream() {
     let (client_io, server_io) = tokio::io::duplex(1024);
@@ -266,6 +290,47 @@ async fn pool_reuses_one_multiplexed_connection_per_route_key() {
     }
     assert_eq!(connects.load(Ordering::SeqCst), 1);
     assert_eq!(pool.connection_count().await, 1);
+    drop(pool);
+    server.abort();
+    assert!(server.await.unwrap_err().is_cancelled());
+}
+
+#[tokio::test]
+async fn pool_keeps_connection_after_stream_reset() {
+    let (client_io, server_io) = tokio::io::duplex(1024);
+    let server = tokio::spawn(serve_connection(
+        server_io,
+        SelectiveFailureService,
+        ConnectionConfig::default(),
+    ));
+    let connects = Arc::new(AtomicUsize::new(0));
+    let pool = H2Pool::new(
+        QueueConnector {
+            streams: Arc::new(Mutex::new(VecDeque::from([client_io]))),
+            connects: Arc::clone(&connects),
+        },
+        ConnectionConfig::default(),
+    );
+    let key = H2PoolKey {
+        destination: "example.test:443".to_owned(),
+        tls: true,
+        outbound_route: None,
+    };
+
+    let error = pool
+        .send(key.clone(), request("/reset", ProxyBody::empty()))
+        .await
+        .unwrap_err();
+    assert_eq!(error.kind(), ErrorKind::Reset);
+
+    let response = pool
+        .send(key, request("/ok", ProxyBody::empty()))
+        .await
+        .unwrap();
+    assert!(response.body.collect().await.unwrap().data.is_empty());
+    assert_eq!(connects.load(Ordering::SeqCst), 1);
+    assert_eq!(pool.connection_count().await, 1);
+
     drop(pool);
     server.abort();
     assert!(server.await.unwrap_err().is_cancelled());
