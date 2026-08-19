@@ -211,11 +211,10 @@ pub fn handle_key_event(
 fn request_to_text(req: &proxyapi_models::ProxiedRequest) -> (String, bool) {
     let mut text = format!("{} {} {:?}\n", req.method(), req.uri(), req.version());
     for field in req.headers() {
-        text.push_str(&format!(
-            "{}: {}\n",
-            String::from_utf8_lossy(field.name()),
-            String::from_utf8_lossy(field.value())
-        ));
+        text.push_str(std::str::from_utf8(field.name()).expect("header names are ASCII"));
+        text.push_str(": ");
+        text.push_str(&escape_header_value(field.value()));
+        text.push('\n');
     }
     text.push('\n');
     let structured = proxyapi::content::editable_content(req.headers(), req.body())
@@ -244,6 +243,61 @@ fn request_to_text(req: &proxyapi_models::ProxiedRequest) -> (String, bool) {
     (text, binary_body)
 }
 
+fn escape_header_value(value: &[u8]) -> String {
+    let mut escaped = String::with_capacity(value.len());
+    for byte in value {
+        match byte {
+            b'\\' => escaped.push_str("\\\\"),
+            b'\t' => escaped.push_str("\\t"),
+            0x20..=0x7e => escaped.push(char::from(*byte)),
+            _ => escaped.push_str(&format!("\\x{byte:02x}")),
+        }
+    }
+    escaped
+}
+
+fn unescape_header_value(value: &[u8]) -> Result<Vec<u8>, String> {
+    let mut decoded = Vec::with_capacity(value.len());
+    let mut index = 0;
+    while index < value.len() {
+        if value[index] != b'\\' {
+            decoded.push(value[index]);
+            index += 1;
+            continue;
+        }
+        match value.get(index + 1) {
+            Some(b'\\') => {
+                decoded.push(b'\\');
+                index += 2;
+            }
+            Some(b't') => {
+                decoded.push(b'\t');
+                index += 2;
+            }
+            Some(b'x') if index + 3 < value.len() => {
+                let digits = std::str::from_utf8(&value[index + 2..index + 4])
+                    .map_err(|_| "Invalid header byte escape")?;
+                decoded.push(
+                    u8::from_str_radix(digits, 16).map_err(|_| "Invalid header byte escape")?,
+                );
+                index += 4;
+            }
+            _ => return Err("Header backslashes must use \\\\, \\t, or \\xNN".to_owned()),
+        }
+    }
+    Ok(decoded)
+}
+
+fn trim_ows(mut value: &[u8]) -> &[u8] {
+    while matches!(value.first(), Some(b' ' | b'\t')) {
+        value = &value[1..];
+    }
+    while matches!(value.last(), Some(b' ' | b'\t')) {
+        value = &value[..value.len() - 1];
+    }
+    value
+}
+
 /// Parse a raw HTTP request text into (method, uri, headers, body).
 ///
 /// Both `\r\n` and `\n` line endings are accepted.
@@ -264,8 +318,10 @@ fn parse_raw_http_request(text: &str) -> Result<(String, String, HeaderBlock, By
     let method = fields.next().ok_or("Missing method")?.trim().to_uppercase();
     let uri = fields.next().ok_or("Missing URI")?.trim().to_string();
     let version = fields.next().ok_or("Missing HTTP version")?;
-    if fields.next().is_some() || !matches!(version, "HTTP/1.0" | "HTTP/1.1") {
-        return Err("Request line must end with HTTP/1.0 or HTTP/1.1".to_owned());
+    if fields.next().is_some()
+        || !matches!(version, "HTTP/1.0" | "HTTP/1.1" | "HTTP/2.0" | "HTTP/3.0")
+    {
+        return Err("Request line has an unsupported HTTP version".to_owned());
     }
     method
         .parse::<http::Method>()
@@ -282,8 +338,9 @@ fn parse_raw_http_request(text: &str) -> Result<(String, String, HeaderBlock, By
         let (name, value) = line
             .split_once(':')
             .ok_or_else(|| format!("Invalid header line: {line}"))?;
+        let value = unescape_header_value(trim_ows(value.as_bytes()))?;
         headers
-            .add(name.trim(), value.trim())
+            .add(name.trim(), value)
             .map_err(|error| format!("Invalid header: {error}"))?;
     }
 
@@ -375,11 +432,20 @@ mod tests {
     }
 
     #[test]
+    fn parse_raw_http_request_accepts_captured_http2_and_http3_versions() {
+        for version in ["HTTP/2.0", "HTTP/3.0"] {
+            let text = format!("GET https://api.test/ {version}\n\nx");
+            let (_, _, _, body) = parse_raw_http_request(&text).unwrap();
+            assert_eq!(body.as_ref(), b"x");
+        }
+    }
+
+    #[test]
     fn parse_raw_http_request_rejects_malformed_request_lines_and_headers() {
         for text in [
             "GET /missing-version\n\n",
             "GET %%% HTTP/1.1\n\n",
-            "GET / HTTP/2\n\n",
+            "GET / HTTP/9.0\n\n",
             "GET / HTTP/1.1\ninvalid header\n\n",
         ] {
             assert!(
@@ -400,6 +466,31 @@ mod tests {
         assert!(binary_body);
         let (_, _, _, body) = parse_edited_http_request(&text, binary_body).unwrap();
         assert_eq!(body.as_ref(), b"\xff\x00");
+    }
+
+    #[test]
+    fn request_to_text_roundtrips_binary_headers_and_http2() {
+        let mut headers = HeaderBlock::new();
+        headers
+            .add("x-binary", [0xff, b'\\', b'x', b'4', b'1', b'\t'])
+            .unwrap();
+        let request = ProxiedRequest::new(
+            Method::GET,
+            "https://api.test/".parse().unwrap(),
+            Version::HTTP_2,
+            headers,
+            Bytes::new(),
+            100,
+        );
+
+        let (text, binary_body) = request_to_text(&request);
+        assert!(text.starts_with("GET https://api.test/ HTTP/2.0\n"));
+        assert!(text.contains("x-binary: \\xff\\\\x41\\t\n"));
+        let (_, _, headers, _) = parse_edited_http_request(&text, binary_body).unwrap();
+        assert_eq!(
+            headers.get("x-binary"),
+            Some([0xff, b'\\', b'x', b'4', b'1', b'\t'].as_slice())
+        );
     }
 
     #[test]
