@@ -1,4 +1,5 @@
 use std::collections::HashMap;
+use std::future::Future;
 use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr};
 use std::path::PathBuf;
 use std::pin::Pin;
@@ -10,15 +11,17 @@ use std::time::Duration;
 use bytes::Bytes;
 use futures_util::{SinkExt as _, Stream, StreamExt as _};
 use http::uri::Authority;
+use http::{Method, StatusCode, Uri, Version};
 use proxelar_proto::{
     BodyFrame, BoxFuture, ErrorKind, HttpClient, HttpService, ProtocolError, ProxyBody,
     ProxyRequest, ProxyResponse,
 };
-use proxyapi_models::HeaderBlock;
+use proxyapi_models::{HeaderBlock, ProxiedResponse};
 use rustls::client::danger::ServerCertVerifier;
 use rustls::pki_types::{CertificateDer, ServerName, UnixTime};
+use tokio::io::{AsyncReadExt as _, AsyncWriteExt as _, DuplexStream};
 use tokio::net::UdpSocket;
-use tokio::sync::{oneshot, Mutex as AsyncMutex};
+use tokio::sync::{mpsc, oneshot, Mutex as AsyncMutex};
 use tokio_quiche::http3::driver::{
     ClientH3Controller, ClientH3Event, H3Event, InboundFrame, InboundFrameStream,
     IncomingH3Headers, NewClientRequest, OutboundFrame, OutboundFrameSender, ServerH3Controller,
@@ -31,11 +34,14 @@ use tokio_quiche::settings::{CertificateKind, Hooks, QuicSettings, TlsCertificat
 use tokio_quiche::socket::Socket;
 use tokio_quiche::{ClientH3Driver, ConnectionParams, QuicConnection};
 
+use crate::HttpHandler as _;
+
 const DEFAULT_MAX_HEADER_LIST_SIZE: u64 = 64 * 1024;
 const DEFAULT_QPACK_TABLE_CAPACITY: u64 = 4 * 1024;
 const DEFAULT_QPACK_BLOCKED_STREAMS: u64 = 16;
 const DEFAULT_MAX_REQUESTS_PER_CONNECTION: u64 = 1_000;
 const DEFAULT_HANDSHAKE_TIMEOUT: Duration = Duration::from_secs(10);
+const WEBSOCKET_TUNNEL_CAPACITY: usize = 64 * 1024;
 
 pub(super) fn default_http3_settings() -> Http3Settings {
     Http3Settings {
@@ -44,7 +50,7 @@ pub(super) fn default_http3_settings() -> Http3Settings {
         qpack_max_table_capacity: Some(DEFAULT_QPACK_TABLE_CAPACITY),
         qpack_blocked_streams: Some(DEFAULT_QPACK_BLOCKED_STREAMS),
         post_accept_timeout: Some(Duration::from_secs(10)),
-        enable_extended_connect: false,
+        enable_extended_connect: true,
     }
 }
 
@@ -533,6 +539,190 @@ fn inbound_body(recv: InboundFrameStream) -> ProxyBody {
     .with_trailer_hint(false)
 }
 
+pub(super) fn is_extended_websocket(request: &ProxyRequest) -> bool {
+    request.head.method == Method::CONNECT
+        && request
+            .head
+            .headers
+            .get(":protocol")
+            .is_some_and(|value| value.eq_ignore_ascii_case(b"websocket"))
+}
+
+pub(super) async fn handle_extended_websocket<F, Fut>(
+    mut request: ProxyRequest,
+    mut handler: crate::handler::CapturingHandler,
+    remote_addr: SocketAddr,
+    reverse_target: Option<Uri>,
+    send_upstream: F,
+) -> Result<ProxyResponse, ProtocolError>
+where
+    F: FnOnce(ProxyRequest) -> Fut,
+    Fut: Future<Output = Result<ProxyResponse, ProtocolError>>,
+{
+    let inbound = std::mem::replace(&mut request.body, ProxyBody::empty());
+    // The compatibility hook adapter uses `http::HeaderMap`, which cannot
+    // represent pseudo-headers. Restore the already-validated protocol after
+    // the request hook, matching the RFC 8441 path.
+    request.head.headers.remove(":protocol");
+    let context = crate::HttpContext { remote_addr };
+    let mut request = match handler.handle_request(&context, request).await {
+        crate::RequestOrResponse::Request(request) => request,
+        crate::RequestOrResponse::Response(response) => return Ok(response),
+    };
+    request.body = inbound;
+    set_header(&mut request.head.headers, ":protocol", "websocket")?;
+    if !is_extended_websocket(&request)
+        || request.head.headers.get("sec-websocket-version") != Some(b"13".as_slice())
+    {
+        return Ok(handler.synthetic_protocol_response(
+            StatusCode::BAD_REQUEST,
+            http::HeaderMap::new(),
+            Bytes::from_static(b"Invalid RFC 9220 WebSocket request"),
+        ));
+    }
+    if let Some(target) = reverse_target {
+        request = match super::reverse::rewrite_uri(request, &target) {
+            Ok(request) => request,
+            Err(error) => {
+                tracing::debug!("Failed to rewrite RFC 9220 WebSocket URI: {error}");
+                return Ok(handler.synthetic_protocol_response(
+                    StatusCode::BAD_GATEWAY,
+                    http::HeaderMap::new(),
+                    Bytes::from_static(b"Bad Gateway: URI rewrite failed"),
+                ));
+            }
+        };
+    }
+
+    let inbound = std::mem::replace(&mut request.body, ProxyBody::empty());
+    let (server_tunnel, upstream_body, upstream_response) = websocket_body_tunnel();
+    request.body = upstream_body;
+    let response = match send_upstream(request).await {
+        Ok(response) => response,
+        Err(error) => {
+            tracing::debug!("RFC 9220 upstream handshake failed: {error}");
+            return Ok(handler.synthetic_protocol_response(
+                StatusCode::BAD_GATEWAY,
+                http::HeaderMap::new(),
+                Bytes::from_static(b"Bad Gateway"),
+            ));
+        }
+    };
+    if !response.head.status.is_success() {
+        return Ok(handler.handle_response(&context, response).await);
+    }
+
+    let (mut head, body) = response.into_parts();
+    if upstream_response.send(body).is_err() {
+        return Ok(handler.synthetic_protocol_response(
+            StatusCode::BAD_GATEWAY,
+            http::HeaderMap::new(),
+            Bytes::from_static(b"Bad Gateway: WebSocket response stream unavailable"),
+        ));
+    }
+    let (client_tunnel, outbound) =
+        proxelar_proto::http2::body_tunnel(inbound, WEBSOCKET_TUNNEL_CAPACITY);
+    for name in [
+        b"content-length".as_slice(),
+        b"transfer-encoding".as_slice(),
+    ] {
+        head.headers.remove(name);
+    }
+    head.version = Version::HTTP_3;
+    let connected = ProxiedResponse::new(
+        head.status,
+        Version::HTTP_3,
+        head.headers.clone(),
+        Bytes::new(),
+        crate::handler::now_millis(),
+    );
+    let connection_id = handler
+        .take_pending_id()
+        .unwrap_or_else(crate::event::next_id);
+    if let Some(captured_request) = handler.take_captured_request() {
+        handler.send_event(crate::event::ProxyEvent::WebSocketConnected {
+            id: connection_id,
+            request: Box::new(captured_request),
+            response: Box::new(connected),
+        });
+    }
+    tokio::spawn(super::forward::pump_websocket_streams(
+        connection_id,
+        client_tunnel,
+        server_tunnel,
+        handler,
+    ));
+    Ok(ProxyResponse::new(head, outbound))
+}
+
+fn set_header(
+    headers: &mut HeaderBlock,
+    name: &str,
+    value: impl AsRef<[u8]>,
+) -> Result<(), ProtocolError> {
+    headers
+        .set(name, value)
+        .map_err(|error| malformed(error.to_string()))
+}
+
+pub(super) fn websocket_body_tunnel() -> (DuplexStream, ProxyBody, oneshot::Sender<ProxyBody>) {
+    let (application, bridge) = tokio::io::duplex(WEBSOCKET_TUNNEL_CAPACITY);
+    let (mut bridge_reader, mut bridge_writer) = tokio::io::split(bridge);
+    let (outbound_tx, outbound_rx) = mpsc::channel(4);
+    let (inbound_tx, inbound_rx) = oneshot::channel::<ProxyBody>();
+
+    tokio::spawn(async move {
+        let mut output = vec![0_u8; 16 * 1024];
+        loop {
+            match bridge_reader.read(&mut output).await {
+                Ok(0) | Err(_) => break,
+                Ok(read) => {
+                    if outbound_tx
+                        .send(Ok(BodyFrame::Data(Bytes::copy_from_slice(&output[..read]))))
+                        .await
+                        .is_err()
+                    {
+                        break;
+                    }
+                }
+            }
+        }
+    });
+    tokio::spawn(async move {
+        if let Ok(mut inbound) = inbound_rx.await {
+            while let Some(frame) = inbound.next().await {
+                match frame {
+                    Ok(BodyFrame::Data(data)) => {
+                        if bridge_writer.write_all(&data).await.is_err() {
+                            break;
+                        }
+                    }
+                    Ok(BodyFrame::Trailers(_)) | Err(_) => break,
+                }
+            }
+        }
+        let _ = bridge_writer.shutdown().await;
+    });
+
+    let outbound = ProxyBody::new(H3WebSocketBodyStream {
+        receiver: outbound_rx,
+    })
+    .with_trailer_hint(false);
+    (application, outbound, inbound_tx)
+}
+
+struct H3WebSocketBodyStream {
+    receiver: mpsc::Receiver<Result<BodyFrame, ProtocolError>>,
+}
+
+impl Stream for H3WebSocketBodyStream {
+    type Item = Result<BodyFrame, ProtocolError>;
+
+    fn poll_next(mut self: Pin<&mut Self>, context: &mut Context<'_>) -> Poll<Option<Self::Item>> {
+        self.receiver.poll_recv(context)
+    }
+}
+
 type ResponseSender = oneshot::Sender<Result<ProxyResponse, ProtocolError>>;
 
 #[derive(Default)]
@@ -784,7 +974,7 @@ mod tests {
         assert_eq!(settings.max_header_list_size, Some(64 * 1024));
         assert_eq!(settings.qpack_max_table_capacity, Some(4 * 1024));
         assert_eq!(settings.qpack_blocked_streams, Some(16));
-        assert!(!settings.enable_extended_connect);
+        assert!(settings.enable_extended_connect);
     }
 
     #[tokio::test]
