@@ -2545,6 +2545,7 @@ dependencies = [
  "moka",
  "netstack-smoltcp",
  "openssl",
+ "proxelar-proto",
  "proxyapi_models",
  "reqwest",
  "rmp-serde",

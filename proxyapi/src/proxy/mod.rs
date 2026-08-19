@@ -24,11 +24,11 @@ use proxyapi_models::ProxiedRequest;
 use tokio::net::TcpListener;
 use tokio::sync::mpsc;
 
-use crate::body::ProxyBody;
 use crate::ca::Ssl;
 use crate::error::Error;
 use crate::event::ProxyEvent;
 use crate::handler::CapturingHandler;
+use crate::hyper_adapter::HyperBody;
 use crate::intercept::InterceptConfig;
 #[cfg(feature = "scripting")]
 use crate::scripting::ScriptEngine;
@@ -41,7 +41,7 @@ pub use wireguard::WireGuardConfig;
 /// Shared HTTP(S) client type used by both forward and reverse proxy.
 pub(crate) type Client = hyper_util::client::legacy::Client<
     hyper_rustls::HttpsConnector<outbound::OutboundConnector>,
-    ProxyBody,
+    HyperBody,
 >;
 pub(crate) type BoxError = Box<dyn StdError + Send + Sync>;
 
@@ -82,7 +82,7 @@ where
 ///
 /// This centralizes the proxy's existing invariants and strips hop-by-hop
 /// metadata that must not be forwarded across protocol boundaries.
-pub(crate) fn prepare_upstream_request(mut req: Request<ProxyBody>) -> Request<ProxyBody> {
+pub(crate) fn prepare_upstream_request<B>(mut req: Request<B>) -> Request<B> {
     strip_hop_by_hop_headers(req.headers_mut());
     req.headers_mut().remove(HOST);
     req.headers_mut().remove(PROXY_AUTHORIZATION);
@@ -96,7 +96,7 @@ pub(crate) fn prepare_upstream_request(mut req: Request<ProxyBody>) -> Request<P
 ///
 /// Upgrade handshakes intentionally keep `Connection` and `Upgrade`; stripping
 /// them would turn WebSocket forwarding into an ordinary HTTP request.
-pub(crate) fn prepare_upstream_upgrade_request(mut req: Request<ProxyBody>) -> Request<ProxyBody> {
+pub(crate) fn prepare_upstream_upgrade_request<B>(mut req: Request<B>) -> Request<B> {
     req.headers_mut().remove(HOST);
     req.headers_mut().remove(PROXY_AUTHORIZATION);
     join_cookie_headers(req.headers_mut());

@@ -56,6 +56,26 @@ impl ProxyRequest {
     pub fn into_parts(self) -> (RequestHead, ProxyBody) {
         (self.head, self.body)
     }
+
+    pub const fn method(&self) -> &Method {
+        &self.head.method
+    }
+
+    pub const fn uri(&self) -> &Uri {
+        &self.head.uri
+    }
+
+    pub const fn version(&self) -> Version {
+        self.head.version
+    }
+
+    pub const fn headers(&self) -> &HeaderBlock {
+        &self.head.headers
+    }
+
+    pub fn into_body(self) -> ProxyBody {
+        self.body
+    }
 }
 
 /// A response head paired with its streaming body.
@@ -72,5 +92,21 @@ impl ProxyResponse {
 
     pub fn into_parts(self) -> (ResponseHead, ProxyBody) {
         (self.head, self.body)
+    }
+
+    pub const fn status(&self) -> StatusCode {
+        self.head.status
+    }
+
+    pub const fn version(&self) -> Version {
+        self.head.version
+    }
+
+    pub const fn headers(&self) -> &HeaderBlock {
+        &self.head.headers
+    }
+
+    pub fn into_body(self) -> ProxyBody {
+        self.body
     }
 }
