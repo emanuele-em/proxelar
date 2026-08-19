@@ -2,7 +2,10 @@ use async_trait::async_trait;
 use bytes::{Bytes, BytesMut};
 use futures_util::StreamExt as _;
 use http::{Request, Response};
-use proxelar_proto::{BodyFrame, ProxyRequest, ProxyResponse, RequestHead, ResponseHead};
+use proxelar_proto::{
+    BodyFrame, CollectedBody, ErrorKind, ProtocolError, ProxyRequest, ProxyResponse, RequestHead,
+    ResponseHead,
+};
 use proxyapi_models::{BodyMetadata, HeaderBlock, HeaderField, ProxiedRequest, ProxiedResponse};
 use std::sync::Arc;
 use tokio::sync::{mpsc, Notify};
@@ -19,12 +22,13 @@ use crate::{HttpContext, HttpHandler, RequestOrResponse};
 pub const DEFAULT_BODY_CAPTURE_LIMIT: Option<usize> = None;
 
 enum BodyCollection {
-    Complete(Bytes),
+    Complete(CollectedBody),
     Exceeded { captured: Bytes, body: ProxyBody },
+    Failed { captured: Bytes, body: ProxyBody },
 }
 
 enum RequestBody {
-    Buffered(Bytes),
+    Buffered(CollectedBody),
     Streaming { captured: Bytes, body: ProxyBody },
 }
 
@@ -144,7 +148,7 @@ fn apply_header_map_delta(
 impl RequestBody {
     fn hook_bytes(&self) -> &Bytes {
         match self {
-            Self::Buffered(bytes)
+            Self::Buffered(CollectedBody { data: bytes, .. })
             | Self::Streaming {
                 captured: bytes, ..
             } => bytes,
@@ -156,12 +160,15 @@ impl RequestBody {
             return;
         }
 
-        *self = Self::Buffered(modified_body);
+        *self = Self::Buffered(CollectedBody {
+            data: modified_body,
+            trailers: None,
+        });
     }
 
     fn metadata(&self) -> BodyMetadata {
         match self {
-            Self::Buffered(bytes) => BodyMetadata::complete(bytes.len()),
+            Self::Buffered(body) => BodyMetadata::complete(body.data.len()),
             Self::Streaming { captured, .. } => BodyMetadata {
                 truncated: true,
                 total_seen: captured.len(),
@@ -391,18 +398,43 @@ async fn collect_body(
     kind: &'static str,
 ) -> BodyCollection {
     let mut buffer = BytesMut::new();
+    let mut trailers = None;
 
     while let Some(frame) = body.next().await {
         let frame = match frame {
             Ok(frame) => frame,
             Err(e) => {
                 tracing::warn!("Failed to collect {kind} body: {e}");
-                return BodyCollection::Complete(Bytes::new());
+                return failed_body_collection(buffer.freeze(), trailers, e);
             }
         };
 
-        let BodyFrame::Data(data) = frame else {
-            continue;
+        let data = match frame {
+            BodyFrame::Data(data) if trailers.is_none() => data,
+            BodyFrame::Data(_) => {
+                return failed_body_collection(
+                    buffer.freeze(),
+                    trailers,
+                    ProtocolError::new(
+                        ErrorKind::ProtocolViolation,
+                        "body data received after trailers",
+                    ),
+                );
+            }
+            BodyFrame::Trailers(headers) if trailers.is_none() => {
+                trailers = Some(headers);
+                continue;
+            }
+            BodyFrame::Trailers(_) => {
+                return failed_body_collection(
+                    buffer.freeze(),
+                    trailers,
+                    ProtocolError::new(
+                        ErrorKind::ProtocolViolation,
+                        "body contains more than one trailer block",
+                    ),
+                );
+            }
         };
 
         let Some(limit) = limit else {
@@ -432,7 +464,29 @@ async fn collect_body(
         buffer.extend_from_slice(&data);
     }
 
-    BodyCollection::Complete(buffer.freeze())
+    BodyCollection::Complete(CollectedBody {
+        data: buffer.freeze(),
+        trailers,
+    })
+}
+
+fn failed_body_collection(
+    captured: Bytes,
+    trailers: Option<HeaderBlock>,
+    error: ProtocolError,
+) -> BodyCollection {
+    let mut frames = Vec::with_capacity(3);
+    if !captured.is_empty() {
+        frames.push(Ok(BodyFrame::Data(captured.clone())));
+    }
+    if let Some(trailers) = trailers {
+        frames.push(Ok(BodyFrame::Trailers(trailers)));
+    }
+    frames.push(Err(error));
+    BodyCollection::Failed {
+        captured,
+        body: ProxyBody::from_frames(frames),
+    }
 }
 
 /// Default handler that captures request/response pairs and emits [`ProxyEvent`]s.
@@ -704,20 +758,22 @@ impl CapturingHandler {
         }
 
         match collect_body(body, self.body_capture_limit, "response").await {
-            BodyCollection::Complete(body_bytes) => {
-                self.finish_buffered_response(parts, body_bytes)
-            }
+            BodyCollection::Complete(body) => self.finish_buffered_response(parts, body),
             BodyCollection::Exceeded { captured, body } => {
                 self.finish_limited_response(parts, captured, body)
             }
+            BodyCollection::Failed { body, .. } => self.stream_response(parts, body),
         }
     }
 
     pub(crate) async fn record_upstream_response(&mut self, res: Response<ProxyBody>) {
         let (parts, body) = res.into_parts();
         match collect_body(body, self.body_capture_limit, "response").await {
-            BodyCollection::Complete(body_bytes) => self.emit_captured_response(parts, body_bytes),
+            BodyCollection::Complete(body) => self.emit_captured_response(parts, body.data),
             BodyCollection::Exceeded { captured, .. } => {
+                self.emit_captured_response(parts, captured);
+            }
+            BodyCollection::Failed { captured, .. } => {
                 self.emit_captured_response(parts, captured);
             }
         }
@@ -726,14 +782,23 @@ impl CapturingHandler {
     fn finish_buffered_response(
         &mut self,
         parts: http::response::Parts,
-        body_bytes: Bytes,
+        collected: CollectedBody,
     ) -> Response<ProxyBody> {
-        let hooked = self.apply_response_hook_to_snapshot(parts, body_bytes);
+        let hooked = self.apply_response_hook_to_snapshot(parts, collected.data);
+        let preserve_trailers = hooked.body.is_original();
         let HookedResponse { parts, body } = hooked;
         let body_bytes = body.into_bytes();
         self.emit_response_snapshot(&parts, body_bytes.clone());
 
-        Response::from_parts(parts, body::full(body_bytes))
+        let body = if preserve_trailers {
+            body::collected(CollectedBody {
+                data: body_bytes,
+                trailers: collected.trailers,
+            })
+        } else {
+            body::full(body_bytes)
+        };
+        Response::from_parts(parts, body)
     }
 
     fn finish_limited_response(
@@ -940,16 +1005,16 @@ impl CapturingHandler {
         request_body: RequestBody,
     ) -> Request<ProxyBody> {
         match request_body {
-            RequestBody::Buffered(body_bytes) => {
+            RequestBody::Buffered(body) => {
                 self.captured_request = Some(CapturedRequest::buffered(ProxiedRequest::new(
                     parts.method.clone(),
                     parts.uri.clone(),
                     parts.version,
                     ordered_headers(&parts.headers, &parts.extensions),
-                    body_bytes.clone(),
+                    body.data.clone(),
                     now_millis(),
                 )));
-                Request::from_parts(parts, body::full(body_bytes))
+                Request::from_parts(parts, body::collected(body))
             }
             RequestBody::Streaming { captured, body } => {
                 let capture = BodyCapture::new(self.body_capture_limit);
@@ -992,11 +1057,18 @@ impl CapturingHandler {
                 }) => {
                     let (captured, metadata) =
                         match collect_body(incoming, self.body_capture_limit, "request").await {
-                            BodyCollection::Complete(bytes) => {
-                                let metadata = BodyMetadata::complete(bytes.len());
-                                (bytes, metadata)
+                            BodyCollection::Complete(body) => {
+                                let metadata = BodyMetadata::complete(body.data.len());
+                                (body.data, metadata)
                             }
                             BodyCollection::Exceeded { captured, .. } => {
+                                let metadata = BodyMetadata {
+                                    truncated: true,
+                                    total_seen: captured.len(),
+                                };
+                                (captured, metadata)
+                            }
+                            BodyCollection::Failed { captured, .. } => {
                                 let metadata = BodyMetadata {
                                     truncated: true,
                                     total_seen: captured.len(),
@@ -1040,13 +1112,19 @@ impl CapturingHandler {
             return CompatRequestOrResponse::Request(req);
         }
 
-        let mut request_body =
-            match collect_body(incoming, self.body_capture_limit, "request").await {
-                BodyCollection::Complete(bytes) => RequestBody::Buffered(bytes),
-                BodyCollection::Exceeded { captured, body } => {
-                    RequestBody::Streaming { captured, body }
-                }
-            };
+        let mut request_body = match collect_body(incoming, self.body_capture_limit, "request")
+            .await
+        {
+            BodyCollection::Complete(body) => RequestBody::Buffered(body),
+            BodyCollection::Exceeded { captured, body } => {
+                RequestBody::Streaming { captured, body }
+            }
+            BodyCollection::Failed { captured, body } => {
+                let request = self
+                    .forward_request_from_body(parts, RequestBody::Streaming { captured, body });
+                return CompatRequestOrResponse::Request(request);
+            }
+        };
 
         // Run Lua on_request hook (if scripting is enabled and a script is loaded).
         // This runs synchronously with the complete body or the capped snapshot.
@@ -1374,6 +1452,13 @@ mod tests {
     use super::*;
     use http::{HeaderMap, Method, StatusCode, Uri, Version};
 
+    fn collected(data: impl Into<Bytes>) -> CollectedBody {
+        CollectedBody {
+            data: data.into(),
+            trailers: None,
+        }
+    }
+
     fn interleaved_headers() -> HeaderBlock {
         HeaderBlock::from_fields([
             HeaderField::new("X-Order", "first").unwrap(),
@@ -1561,7 +1646,8 @@ mod tests {
             .into_parts();
         parts.version = Version::HTTP_11;
 
-        let response = handler.finish_buffered_response(parts, Bytes::from_static(b"accepted"));
+        let response =
+            handler.finish_buffered_response(parts, collected(Bytes::from_static(b"accepted")));
 
         assert_eq!(body_bytes(response).await.as_ref(), b"accepted");
         match event_rx.recv().await.unwrap() {
@@ -1590,10 +1676,31 @@ mod tests {
             .unwrap()
             .into_parts();
 
-        let response = handler.finish_buffered_response(parts, Bytes::new());
+        let response = handler.finish_buffered_response(parts, CollectedBody::default());
 
         assert!(body_bytes(response).await.is_empty());
         assert!(event_rx.try_recv().is_err());
+    }
+
+    #[tokio::test]
+    async fn finish_buffered_response_preserves_unedited_trailers() {
+        let (event_tx, _event_rx) = mpsc::channel(1);
+        let mut handler = CapturingHandler::new(event_tx);
+        let (parts, _) = Response::builder().body(()).unwrap().into_parts();
+        let mut trailers = HeaderBlock::new();
+        trailers.add("x-checksum", "abc").unwrap();
+
+        let response = handler.finish_buffered_response(
+            parts,
+            CollectedBody {
+                data: Bytes::from_static(b"body"),
+                trailers: Some(trailers.clone()),
+            },
+        );
+        let collected = response.into_body().collect().await.unwrap();
+
+        assert_eq!(collected.data.as_ref(), b"body");
+        assert_eq!(collected.trailers, Some(trailers));
     }
 
     #[tokio::test]
@@ -1806,15 +1913,58 @@ mod tests {
                 assert_eq!(captured.as_ref(), b"abcd");
                 assert_eq!(body.collect().await.unwrap().to_bytes().as_ref(), b"abcdef");
             }
+            BodyCollection::Failed { .. } => panic!("unexpected body error"),
         }
     }
 
     #[tokio::test]
     async fn collect_body_buffers_full_body_when_unlimited() {
         match collect_body(body::full(Bytes::from_static(b"abcdef")), None, "response").await {
-            BodyCollection::Complete(body) => assert_eq!(body.as_ref(), b"abcdef"),
+            BodyCollection::Complete(body) => assert_eq!(body.data.as_ref(), b"abcdef"),
             BodyCollection::Exceeded { .. } => panic!("expected complete body"),
+            BodyCollection::Failed { .. } => panic!("unexpected body error"),
         }
+    }
+
+    #[tokio::test]
+    async fn collect_body_preserves_trailers() {
+        let mut trailers = HeaderBlock::new();
+        trailers.add("x-checksum", "abc").unwrap();
+        let input = ProxyBody::from_frames([
+            Ok(BodyFrame::Data(Bytes::from_static(b"data"))),
+            Ok(BodyFrame::Trailers(trailers.clone())),
+        ]);
+
+        match collect_body(input, None, "response").await {
+            BodyCollection::Complete(body) => {
+                assert_eq!(body.data.as_ref(), b"data");
+                assert_eq!(body.trailers, Some(trailers));
+            }
+            _ => panic!("expected complete body"),
+        }
+    }
+
+    #[tokio::test]
+    async fn collect_body_propagates_stream_errors_after_buffered_data() {
+        let input = ProxyBody::from_frames([
+            Ok(BodyFrame::Data(Bytes::from_static(b"partial"))),
+            Err(ProtocolError::new(ErrorKind::Io, "upstream reset")),
+        ]);
+
+        let BodyCollection::Failed { captured, mut body } =
+            collect_body(input, None, "response").await
+        else {
+            panic!("expected body error");
+        };
+        assert_eq!(captured.as_ref(), b"partial");
+        assert_eq!(
+            body.next().await.unwrap().unwrap(),
+            BodyFrame::Data(captured)
+        );
+        assert_eq!(
+            body.next().await.unwrap().unwrap_err().to_string(),
+            "upstream reset"
+        );
     }
 
     #[tokio::test]
@@ -2036,7 +2186,8 @@ mod tests {
             .unwrap()
             .into_parts();
 
-        let response = handler.finish_buffered_response(parts, Bytes::from_static(b"original"));
+        let response =
+            handler.finish_buffered_response(parts, collected(Bytes::from_static(b"original")));
 
         assert_eq!(response.status(), StatusCode::CREATED);
         assert_eq!(response.headers()["x-script"], "yes");
@@ -2092,7 +2243,7 @@ mod tests {
             .unwrap()
             .into_parts();
 
-        let response = handler.finish_buffered_response(parts, compressed);
+        let response = handler.finish_buffered_response(parts, collected(compressed));
 
         // Output stays brotli-encoded with a refreshed content-length.
         assert_eq!(response.headers()["content-encoding"], "br");
@@ -2140,7 +2291,7 @@ mod tests {
             .unwrap()
             .into_parts();
 
-        let response = handler.finish_buffered_response(parts, compressed);
+        let response = handler.finish_buffered_response(parts, collected(compressed));
 
         assert!(response.headers().get("content-encoding").is_none());
         assert_eq!(response.headers()["content-length"], "18");
@@ -2186,7 +2337,7 @@ mod tests {
             .unwrap()
             .into_parts();
 
-        let response = handler.finish_buffered_response(parts, compressed);
+        let response = handler.finish_buffered_response(parts, collected(compressed));
 
         assert_eq!(response.headers()["content-encoding"], "gzip");
         let wire = body_bytes(response).await;
@@ -2264,7 +2415,8 @@ mod tests {
             .unwrap()
             .into_parts();
 
-        let response = handler.finish_buffered_response(parts, Bytes::from_static(b"original"));
+        let response =
+            handler.finish_buffered_response(parts, collected(Bytes::from_static(b"original")));
 
         assert_eq!(response.status(), StatusCode::OK);
         assert_eq!(body_bytes(response).await.as_ref(), b"original");
@@ -2299,7 +2451,8 @@ mod tests {
             .unwrap()
             .into_parts();
 
-        let response = handler.finish_buffered_response(parts, Bytes::from_static(b"original"));
+        let response =
+            handler.finish_buffered_response(parts, collected(Bytes::from_static(b"original")));
 
         assert_eq!(response.status(), StatusCode::OK);
         assert_eq!(response.headers()["x-original-response"], "yes");
