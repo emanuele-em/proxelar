@@ -55,6 +55,7 @@ struct InboundRequest {
     request: ProxyRequest,
     close_after_response: bool,
     upgrade_requested: bool,
+    expect_continue: bool,
 }
 
 enum ReaderExit<R>
@@ -126,6 +127,15 @@ where
                 }
                 Err(error) => return Err(error),
             };
+            if inbound.expect_continue {
+                write_bytes(
+                    &mut writer,
+                    b"HTTP/1.1 100 Continue\r\n\r\n",
+                    config.write_timeout,
+                )
+                .await?;
+                flush(&mut writer, config.write_timeout).await?;
+            }
             let method = inbound.request.head.method.clone();
             let version = inbound.request.head.version;
             let response = timeout(config.service_timeout, service.call(inbound.request))
@@ -266,8 +276,19 @@ where
             }
         };
 
-        let close_after_response = !request_keep_alive(&parsed.head.headers, parsed.head.version);
-        let upgrade_requested = request_wants_upgrade(&parsed.head.method, &parsed.head.headers);
+        let mut head = parsed.head;
+        let expect_continue = head.version == Version::HTTP_11 && {
+            let mut values = head.headers.get_all("expect");
+            values
+                .next()
+                .is_some_and(|value| trim_ows(value).eq_ignore_ascii_case(b"100-continue"))
+                && values.next().is_none()
+        };
+        if expect_continue {
+            head.headers.remove("expect");
+        }
+        let close_after_response = !request_keep_alive(&head.headers, head.version);
+        let upgrade_requested = request_wants_upgrade(&head.method, &head.headers);
         let framing = BodyFraming::for_request(parsed.semantics);
         let (body_tx, body_rx) = mpsc::channel(config.body_channel_capacity.max(1));
         let mut body = ProxyBody::new(BodyChannel { receiver: body_rx });
@@ -275,9 +296,10 @@ where
             body = body.with_exact_length(length).with_trailer_hint(false);
         }
         let inbound = InboundRequest {
-            request: ProxyRequest::new(parsed.head, body),
+            request: ProxyRequest::new(head, body),
             close_after_response,
             upgrade_requested,
+            expect_continue,
         };
         if request_tx.send(Ok(inbound)).await.is_err() {
             return Ok(ReaderExit::Closed);

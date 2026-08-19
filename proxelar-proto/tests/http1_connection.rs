@@ -1,4 +1,4 @@
-use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -134,6 +134,63 @@ async fn server_preserves_pipelined_response_order() {
     let first = text.find("X-Path: /one").unwrap();
     let second = text.find("X-Path: /two").unwrap();
     assert!(first < second, "responses were reordered: {text}");
+    server.await.unwrap().unwrap();
+}
+
+struct ExpectService {
+    saw_expect: Arc<AtomicBool>,
+}
+
+impl HttpService for ExpectService {
+    fn call(
+        &mut self,
+        request: ProxyRequest,
+    ) -> BoxFuture<'_, Result<ProxyResponse, ProtocolError>> {
+        self.saw_expect.store(
+            request.head.headers.get("expect").is_some(),
+            Ordering::SeqCst,
+        );
+        Box::pin(async move {
+            let body = request.body.collect().await?.data;
+            Ok(ProxyResponse::new(
+                ResponseHead::new(StatusCode::OK, Version::HTTP_11, HeaderBlock::new()),
+                ProxyBody::full(body),
+            ))
+        })
+    }
+}
+
+#[tokio::test]
+async fn server_acknowledges_expect_continue_before_reading_the_body() {
+    let (mut client, server_io) = tokio::io::duplex(4096);
+    let saw_expect = Arc::new(AtomicBool::new(false));
+    let server = tokio::spawn(serve_connection(
+        server_io,
+        ExpectService {
+            saw_expect: Arc::clone(&saw_expect),
+        },
+        ConnectionConfig::default(),
+    ));
+
+    client
+        .write_all(
+            b"POST / HTTP/1.1\r\nHost: example.test\r\nContent-Length: 4\r\nExpect: 100-Continue\r\nConnection: close\r\n\r\n",
+        )
+        .await
+        .unwrap();
+    let mut interim = [0_u8; 25];
+    tokio::time::timeout(Duration::from_secs(1), client.read_exact(&mut interim))
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(&interim, b"HTTP/1.1 100 Continue\r\n\r\n");
+
+    client.write_all(b"body").await.unwrap();
+    let mut response = Vec::new();
+    client.read_to_end(&mut response).await.unwrap();
+    assert!(response.starts_with(b"HTTP/1.1 200 OK\r\n"));
+    assert!(response.ends_with(b"body"));
+    assert!(!saw_expect.load(Ordering::SeqCst));
     server.await.unwrap().unwrap();
 }
 
