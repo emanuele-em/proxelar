@@ -54,7 +54,7 @@ impl Default for ConnectionConfig {
 struct InboundRequest {
     request: ProxyRequest,
     close_after_response: bool,
-    upgrade_requested: bool,
+    upgrade_decision: Option<oneshot::Sender<bool>>,
     expect_continue: bool,
 }
 
@@ -114,7 +114,7 @@ where
     enum CoordinatorExit {
         Closed,
         Stop,
-        Upgrade { accepted: bool },
+        Upgrade,
     }
 
     let coordinator = async {
@@ -138,6 +138,7 @@ where
             }
             let method = inbound.request.head.method.clone();
             let version = inbound.request.head.version;
+            let upgrade_decision = inbound.upgrade_decision;
             let response = timeout(config.service_timeout, service.call(inbound.request))
                 .await
                 .map_err(|_| timeout_error("HTTP/1 service"))??;
@@ -151,10 +152,13 @@ where
                 config,
             )
             .await?;
-            if inbound.upgrade_requested {
+            if let Some(upgrade_decision) = upgrade_decision {
                 let accepted = (method == Method::CONNECT && status.is_success())
                     || status == StatusCode::SWITCHING_PROTOCOLS;
-                return Ok::<_, ProtocolError>(CoordinatorExit::Upgrade { accepted });
+                let _ = upgrade_decision.send(accepted);
+                if accepted {
+                    return Ok::<_, ProtocolError>(CoordinatorExit::Upgrade);
+                }
             }
             if close {
                 return Ok::<_, ProtocolError>(CoordinatorExit::Stop);
@@ -182,16 +186,16 @@ where
                 "HTTP/1 reader stopped for an unmatched upgrade",
             )),
         },
-        Ok(CoordinatorExit::Upgrade { accepted }) => {
+        Ok(CoordinatorExit::Upgrade) => {
             let reader_exit = reader_task.await.map_err(join_error)??;
-            match (accepted, reader_exit) {
-                (true, ReaderExit::Upgrade { reader, read_ahead }) => {
+            match reader_exit {
+                ReaderExit::Upgrade { reader, read_ahead } => {
                     Ok(ServerConnection::Upgraded(UpgradedIo {
                         io: reader.unsplit(writer),
                         read_ahead: read_ahead.freeze(),
                     }))
                 }
-                _ => Ok(ServerConnection::Closed),
+                ReaderExit::Closed => Ok(ServerConnection::Closed),
             }
         }
     }
@@ -289,6 +293,12 @@ where
         }
         let close_after_response = !request_keep_alive(&head.headers, head.version);
         let upgrade_requested = request_wants_upgrade(&head.method, &head.headers);
+        let (upgrade_decision, upgrade_result) = if upgrade_requested {
+            let (tx, rx) = oneshot::channel();
+            (Some(tx), Some(rx))
+        } else {
+            (None, None)
+        };
         let framing = BodyFraming::for_request(parsed.semantics);
         let (body_tx, body_rx) = mpsc::channel(config.body_channel_capacity.max(1));
         let mut body = ProxyBody::new(BodyChannel { receiver: body_rx });
@@ -298,7 +308,7 @@ where
         let inbound = InboundRequest {
             request: ProxyRequest::new(head, body),
             close_after_response,
-            upgrade_requested,
+            upgrade_decision,
             expect_continue,
         };
         if request_tx.send(Ok(inbound)).await.is_err() {
@@ -306,11 +316,17 @@ where
         }
 
         read_body(&mut reader, &mut buffer, framing, body_tx, config).await?;
-        if upgrade_requested {
-            return Ok(ReaderExit::Upgrade {
-                reader,
-                read_ahead: buffer,
-            });
+        if let Some(upgrade_result) = upgrade_result {
+            match upgrade_result.await {
+                Ok(true) => {
+                    return Ok(ReaderExit::Upgrade {
+                        reader,
+                        read_ahead: buffer,
+                    });
+                }
+                Ok(false) => {}
+                Err(_) => return Ok(ReaderExit::Closed),
+            }
         }
         if close_after_response {
             return Ok(ReaderExit::Closed);

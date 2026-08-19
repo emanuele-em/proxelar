@@ -281,6 +281,32 @@ async fn accepted_connect_returns_raw_io_and_preserves_read_ahead() {
     assert_eq!(upgraded.read_ahead, Bytes::from_static(b"PING"));
 }
 
+#[tokio::test]
+async fn declined_upgrade_keeps_the_connection_alive() {
+    let (mut peer, server_io) = tokio::io::duplex(4096);
+    let server = tokio::spawn(serve_connection(
+        server_io,
+        EchoService {
+            calls: Arc::new(AtomicUsize::new(0)),
+            trailers: false,
+        },
+        ConnectionConfig::default(),
+    ));
+    peer.write_all(
+        b"GET /upgrade HTTP/1.1\r\nHost: example.test\r\nConnection: Upgrade\r\nUpgrade: websocket\r\n\r\nGET /next HTTP/1.1\r\nHost: example.test\r\nConnection: close\r\n\r\n",
+    )
+    .await
+    .unwrap();
+
+    let mut wire = Vec::new();
+    peer.read_to_end(&mut wire).await.unwrap();
+    let text = String::from_utf8(wire).unwrap();
+    assert_eq!(text.matches("HTTP/1.1 200 OK").count(), 2, "{text}");
+    assert!(text.contains("X-Path: /upgrade"), "{text}");
+    assert!(text.contains("X-Path: /next"), "{text}");
+    server.await.unwrap().unwrap();
+}
+
 #[derive(Clone)]
 struct DuplexConnector {
     connections: Arc<AtomicUsize>,
