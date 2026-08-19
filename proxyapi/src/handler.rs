@@ -779,6 +779,15 @@ impl CapturingHandler {
         }
     }
 
+    pub(crate) async fn record_protocol_response(
+        &mut self,
+        response: ProxyResponse,
+    ) -> Result<(), crate::header::HeaderConversionError> {
+        self.record_upstream_response(response_from_protocol(response)?)
+            .await;
+        Ok(())
+    }
+
     fn finish_buffered_response(
         &mut self,
         parts: http::response::Parts,
@@ -1585,6 +1594,27 @@ mod tests {
         let forwarded = handler.handle_response(&context, response).await;
 
         assert_eq!(forwarded.head.headers, headers);
+    }
+
+    #[tokio::test]
+    async fn replay_capture_preserves_interleaved_response_headers() {
+        let (event_tx, mut event_rx) = mpsc::channel(1);
+        let mut handler = CapturingHandler::new(event_tx);
+        handler.captured_request = Some(CapturedRequest::buffered(proxied_request()));
+        let headers = interleaved_headers();
+
+        handler
+            .record_protocol_response(ProxyResponse::new(
+                ResponseHead::new(StatusCode::OK, Version::HTTP_11, headers.clone()),
+                body::empty(),
+            ))
+            .await
+            .unwrap();
+
+        let ProxyEvent::RequestComplete { response, .. } = event_rx.recv().await.unwrap() else {
+            panic!("replay should complete");
+        };
+        assert_eq!(response.headers(), &headers);
     }
 
     #[tokio::test]
