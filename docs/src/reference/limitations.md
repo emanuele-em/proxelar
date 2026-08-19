@@ -22,6 +22,12 @@ Unknown TCP streams can be observed as directional chunks, but there is no proto
 
 HTTP/1 and HTTP/2 are supported end to end in TCP proxy modes, including ordered duplicate headers, streaming bodies, trailers, and WebSockets. HTTP/3/QUIC interception is currently limited to reverse and WireGuard modes. In reverse mode, an `https://` target enables TCP and UDP listeners on the same port; an `http3://` target is UDP-only and uses H3 upstream. Proxelar selects these paths from explicit configuration and ALPN, never by speculative QUIC attempts or timeout fallback.
 
+The current tokio-quiche driver exposes the initial H3 header block and DATA
+frames, but not subsequent inbound HEADERS. Proxelar can emit H3 informational
+responses and trailers, but cannot capture or forward informational responses
+or trailers received from an H3 peer without replacing or forking that driver.
+H1 and H2 do not have this limitation.
+
 ## HTTPS and mobile apps
 
 HTTPS interception requires trusting the Proxelar CA. Certificate-pinned clients will reject the generated certificates. Android 7+ apps trust user-installed CAs only if the app explicitly opts in.
