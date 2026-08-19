@@ -1,6 +1,6 @@
 use bytes::{Bytes, BytesMut};
 use futures_util::Stream;
-use proxelar_proto::{BodyFrame, BodyResult};
+use proxelar_proto::{BodyFrame, BodyResult, CollectedBody};
 use std::collections::VecDeque;
 use std::pin::Pin;
 use std::sync::{Arc, Mutex};
@@ -163,6 +163,17 @@ where
 /// Create a body from the given bytes.
 pub fn full(bytes: Bytes) -> ProxyBody {
     ProxyBody::full(bytes)
+}
+
+pub(crate) fn collected(body: CollectedBody) -> ProxyBody {
+    let mut frames = Vec::with_capacity(2);
+    if !body.data.is_empty() {
+        frames.push(Ok(BodyFrame::Data(body.data)));
+    }
+    if let Some(trailers) = body.trailers {
+        frames.push(Ok(BodyFrame::Trailers(trailers)));
+    }
+    ProxyBody::from_frames(frames)
 }
 
 /// Create an empty body.
