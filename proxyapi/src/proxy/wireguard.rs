@@ -24,7 +24,7 @@ use crate::ca::Ssl;
 use crate::event::ProxyEvent;
 use crate::handler::CapturingHandler;
 
-use super::{dns, forward, udp, DnsConfig, UpstreamClient};
+use super::{dns, forward, udp, DnsConfig, PeekTimeoutPolicy, UpstreamClient};
 
 const MAX_PACKET_SIZE: usize = 65_535;
 const WIREGUARD_OVERHEAD: usize = 80;
@@ -181,6 +181,7 @@ pub async fn serve(
     handler: CapturingHandler,
     ca: Arc<Ssl>,
     client: Arc<UpstreamClient>,
+    peek_timeout_policy: PeekTimeoutPolicy,
     event_tx: mpsc::Sender<ProxyEvent>,
     replay_rx: Option<mpsc::Receiver<ProxiedRequest>>,
     shutdown: impl Future<Output = ()>,
@@ -224,6 +225,7 @@ pub async fn serve(
         handler.clone(),
         ca,
         Arc::clone(&client),
+        peek_timeout_policy,
         cancel.clone(),
     ));
     tasks.spawn(udp_loop(virtual_udp, config.dns, event_tx, cancel.clone()));
@@ -427,25 +429,26 @@ async fn tcp_loop(
     handler: CapturingHandler,
     ca: Arc<Ssl>,
     client: Arc<UpstreamClient>,
+    peek_timeout_policy: PeekTimeoutPolicy,
     cancel: CancellationToken,
 ) -> io::Result<()> {
     loop {
         tokio::select! {
             () = cancel.cancelled() => return Ok(()),
             connection = listener.next() => {
-                let Some((stream, source, destination)) = connection else { return Ok(()); };
+                let Some((stream, _source, destination)) = connection else { return Ok(()); };
                 let authority = HostWithPort::from(destination);
                 // The netstack stream is a bare tokio duplex; wrap it so it
                 // satisfies rama's `Io + ExtensionsRef` bound.
                 let stream = rama::ServiceInput::new(stream);
                 tokio::spawn(forward::handle_captured_stream(
                     stream,
-                    source,
                     handler.clone(),
                     Arc::clone(&ca),
                     Arc::clone(&client),
                     SocketAddr::new(IpAddr::V4(SERVER_ADDRESS), 80),
                     authority,
+                    peek_timeout_policy,
                 ));
             }
         }

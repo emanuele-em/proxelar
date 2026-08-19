@@ -28,12 +28,13 @@ end
 
 function on_websocket_frame(frame)
     -- frame.direction is "client_to_server" or "server_to_client".
-    -- frame.opcode names the WebSocket opcode; frame.payload is binary-safe.
+    -- Called only for text/binary data; frame.payload is binary-safe.
     -- Return a string to replace the payload, false to drop, or nil to pass.
 end
 ```
 
 Every function is optional. If a function is not defined, traffic passes through unchanged.
+Ping, pong, and close frames remain visible in captures, but Rama owns their protocol handling and Lua cannot replace, drop, or synthesize them.
 
 ## Portable addon directories
 

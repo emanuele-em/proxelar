@@ -157,7 +157,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         Proxy::new(proxy_config)
     } else {
         Proxy::new(proxy_config).with_route_rules(Arc::new(route_rules))
-    };
+    }
+    .with_peek_timeout_policy(args.peek_timeout_policy);
     let proxy = if let Some(mut upstream_proxy) = args.upstream_proxy {
         if let Some(credentials) = &args.upstream_proxy_auth {
             let (username, password) = credentials

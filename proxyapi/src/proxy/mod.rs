@@ -22,6 +22,7 @@ use rama::http::layer::remove_header::{
 };
 use rama::http::server::HttpServer;
 use rama::http::{HeaderMap, Request, Response, Version};
+use rama::io::peek::PeekTimeoutPolicy as RamaPeekTimeoutPolicy;
 use rama::net::address::HostWithPort;
 use rama::net::address::ProxyAddress;
 use rama::net::client::{ConnectRequest, ConnectorService};
@@ -66,6 +67,37 @@ pub enum UpstreamHttpVersion {
     Http2,
 }
 
+/// Policy applied when protocol detection times out before reaching a verdict.
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub enum PeekTimeoutPolicy {
+    /// Continue through the observed raw-tunnel fallback.
+    #[default]
+    FailOpen,
+    /// Close the connection instead of allowing uninspected traffic through.
+    FailClosed,
+}
+
+impl FromStr for PeekTimeoutPolicy {
+    type Err = String;
+
+    fn from_str(value: &str) -> Result<Self, Self::Err> {
+        match value.trim().to_ascii_lowercase().as_str() {
+            "fail-open" | "open" => Ok(Self::FailOpen),
+            "fail-closed" | "closed" => Ok(Self::FailClosed),
+            _ => Err("expected `fail-open` or `fail-closed`".to_owned()),
+        }
+    }
+}
+
+impl From<PeekTimeoutPolicy> for RamaPeekTimeoutPolicy {
+    fn from(value: PeekTimeoutPolicy) -> Self {
+        match value {
+            PeekTimeoutPolicy::FailOpen => Self::FailOpen,
+            PeekTimeoutPolicy::FailClosed => Self::FailClosed,
+        }
+    }
+}
+
 impl FromStr for UpstreamHttpVersion {
     type Err = String;
 
@@ -108,7 +140,12 @@ impl UpstreamClient {
         exec: Executor,
     ) -> Result<Self, BoxError> {
         let raw = connector::routed(proxy);
-        let inner = Self::build_http_client(raw.clone(), tls_config.clone(), exec.clone(), false)?;
+        let inner = Self::build_http_client(
+            connector::with_timeout(raw.clone()),
+            tls_config.clone(),
+            exec.clone(),
+            false,
+        )?;
 
         Ok(Self {
             inner,
@@ -121,7 +158,7 @@ impl UpstreamClient {
     }
 
     fn build_http_client(
-        raw: connector::RawConnector,
+        raw: connector::TimedRawConnector,
         tls_config: rama::tls::client::TlsClientConfig,
         exec: Executor,
         pooled: bool,
@@ -155,14 +192,16 @@ impl UpstreamClient {
         &self,
         target: HostWithPort,
     ) -> Result<connector::RawConnection, BoxError> {
-        let connection = self.raw.connect(ConnectRequest::new(target)).await?;
+        let connection = connector::with_timeout(self.raw.clone())
+            .connect(ConnectRequest::new(target))
+            .await?;
         Ok(connection.conn)
     }
 
     pub(crate) fn pinned(&self, connection: connector::RawConnection) -> Result<Self, BoxError> {
         let raw = connector::pinned(connection);
         let inner = Self::build_http_client(
-            raw.clone(),
+            connector::with_timeout(raw.clone()),
             self.tls_config.clone(),
             self.exec.clone(),
             true,
@@ -276,6 +315,7 @@ pub struct Proxy {
     config: ProxyConfig,
     route_rules: Option<Arc<crate::rules::RouteRules>>,
     upstream_proxy: Option<UpstreamProxyConfig>,
+    peek_timeout_policy: PeekTimeoutPolicy,
 }
 
 impl Proxy {
@@ -285,6 +325,7 @@ impl Proxy {
             config,
             route_rules: None,
             upstream_proxy: None,
+            peek_timeout_policy: PeekTimeoutPolicy::FailOpen,
         }
     }
 
@@ -299,6 +340,13 @@ impl Proxy {
     #[must_use]
     pub fn with_upstream_proxy(mut self, proxy: UpstreamProxyConfig) -> Self {
         self.upstream_proxy = Some(proxy);
+        self
+    }
+
+    /// Choose whether an inconclusive protocol peek falls back to raw traffic.
+    #[must_use]
+    pub fn with_peek_timeout_policy(mut self, policy: PeekTimeoutPolicy) -> Self {
+        self.peek_timeout_policy = policy;
         self
     }
 
@@ -395,6 +443,7 @@ impl Proxy {
                 handler,
                 ca,
                 client,
+                self.peek_timeout_policy,
                 self.config.event_tx.clone(),
                 replay_rx,
                 shutdown,
@@ -428,12 +477,15 @@ impl Proxy {
 
         match &self.config.mode {
             ProxyMode::Forward => {
-                let cfg = Arc::new(MitmConfig::new(
-                    handler,
-                    Arc::clone(&client),
-                    Arc::clone(&ca),
-                    self.config.addr,
-                ));
+                let cfg = Arc::new(
+                    MitmConfig::new(
+                        handler,
+                        Arc::clone(&client),
+                        Arc::clone(&ca),
+                        self.config.addr,
+                    )
+                    .with_peek_timeout_policy(self.peek_timeout_policy),
+                );
                 let service =
                     HttpServer::auto(exec.clone()).service(forward::forward_http_service(cfg));
                 run!(service);
@@ -445,12 +497,15 @@ impl Proxy {
                 run!(service);
             }
             ProxyMode::Socks5 => {
-                let cfg = Arc::new(MitmConfig::new(
-                    handler,
-                    Arc::clone(&client),
-                    Arc::clone(&ca),
-                    self.config.addr,
-                ));
+                let cfg = Arc::new(
+                    MitmConfig::new(
+                        handler,
+                        Arc::clone(&client),
+                        Arc::clone(&ca),
+                        self.config.addr,
+                    )
+                    .with_peek_timeout_policy(self.peek_timeout_policy),
+                );
                 let service = socks::acceptor(cfg, exec.clone());
                 run!(service);
             }

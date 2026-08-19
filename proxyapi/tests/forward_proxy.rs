@@ -1,8 +1,9 @@
 use std::convert::Infallible;
 use std::net::SocketAddr;
+use std::sync::Arc;
 
 use proxyapi::{
-    Proxy, ProxyConfig, ProxyEvent, ProxyMode, UpstreamHttpVersion, UpstreamTlsConfig,
+    Proxy, ProxyConfig, ProxyEvent, ProxyMode, RouteRules, UpstreamHttpVersion, UpstreamTlsConfig,
     DEFAULT_BODY_CAPTURE_LIMIT,
 };
 use proxyapi_models::ProxiedRequest;
@@ -289,6 +290,46 @@ async fn forward_proxy_connect_plain_http_reconstructs_uri_and_emits_request_com
 
     let _ = shutdown_tx.send(());
     let _ = upstream_shutdown.send(());
+    assert!(handle.await.unwrap().is_ok());
+}
+
+#[tokio::test]
+async fn forward_proxy_routes_rewritten_tunnel_request_to_new_authority() {
+    let (original_addr, original_shutdown) = start_upstream_server().await;
+    let (mapped_addr, mapped_shutdown) = start_upstream_server().await;
+    let mut rules = RouteRules::default();
+    rules
+        .map_remote(
+            format!("http://{original_addr}/"),
+            format!("http://{mapped_addr}/"),
+        )
+        .unwrap();
+    let (proxy_addr, shutdown_tx, handle, _events, _ca_dir) =
+        start_forward_proxy_with_rules(rules).await;
+
+    let mut stream = TcpStream::connect(proxy_addr).await.unwrap();
+    write_connect(&mut stream, original_addr).await;
+    assert!(read_headers(&mut stream)
+        .await
+        .starts_with("HTTP/1.1 200 OK"));
+    stream
+        .write_all(
+            format!(
+                "GET /mapped HTTP/1.1\r\n\
+                 Host: {original_addr}\r\n\
+                 Connection: close\r\n\
+                 \r\n"
+            )
+            .as_bytes(),
+        )
+        .await
+        .unwrap();
+    let response = read_to_string_until_eof(&mut stream).await;
+    assert_response_header(&response, "x-upstream-host", &mapped_addr.to_string());
+
+    let _ = shutdown_tx.send(());
+    let _ = original_shutdown.send(());
+    let _ = mapped_shutdown.send(());
     assert!(handle.await.unwrap().is_ok());
 }
 
@@ -843,6 +884,44 @@ async fn start_forward_proxy_with_options(
 
     wait_for_tcp(proxy_addr).await.unwrap();
 
+    (proxy_addr, shutdown_tx, handle, event_rx, ca_dir)
+}
+
+async fn start_forward_proxy_with_rules(
+    rules: RouteRules,
+) -> (
+    SocketAddr,
+    tokio::sync::oneshot::Sender<()>,
+    tokio::task::JoinHandle<Result<(), proxyapi::Error>>,
+    mpsc::Receiver<ProxyEvent>,
+    tempfile::TempDir,
+) {
+    let proxy_addr = reserve_loopback_addr().await;
+    let ca_dir = tempfile::tempdir().unwrap();
+    let (event_tx, event_rx) = mpsc::channel::<ProxyEvent>(100);
+    let config = ProxyConfig {
+        addr: proxy_addr,
+        mode: ProxyMode::Forward,
+        event_tx,
+        ca_dir: ca_dir.path().to_path_buf(),
+        upstream_tls: UpstreamTlsConfig::Default,
+        upstream_http_version: UpstreamHttpVersion::default(),
+        intercept: None,
+        body_capture_limit: DEFAULT_BODY_CAPTURE_LIMIT,
+        #[cfg(feature = "scripting")]
+        script_path: None,
+        replay_rx: None,
+    };
+    let proxy = Proxy::new(config).with_route_rules(Arc::new(rules));
+    let (shutdown_tx, shutdown_rx) = tokio::sync::oneshot::channel();
+    let handle = tokio::spawn(async move {
+        proxy
+            .start(async {
+                shutdown_rx.await.ok();
+            })
+            .await
+    });
+    wait_for_tcp(proxy_addr).await.unwrap();
     (proxy_addr, shutdown_tx, handle, event_rx, ca_dir)
 }
 

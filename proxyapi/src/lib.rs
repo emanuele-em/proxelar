@@ -33,8 +33,8 @@ pub use filter::{FilterParseError, FlowFilter};
 pub use handler::{CapturingHandler, DEFAULT_BODY_CAPTURE_LIMIT};
 pub use intercept::{InterceptConfig, InterceptDecision};
 pub use proxy::{
-    DnsConfig, Proxy, ProxyConfig, ProxyMode, UpstreamHttpVersion, UpstreamProxyConfig,
-    UpstreamTlsConfig, WireGuardConfig,
+    DnsConfig, PeekTimeoutPolicy, Proxy, ProxyConfig, ProxyMode, UpstreamHttpVersion,
+    UpstreamProxyConfig, UpstreamTlsConfig, WireGuardConfig,
 };
 pub use rules::{RouteRule, RouteRules, RuleError, RuleHeader, RuleOutcome};
 pub use session::{RedactionPolicy, SessionError, SessionRecorder};

@@ -42,9 +42,9 @@ where
         id,
         StreamDirection::ServerToClient,
     );
-    let (client_result, server_result) = tokio::join!(client_to_server, server_to_client);
+    let result = tokio::try_join!(client_to_server, server_to_client).map(|_| ());
     let _ = event_tx.try_send(ProxyEvent::TcpClosed { stream_id: id });
-    client_result.and(server_result).map(|_| ())
+    result
 }
 
 async fn copy_and_capture<R, W>(

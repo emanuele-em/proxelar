@@ -12,7 +12,7 @@ interfaces      engine       pure data
 ## Runtime flow
 
 1. A mode-specific listener accepts TCP or UDP traffic.
-2. HTTP CONNECT and SOCKS establish egress before acknowledging success. Rama's peek and relay services then preserve the ingress/egress connection pair across TLS, HTTP, WebSocket, or observed raw tunneling.
+2. HTTP CONNECT and SOCKS establish egress before acknowledging success. Rama's peek and relay services preserve that pair across TLS, HTTP, WebSocket, or observed raw tunneling. An explicit rules/Lua/intercept destination rewrite is routed through the shared outbound client instead.
 3. Requests pass through rules, Lua hooks, optional interactive intercept, normalization, and the shared outbound client.
 4. Responses pass through Lua/intercept processing and capture.
 5. `ProxyEvent` values fan out once to the selected interface and `SessionRecorder`.

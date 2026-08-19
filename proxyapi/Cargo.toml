@@ -32,7 +32,7 @@ encoding_rs = "0.8"
 # dynamic cert issuance, WebSocket relay, SOCKS5 server, and upstream proxy
 # chaining all come from rama. Replaces hyper(-util,-rustls)/http(-body-util)/
 # tokio-rustls/rustls/webpki-roots/openssl/moka/tower/tokio-tungstenite.
-rama = { workspace = true, features = ["http-full", "boring", "socks5", "proxy"] }
+rama = { workspace = true, features = ["http-full", "boring", "socks5"] }
 tokio = { version = "1.52", features = ["rt", "net", "io-util", "macros", "sync", "time", "fs"] }
 tokio-util = { version = "0.7", features = ["rt"] }
 chrono = "0.4"

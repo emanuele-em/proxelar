@@ -23,6 +23,8 @@ Proxelar supports forward, reverse, WireGuard, SOCKS5, DNS, and fixed-target UDP
 
 Unknown TCP streams can be observed as directional chunks, but there is no protocol-aware binary editor.
 
+TLS and HTTP protocol peeks time out after ten seconds. The default `--peek-timeout-policy fail-open` then records and forwards the stream as raw traffic; use `fail-closed` when inspection must not be bypassed.
+
 ## HTTP versions
 
 HTTP/1.1 and HTTP/2 are intercepted and preserved end to end. With `--upstream-http-version auto`, the default, the incoming request version determines the upstream version (h1→h1, h2→h2); for HTTPS, upstream ALPN is constrained to that version. Use `http1` or `http2` to force a version instead. HTTP/3 and QUIC interception are not available today and are planned for later this year.

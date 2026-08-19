@@ -44,7 +44,7 @@ Proxelar is intentionally developer-oriented: terminal-first, scriptable, Rust-n
 - **Forward and reverse modes** — inspect configured clients or put Proxelar in front of a local service.
 - **Six capture modes** — forward, reverse, WireGuard, SOCKS5, DNS inspection/rewrite, and fixed-target raw UDP.
 - **WebSocket inspection** — capture connections and browse frames by direction, opcode, and payload preview.
-- **Portable sessions** — save/reload native captures or import/export HAR, curl, and raw HTTP files with secret redaction.
+- **Portable sessions** — save/reload lossless native captures or exchange HAR, curl, and raw HTTP files with secret redaction.
 - **Rules and automation** — map local/remote URLs, mock and redirect requests, hot-reload Lua, or drive the bearer-token REST API.
 
 ---

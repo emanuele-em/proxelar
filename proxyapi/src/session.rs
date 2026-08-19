@@ -19,9 +19,14 @@ use rama::http::convert::curl::{
     try_cmd_string_for_request_parts_and_payload_with_options, CurlExportOptions,
     CurlScriptCompatibility, CurlScriptPayloadMode,
 };
-use rama::http::layer::har::spec::{WebSocketMessage, WebSocketMessageType};
-use rama::http::{HeaderMap, HeaderName, HeaderValue, Method, Request, StatusCode, Version};
+use rama::http::layer::har::spec::{
+    Request as HarRequest, Response as HarResponse, WebSocketMessage, WebSocketMessageType,
+};
+use rama::http::{
+    HeaderMap, HeaderName, HeaderValue, Method, Request, Response, StatusCode, Version,
+};
 use rama::net::uri::Uri;
+use rama::net::Protocol;
 use serde_json::{json, Value};
 use thiserror::Error;
 
@@ -101,7 +106,7 @@ impl RedactionPolicy {
 
     fn redact_headers(&self, headers: &HeaderMap) -> HeaderMap {
         let mut redacted = HeaderMap::new();
-        for (name, value) in headers {
+        for (name, value) in headers.ordered_iter() {
             let value = if self.header_names.contains(name) {
                 HeaderValue::from_str(&self.replacement)
                     .unwrap_or_else(|_| HeaderValue::from_static("[REDACTED]"))
@@ -561,7 +566,26 @@ fn har_websocket_entry(
     connection: &CapturedWebSocket,
     redaction: Option<&RedactionPolicy>,
 ) -> Value {
-    let mut entry = har_exchange_entry(&connection.request, &connection.response, redaction);
+    let mut uri = connection.request.uri().clone();
+    match uri.scheme() {
+        Some(scheme) if scheme == &Protocol::HTTP => {
+            uri.set_scheme(Protocol::WS);
+        }
+        Some(scheme) if scheme == &Protocol::HTTPS => {
+            uri.set_scheme(Protocol::WSS);
+        }
+        _ => {}
+    }
+    let request = ProxiedRequest::new_with_body_metadata(
+        connection.request.method().clone(),
+        uri,
+        connection.request.version(),
+        connection.request.headers().clone(),
+        connection.request.body().clone(),
+        connection.request.body_metadata(),
+        connection.request.time(),
+    );
+    let mut entry = har_exchange_entry(&request, &connection.response, redaction);
     let object = entry
         .as_object_mut()
         .expect("HAR entries are always JSON objects");
@@ -623,91 +647,54 @@ fn har_exchange_entry(
         .single()
         .unwrap_or_else(Utc::now)
         .to_rfc3339();
-    let request_body = har_content(request.body(), request.headers(), request.body_metadata());
-    let response_body = har_content(
-        response.body(),
-        response.headers(),
-        response.body_metadata(),
-    );
-    let raw_query = request.uri().query_or_empty();
-    let query = if raw_query.is_empty() {
-        Vec::new()
-    } else {
-        raw_query
-            .split('&')
-            .map(|pair| {
-                let (name, value) = pair.split_once('=').unwrap_or((pair, ""));
-                json!({"name": name, "value": value})
-            })
-            .collect::<Vec<_>>()
-    };
+    let request = har_request(&request);
+    let response = har_response(&response);
 
     json!({
         "startedDateTime": started,
         "time": duration,
-        "request": {
-            "method": request.method().as_str(),
-            "url": request.uri().to_string(),
-            "httpVersion": version_string(request.version()),
-            "headers": har_headers(request.headers()),
-            "queryString": query,
-            "cookies": [],
-            "headersSize": -1,
-            "bodySize": request.body_metadata().total_seen,
-            "postData": request_body,
-            "comment": truncation_comment(request.body_metadata())
-        },
-        "response": {
-            "status": response.status().as_u16(),
-            "statusText": response.status().canonical_reason().unwrap_or(""),
-            "httpVersion": version_string(response.version()),
-            "headers": har_headers(response.headers()),
-            "cookies": [],
-            "content": response_body,
-            "redirectURL": response.headers().get(rama::http::header::LOCATION)
-                .and_then(|value| value.to_str().ok()).unwrap_or(""),
-            "headersSize": -1,
-            "bodySize": response.body_metadata().total_seen,
-            "comment": truncation_comment(response.body_metadata())
-        },
+        "request": request,
+        "response": response,
         "cache": {},
         "timings": { "send": 0, "wait": duration, "receive": 0 }
     })
 }
 
-fn har_headers(headers: &HeaderMap) -> Vec<Value> {
-    headers
-        .iter()
-        .map(|(name, value)| {
-            json!({
-                "name": name.as_str(),
-                "value": String::from_utf8_lossy(value.as_bytes())
-            })
-        })
-        .collect()
+fn har_request(captured: &ProxiedRequest) -> HarRequest {
+    let mut request = Request::builder()
+        .method(captured.method().clone())
+        .uri(captured.uri().clone())
+        .version(captured.version())
+        .body(())
+        .expect("captured request parts remain valid");
+    *request.headers_mut() = captured.headers().clone();
+    let (parts, ()) = request.into_parts();
+    let mut request = HarRequest::from_http_request_parts(&parts, captured.body(), true)
+        .expect("captured request converts to HAR");
+    request.body_size = i64::try_from(captured.body_metadata().total_seen).unwrap_or(i64::MAX);
+    request.comment = truncation_comment(captured.body_metadata()).map(Into::into);
+    if let Some(post_data) = request.post_data.as_mut() {
+        post_data.comment = truncation_comment(captured.body_metadata()).map(Into::into);
+    }
+    request
 }
 
-fn har_content(body: &Bytes, headers: &HeaderMap, metadata: BodyMetadata) -> Value {
-    let mime = headers
-        .get(rama::http::header::CONTENT_TYPE)
-        .and_then(|value| value.to_str().ok())
-        .unwrap_or("application/octet-stream");
-    if let Ok(text) = std::str::from_utf8(body) {
-        json!({
-            "size": metadata.total_seen,
-            "mimeType": mime,
-            "text": text,
-            "comment": truncation_comment(metadata)
-        })
-    } else {
-        json!({
-            "size": metadata.total_seen,
-            "mimeType": mime,
-            "text": base64::engine::general_purpose::STANDARD.encode(body),
-            "encoding": "base64",
-            "comment": truncation_comment(metadata)
-        })
-    }
+fn har_response(captured: &ProxiedResponse) -> HarResponse {
+    let mut response = Response::builder()
+        .status(captured.status())
+        .version(captured.version())
+        .body(())
+        .expect("captured response parts remain valid");
+    *response.headers_mut() = captured.headers().clone();
+    let (parts, ()) = response.into_parts();
+    let mut response = HarResponse::from_http_response_parts(&parts, captured.body(), true)
+        .expect("captured response converts to HAR");
+    let total_seen = i64::try_from(captured.body_metadata().total_seen).unwrap_or(i64::MAX);
+    response.body_size = total_seen;
+    response.content.size = total_seen;
+    response.comment = truncation_comment(captured.body_metadata()).map(Into::into);
+    response.content.comment = truncation_comment(captured.body_metadata()).map(Into::into);
+    response
 }
 
 fn truncation_comment(metadata: BodyMetadata) -> Option<String> {
@@ -826,8 +813,8 @@ fn raw_response(response: &ProxiedResponse) -> Vec<u8> {
 }
 
 fn append_headers_and_body(output: &mut Vec<u8>, headers: &HeaderMap, body: &Bytes) {
-    for (name, value) in headers {
-        output.extend_from_slice(name.as_str().as_bytes());
+    for (name, value) in headers.ordered_iter() {
+        output.extend_from_slice(name.as_original_str().as_bytes());
         output.extend_from_slice(b": ");
         output.extend_from_slice(value.as_bytes());
         output.extend_from_slice(b"\r\n");
@@ -1127,7 +1114,7 @@ mod tests {
             id: 2,
             request: ProxiedRequest::new(
                 Method::GET,
-                "wss://example.test/socket?token=secret".parse().unwrap(),
+                "https://example.test/socket?token=secret".parse().unwrap(),
                 Version::HTTP_11,
                 request_headers,
                 Bytes::new(),
@@ -1198,6 +1185,48 @@ mod tests {
                 .expect("binary message")
                 .expect("valid base64"),
             [0, 1, 2, 0xaa]
+        );
+    }
+
+    #[test]
+    fn exports_headers_in_wire_order_with_original_spelling() {
+        let mut headers = HeaderMap::new();
+        headers.append(
+            HeaderName::from_bytes(b"X-Field").unwrap(),
+            HeaderValue::from_static("one"),
+        );
+        headers.append(
+            HeaderName::from_bytes(b"Host").unwrap(),
+            HeaderValue::from_static("example.test"),
+        );
+        headers.append(
+            HeaderName::from_bytes(b"X-Field").unwrap(),
+            HeaderValue::from_static("two"),
+        );
+        let request = ProxiedRequest::new(
+            Method::GET,
+            "http://example.test/".parse().unwrap(),
+            Version::HTTP_11,
+            headers,
+            Bytes::new(),
+            1,
+        );
+
+        let redacted = RedactionPolicy::default().redact_request(&request);
+        let raw = String::from_utf8(raw_request(&redacted)).unwrap();
+        assert!(raw.contains("X-Field: one\r\nHost: example.test\r\nX-Field: two\r\n"));
+        let har_fields = har_request(&redacted)
+            .headers
+            .into_iter()
+            .map(|header| (header.name.to_string(), header.value.to_string()))
+            .collect::<Vec<_>>();
+        assert_eq!(
+            har_fields,
+            [
+                ("X-Field".to_owned(), "one".to_owned()),
+                ("Host".to_owned(), "example.test".to_owned()),
+                ("X-Field".to_owned(), "two".to_owned()),
+            ]
         );
     }
 
@@ -1585,10 +1614,19 @@ mod tests {
             total_seen: 100,
             truncated: true,
         };
-        let content = har_content(&binary, &HeaderMap::new(), metadata);
-        assert_eq!(content["encoding"], "base64");
-        assert!(content["comment"]
-            .as_str()
+        let response = ProxiedResponse::new_with_body_metadata(
+            StatusCode::OK,
+            Version::HTTP_11,
+            HeaderMap::new(),
+            binary,
+            metadata,
+            1,
+        );
+        let content = har_response(&response).content;
+        assert_eq!(content.encoding.as_deref(), Some("base64"));
+        assert!(content
+            .comment
+            .as_deref()
             .unwrap()
             .contains("observed 100 wire bytes"));
         assert!(truncation_comment(BodyMetadata::complete(0)).is_none());

@@ -19,10 +19,10 @@ copyright = "2026, Emanuele Micheletti <micheletti.emanuele@hotmail.com>"
 license-file = ["../LICENSE-MIT", "0"]
 section = "net"
 priority = "optional"
-# OpenSSL and Lua are vendored, so only the C runtime is resolved dynamically.
+# BoringSSL and Lua are vendored; BoringSSL still links the C++ runtime.
 # Set explicitly rather than via `$auto`, which cannot run dpkg-shlibdeps when
 # the aarch64 binary is cross-built on an amd64 runner.
-depends = "libc6, libgcc-s1"
+depends = "libc6, libgcc-s1, libstdc++6"
 extended-description = """
 Proxelar is a single-binary MITM proxy for inspecting, intercepting, replaying
 and rewriting HTTP, HTTPS and WebSocket traffic. It runs as an interactive TUI,

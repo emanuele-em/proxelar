@@ -13,7 +13,7 @@ It is aimed at development and debugging workflows: API inspection, local servic
 - **Six capture modes** — forward, reverse, WireGuard, SOCKS5, DNS, and fixed-target UDP
 - **Four interfaces** — interactive TUI, plain terminal output, web GUI, or headless REST API
 - **Inspect WebSockets** — capture WebSocket connections and browse individual frames
-- **Keep portable sessions** — reload native captures or exchange HAR, curl, and raw HTTP artifacts with default secret redaction
+- **Keep portable sessions** — reload lossless native captures or exchange HAR, curl, and raw HTTP artifacts with default secret redaction
 
 ## What is it not?
 

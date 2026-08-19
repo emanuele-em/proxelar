@@ -20,7 +20,7 @@ Choose mitmproxy if you need the most mature general-purpose MITM proxy today. C
 
 proxyfor is the closest Rust CLI neighbor: it provides forward/reverse proxy modes, TUI/WebUI, filtering, CA install help, export formats, and portable binaries.
 
-Proxelar emphasizes interactive intercept/edit, replay, redacted native/HAR/curl/raw exports, Lua request/response/WebSocket hooks, declarative rules, and an embeddable `proxyapi` core.
+Proxelar emphasizes interactive intercept/edit, replay, lossless native sessions, redacted HAR/curl/raw exports, Lua request/response/WebSocket hooks, declarative rules, and an embeddable `proxyapi` core.
 
 Choose proxyfor if its simpler capture workflow and interface fit are the main requirement. Choose Proxelar if traffic transformation, automation, portable sessions, or library embedding are central.
 

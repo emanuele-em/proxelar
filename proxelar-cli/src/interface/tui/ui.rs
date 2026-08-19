@@ -674,9 +674,12 @@ fn build_request_lines(request: &proxyapi_models::ProxiedRequest) -> Vec<Line<'s
         Line::from(""),
     ];
 
-    for (name, value) in request.headers() {
+    for (name, value) in request.headers().ordered_iter() {
         lines.push(Line::from(vec![
-            Span::styled(name.as_str().to_owned(), Style::default().fg(Color::Cyan)),
+            Span::styled(
+                name.display_original().to_string(),
+                Style::default().fg(Color::Cyan),
+            ),
             Span::raw(": "),
             Span::raw(String::from_utf8_lossy(value.as_bytes()).into_owned()),
         ]));
@@ -716,9 +719,12 @@ fn build_response_lines(response: &proxyapi_models::ProxiedResponse) -> Vec<Line
         Line::from(""),
     ];
 
-    for (name, value) in response.headers() {
+    for (name, value) in response.headers().ordered_iter() {
         lines.push(Line::from(vec![
-            Span::styled(name.as_str().to_owned(), Style::default().fg(Color::Cyan)),
+            Span::styled(
+                name.display_original().to_string(),
+                Style::default().fg(Color::Cyan),
+            ),
             Span::raw(": "),
             Span::raw(String::from_utf8_lossy(value.as_bytes()).into_owned()),
         ]));

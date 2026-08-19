@@ -1,7 +1,7 @@
 #[cfg(feature = "scripting")]
 use clap::Subcommand;
 use clap::{Parser, ValueEnum};
-use proxyapi::{UpstreamHttpVersion, UpstreamProxyConfig, UpstreamTlsConfig};
+use proxyapi::{PeekTimeoutPolicy, UpstreamHttpVersion, UpstreamProxyConfig, UpstreamTlsConfig};
 use std::net::IpAddr;
 use std::path::PathBuf;
 use std::str::FromStr;
@@ -98,6 +98,14 @@ pub struct Args {
         default_value = "auto"
     )]
     pub upstream_http_version: UpstreamHttpVersion,
+
+    /// On protocol-peek timeout, tunnel raw traffic or close the connection
+    #[arg(
+        long = "peek-timeout-policy",
+        value_name = "POLICY",
+        default_value = "fail-open"
+    )]
+    pub peek_timeout_policy: PeekTimeoutPolicy,
 
     /// Load a native Proxelar session before capture starts
     #[arg(long, value_name = "FILE", conflicts_with = "import_har")]
@@ -278,8 +286,23 @@ mod tests {
             proxyapi::DEFAULT_BODY_CAPTURE_LIMIT
         );
         assert_eq!(args.upstream_trust, UpstreamTlsConfig::Default);
+        assert_eq!(args.upstream_http_version, UpstreamHttpVersion::Auto);
+        assert_eq!(args.peek_timeout_policy, PeekTimeoutPolicy::FailOpen);
         #[cfg(feature = "scripting")]
         assert!(args.command.is_none());
+    }
+
+    #[test]
+    fn test_protocol_policy_args() {
+        let args = Args::parse_from([
+            "proxelar",
+            "--upstream-http-version",
+            "http2",
+            "--peek-timeout-policy",
+            "fail-closed",
+        ]);
+        assert_eq!(args.upstream_http_version, UpstreamHttpVersion::Http2);
+        assert_eq!(args.peek_timeout_policy, PeekTimeoutPolicy::FailClosed);
     }
 
     #[test]

@@ -211,10 +211,10 @@ pub fn handle_key_event(
 /// structured JSON marker and other invalid UTF-8 bodies use hexadecimal.
 fn request_to_text(req: &proxyapi_models::ProxiedRequest) -> (String, bool) {
     let mut text = format!("{} {} {:?}\n", req.method(), req.uri(), req.version());
-    for (name, value) in req.headers() {
+    for (name, value) in req.headers().ordered_iter() {
         text.push_str(&format!(
             "{}: {}\n",
-            name,
+            name.display_original(),
             String::from_utf8_lossy(value.as_bytes())
         ));
     }

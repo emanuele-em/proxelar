@@ -76,7 +76,7 @@ proxelar -i terminal -q --script log_traffic.lua
 proxelar -i gui
 ```
 
-Opens a web interface at `http://127.0.0.1:8081` (configurable with `--gui-port`). Built with [axum](https://github.com/tokio-rs/axum) and WebSocket for real-time streaming.
+Opens a web interface at `http://127.0.0.1:8081` (configurable with `--gui-port`). Built on Rama's HTTP router and WebSocket support for real-time streaming.
 
 Features:
 

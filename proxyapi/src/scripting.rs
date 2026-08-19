@@ -3,6 +3,7 @@
 //! Users write Lua scripts defining `on_request` and/or `on_response` hooks.
 //! The proxy calls these hooks for every request/response passing through.
 
+use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::sync::{Mutex, MutexGuard};
 use std::time::SystemTime;
@@ -192,9 +193,10 @@ impl ScriptEngine {
                     let url: String = t
                         .get("url")
                         .map_err(|e| crate::Error::Script(format!("Invalid url: {e}")))?;
-                    let headers = lua_table_to_headermap(
+                    let headers = lua_table_to_headermap_preserving_unchanged(
                         &t.get::<mlua::Table>("headers")
                             .unwrap_or_else(|_| lua.create_table().unwrap()),
+                        headers,
                     )
                     .map_err(|e| crate::Error::Script(format!("Invalid request headers: {e}")))?;
                     let body: Bytes = t
@@ -256,9 +258,10 @@ impl ScriptEngine {
                 let status: u16 = t
                     .get("status")
                     .map_err(|e| crate::Error::Script(format!("Invalid status: {e}")))?;
-                let headers = lua_table_to_headermap(
+                let headers = lua_table_to_headermap_preserving_unchanged(
                     &t.get::<mlua::Table>("headers")
                         .unwrap_or_else(|_| lua.create_table().unwrap()),
+                    headers,
                 )
                 .map_err(|e| crate::Error::Script(format!("Invalid response headers: {e}")))?;
                 let body: Bytes = t
@@ -386,9 +389,9 @@ fn headermap_to_lua_table(lua: &Lua, headers: &HeaderMap) -> LuaResult<mlua::Tab
     let table = lua.create_table()?;
 
     // Group header values by name
-    let mut seen = std::collections::HashMap::<&str, Vec<&[u8]>>::new();
-    for (name, value) in headers.iter() {
-        seen.entry(name.as_str())
+    let mut seen = HashMap::<String, Vec<&[u8]>>::new();
+    for (name, value) in headers.ordered_iter() {
+        seen.entry(name.as_lower_str().into_owned())
             .or_default()
             .push(value.as_bytes());
     }
@@ -445,6 +448,80 @@ fn lua_table_to_headermap(table: &mlua::Table) -> LuaResult<HeaderMap> {
     }
 
     Ok(headers)
+}
+
+/// Preserve the wire order and original spelling of header fields that Lua did
+/// not modify. Changed values replace their original field-line slots in order;
+/// extra values follow the final original slot and newly added names come last.
+fn lua_table_to_headermap_preserving_unchanged(
+    table: &mlua::Table,
+    original: &HeaderMap,
+) -> LuaResult<HeaderMap> {
+    let edited = lua_table_to_headermap(table)?;
+    let original_names = original.keys().cloned().collect::<HashSet<_>>();
+    let unchanged_names = original_names
+        .iter()
+        .filter(|name| {
+            original
+                .get_all(*name)
+                .iter()
+                .map(HeaderValue::as_bytes)
+                .eq(edited.get_all(*name).iter().map(HeaderValue::as_bytes))
+        })
+        .cloned()
+        .collect::<HashSet<_>>();
+    let mut original_remaining = original.ordered_iter().fold(
+        HashMap::<HeaderName, usize>::new(),
+        |mut counts, (name, _)| {
+            *counts.entry(name.clone()).or_default() += 1;
+            counts
+        },
+    );
+    let edited_values = edited.ordered_iter().fold(
+        HashMap::<HeaderName, Vec<HeaderValue>>::new(),
+        |mut values, (name, value)| {
+            values.entry(name.clone()).or_default().push(value.clone());
+            values
+        },
+    );
+    let mut edited_indexes = HashMap::<HeaderName, usize>::new();
+    let mut merged = HeaderMap::new();
+
+    for (name, value) in original.ordered_iter() {
+        if unchanged_names.contains(name) {
+            merged.append(name.clone(), value.clone());
+            continue;
+        }
+
+        let index = edited_indexes.entry(name.clone()).or_default();
+        let values = edited_values
+            .get(name)
+            .map(Vec::as_slice)
+            .unwrap_or_default();
+        if let Some(value) = values.get(*index) {
+            merged.append(name.clone(), value.clone());
+        }
+        *index += 1;
+
+        let remaining = original_remaining
+            .get_mut(name)
+            .expect("original header count exists");
+        *remaining -= 1;
+        if *remaining == 0 {
+            for value in &values[(*index).min(values.len())..] {
+                merged.append(name.clone(), value.clone());
+            }
+            *index = values.len();
+        }
+    }
+
+    for (name, value) in edited.ordered_iter() {
+        if !original_names.contains(name) {
+            merged.append(name.clone(), value.clone());
+        }
+    }
+
+    Ok(merged)
 }
 
 /// Build a Lua request table from its parts.
@@ -533,6 +610,103 @@ mod tests {
             .map(|v| v.to_str().unwrap())
             .collect();
         assert_eq!(values, vec!["a=1", "b=2"]);
+    }
+
+    #[test]
+    fn unchanged_lua_headers_keep_wire_order_and_spelling() {
+        let engine = engine_from_script(
+            r#"
+            function on_request(req)
+                return req
+            end
+            "#,
+        );
+        let mut headers = HeaderMap::new();
+        headers.append(
+            HeaderName::from_bytes(b"X-First").unwrap(),
+            HeaderValue::from_static("one"),
+        );
+        headers.append(
+            HeaderName::from_bytes(b"Host").unwrap(),
+            HeaderValue::from_static("example.test"),
+        );
+        headers.append(
+            HeaderName::from_bytes(b"X-First").unwrap(),
+            HeaderValue::from_static("two"),
+        );
+
+        let ScriptRequestAction::Forward { headers, .. } = engine
+            .on_request("GET", "http://example.test", &headers, b"")
+            .unwrap()
+        else {
+            panic!("expected forwarded request");
+        };
+        let fields = headers
+            .ordered_iter()
+            .map(|(name, value)| {
+                (
+                    name.display_original().to_string(),
+                    value.to_str().unwrap().to_owned(),
+                )
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(
+            fields,
+            [
+                ("X-First".to_owned(), "one".to_owned()),
+                ("Host".to_owned(), "example.test".to_owned()),
+                ("X-First".to_owned(), "two".to_owned()),
+            ]
+        );
+    }
+
+    #[test]
+    fn changed_lua_header_values_keep_original_field_slots() {
+        let engine = engine_from_script(
+            r#"
+            function on_request(req)
+                req.headers["x-first"] = { "changed-one", "changed-two" }
+                return req
+            end
+            "#,
+        );
+        let mut headers = HeaderMap::new();
+        headers.append(
+            HeaderName::from_bytes(b"X-First").unwrap(),
+            HeaderValue::from_static("one"),
+        );
+        headers.append(
+            HeaderName::from_bytes(b"Host").unwrap(),
+            HeaderValue::from_static("example.test"),
+        );
+        headers.append(
+            HeaderName::from_bytes(b"X-First").unwrap(),
+            HeaderValue::from_static("two"),
+        );
+
+        let ScriptRequestAction::Forward { headers, .. } = engine
+            .on_request("GET", "http://example.test", &headers, b"")
+            .unwrap()
+        else {
+            panic!("expected forwarded request");
+        };
+        let fields = headers
+            .ordered_iter()
+            .map(|(name, value)| {
+                (
+                    name.display_original().to_string(),
+                    value.to_str().unwrap().to_owned(),
+                )
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(
+            fields,
+            [
+                ("X-First".to_owned(), "changed-one".to_owned()),
+                ("Host".to_owned(), "example.test".to_owned()),
+                ("X-First".to_owned(), "changed-two".to_owned()),
+            ]
+        );
     }
 
     #[test]

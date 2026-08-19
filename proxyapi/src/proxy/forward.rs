@@ -18,6 +18,7 @@ use rama::bytes::Bytes;
 
 use rama::error::{BoxError, ErrorContext};
 use rama::extensions::{Extension, ExtensionsRef};
+use rama::http::headers::{HeaderMapExt as _, Host as HostHeader};
 use rama::http::io::upgrade::Upgraded;
 use rama::http::layer::remove_header::coalesce_cookie_headers;
 use rama::http::layer::upgrade::mitm::HttpUpgradeMitmRelayLayer;
@@ -36,12 +37,11 @@ use rama::http::ws::handshake::mitm::{
 #[cfg(feature = "scripting")]
 use rama::http::ws::Utf8Bytes;
 use rama::http::{Body, HeaderMap, Request, Response, StatusCode, Version};
-use rama::io::{peek::PeekTimeoutPolicy, BridgeIo, Io};
+use rama::io::{peek::PeekTimeoutPolicy as RamaPeekTimeoutPolicy, BridgeIo, Io};
 use rama::layer::{AddInputExtensionLayer, ArcLayer, ConsumeErrLayer};
-use rama::net::address::{Host, HostWithPort};
+use rama::net::address::{Authority, Host, HostWithPort};
 use rama::net::client::{ConnectRequest, ConnectorService, ConnectorTarget};
 use rama::net::http::server::HttpPeekRouter;
-use rama::net::AuthorityInputExt;
 use rama::net::Protocol;
 use rama::rt::Executor;
 use rama::tls::boring::proxy::TlsMitmEgressServerAuth;
@@ -58,7 +58,7 @@ use crate::handler::{now_millis, CapturingHandler, RequestOrResponse};
 
 use super::{
     connector::{RawConnection, RawConnector},
-    sanitize_response_for_client, UpstreamClient, UpstreamHttpVersion,
+    sanitize_response_for_client, PeekTimeoutPolicy, UpstreamClient, UpstreamHttpVersion,
 };
 
 /// Maximum payload size captured per WebSocket frame.
@@ -73,7 +73,7 @@ const PEEK_TIMEOUT: Duration = Duration::from_secs(10);
 
 /// Per-tunnel context injected into every request served over an intercepted
 /// stream, so the MITM service can rebuild absolute URIs and pin the upstream
-/// connector to the tunnel target regardless of the inner `Host`.
+/// connector to the tunnel target while the request still targets it.
 #[derive(Debug, Clone, Extension)]
 struct TunnelContext {
     scheme: Protocol,
@@ -91,9 +91,11 @@ struct WsConnId(u64);
 pub(crate) struct MitmConfig {
     handler: CapturingHandler,
     client: Arc<UpstreamClient>,
+    routed_client: Arc<UpstreamClient>,
     ca: Arc<Ssl>,
     egress_server_auth: TlsMitmEgressServerAuth,
     upstream_http_version: UpstreamHttpVersion,
+    peek_timeout_policy: RamaPeekTimeoutPolicy,
     exec: Executor,
     listen_addr: std::net::SocketAddr,
 }
@@ -109,10 +111,12 @@ impl MitmConfig {
         let upstream_http_version = client.version();
         Self {
             handler,
+            routed_client: Arc::clone(&client),
             client,
             ca,
             egress_server_auth,
             upstream_http_version,
+            peek_timeout_policy: RamaPeekTimeoutPolicy::FailOpen,
             exec: Executor::default(),
             listen_addr,
         }
@@ -126,21 +130,33 @@ impl MitmConfig {
         Ok(Self {
             handler: self.handler.clone(),
             client: Arc::new(self.client.pinned(connection)?),
+            routed_client: Arc::clone(&self.routed_client),
             ca: Arc::clone(&self.ca),
             egress_server_auth: self.egress_server_auth.clone(),
             upstream_http_version: self.upstream_http_version,
+            peek_timeout_policy: self.peek_timeout_policy,
             exec: self.exec.clone(),
             listen_addr: self.listen_addr,
         })
     }
 
-    async fn serve_request(&self, req: Request) -> Response {
+    pub(crate) fn with_peek_timeout_policy(mut self, policy: PeekTimeoutPolicy) -> Self {
+        self.peek_timeout_policy = policy.into();
+        self
+    }
+
+    async fn serve_request(&self, req: Request) -> Result<Response, BoxError> {
         let tunnel = req.extensions().get_ref::<TunnelContext>().cloned();
-        self.serve_request_with(req, tunnel, |req, is_ws| async move {
-            if is_ws {
-                self.client.serve_upgrade(req).await
+        self.serve_request_with(req, tunnel, |req, is_ws, uses_tunnel| async move {
+            let client = if uses_tunnel {
+                &self.client
             } else {
-                self.client.serve(req).await
+                &self.routed_client
+            };
+            if is_ws {
+                client.serve_upgrade(req).await
+            } else {
+                client.serve(req).await
             }
         })
         .await
@@ -151,19 +167,23 @@ impl MitmConfig {
         req: Request,
         tunnel: Option<TunnelContext>,
         forward: F,
-    ) -> Response
+    ) -> Result<Response, BoxError>
     where
-        F: FnOnce(Request, bool) -> Fut,
+        F: FnOnce(Request, bool, bool) -> Fut,
         Fut: Future<Output = Result<Response, E>>,
         E: Into<BoxError>,
     {
         // A request straight to the listener (or via the proxy to `proxel.ar`)
         // is answered with the certificate install page.
         if tunnel.is_none() && is_direct_cert_request(&req, self.listen_addr) {
-            return cert_server::handle(&req, &self.ca.ca_cert_pem(), None);
+            return Ok(cert_server::handle(&req, &self.ca.ca_cert_pem(), None));
         }
         if cert_server::is_cert_request(&req) {
-            return cert_server::handle(&req, &self.ca.ca_cert_pem(), Some(self.listen_addr));
+            return Ok(cert_server::handle(
+                &req,
+                &self.ca.ca_cert_pem(),
+                Some(self.listen_addr),
+            ));
         }
 
         let (scheme, authority) = match &tunnel {
@@ -173,8 +193,9 @@ impl MitmConfig {
 
         let req = match reconstruct_uri(req, scheme) {
             Ok(req) => req,
-            Err(response) => return response,
+            Err(response) => return Ok(response),
         };
+        let original_destination = request_destination(&req);
 
         let client_version = req.version();
         let mut handler = self.handler.clone();
@@ -187,24 +208,37 @@ impl MitmConfig {
             RequestOrResponse::Request(req) => req,
             RequestOrResponse::Response(mut res) => {
                 sanitize_response_for_client(&mut res, client_version);
-                return res;
+                return Ok(res);
             }
         };
 
-        let upstream_req = prepare_upstream_request(req, is_ws, authority.as_ref());
+        // Preserve the established egress for an untouched request, including
+        // valid SNI != Host/domain-fronting traffic. Only an explicit
+        // rules/Lua/intercept destination rewrite selects fresh egress.
+        let uses_tunnel = tunnel.is_some() && request_destination(&req) == original_destination;
+        let upstream_req = prepare_upstream_request(
+            req,
+            is_ws,
+            uses_tunnel.then_some(authority.as_ref()).flatten(),
+        );
 
-        let result = forward(upstream_req, is_ws).await.map_err(Into::into);
+        let result = forward(upstream_req, is_ws, uses_tunnel)
+            .await
+            .map_err(Into::into);
 
         match result {
             Ok(res) => {
                 if is_ws && res.status() == StatusCode::SWITCHING_PROTOCOLS {
-                    return finalize_ws_upgrade(res, &mut handler).await;
+                    return Ok(finalize_ws_upgrade(res, &mut handler).await);
                 }
                 let mut res = handler.handle_upstream_response(res).await;
                 sanitize_response_for_client(&mut res, client_version);
-                res
+                Ok(res)
             }
             Err(err) => {
+                if uses_tunnel {
+                    return Err(err);
+                }
                 tracing::error!("Client request error: {err}");
                 let mut res = handler.synthetic_response(
                     StatusCode::BAD_GATEWAY,
@@ -212,7 +246,7 @@ impl MitmConfig {
                     Bytes::from_static(b"Bad Gateway"),
                 );
                 sanitize_response_for_client(&mut res, client_version);
-                res
+                Ok(res)
             }
         }
     }
@@ -227,10 +261,10 @@ struct MitmHttpService {
 
 impl Service<Request> for MitmHttpService {
     type Output = Response;
-    type Error = Infallible;
+    type Error = BoxError;
 
     async fn serve(&self, req: Request) -> Result<Self::Output, Self::Error> {
-        Ok(self.cfg.serve_request(req).await)
+        self.cfg.serve_request(req).await
     }
 }
 
@@ -272,15 +306,25 @@ where
     S::Error: Into<BoxError>,
 {
     type Output = Response;
-    type Error = Infallible;
+    type Error = BoxError;
 
     async fn serve(&self, req: Request) -> Result<Self::Output, Self::Error> {
-        Ok(self
-            .cfg
-            .serve_request_with(req, Some(self.tunnel.clone()), |req, _| {
-                self.inner.serve(req)
-            })
-            .await)
+        let routed_client = Arc::clone(&self.cfg.routed_client);
+        self.cfg
+            .serve_request_with(
+                req,
+                Some(self.tunnel.clone()),
+                |req, is_ws, uses_tunnel| async move {
+                    if uses_tunnel {
+                        self.inner.serve(req).await.map_err(Into::into)
+                    } else if is_ws {
+                        routed_client.serve_upgrade(req).await
+                    } else {
+                        routed_client.serve(req).await
+                    }
+                },
+            )
+            .await
     }
 }
 
@@ -304,7 +348,7 @@ fn websocket_mitm_layer(
 /// requests pass straight through to the inner service.
 fn mitm_http_service_with_ws(
     cfg: Arc<MitmConfig>,
-) -> impl Service<Request, Output = Response, Error = Infallible> + Clone {
+) -> impl Service<Request, Output = Response, Error = BoxError> + Clone {
     websocket_mitm_layer(&cfg).into_layer(mitm_http_service(cfg))
 }
 
@@ -406,15 +450,20 @@ where
     let maybe_http = HttpPeekRouter::new(http)
         .with_known_non_http_protocol_methods()
         .with_peek_timeout(PEEK_TIMEOUT)
-        .with_peek_timeout_policy(PeekTimeoutPolicy::FailOpen)
+        .with_peek_timeout_policy(cfg.peek_timeout_policy)
+        .with_fallback(raw.clone());
+    let maybe_https = HttpPeekRouter::new(https_http)
+        .with_known_non_http_protocol_methods()
+        .with_peek_timeout(PEEK_TIMEOUT)
+        .with_peek_timeout_policy(cfg.peek_timeout_policy)
         .with_fallback(raw);
     let tls = cfg
         .ca
         .tls_mitm_relay(cfg.egress_server_auth.clone())
-        .into_layer(https_http);
+        .into_layer(maybe_https);
     PeekTlsClientHelloService::new(tls)
         .with_peek_timeout(PEEK_TIMEOUT)
-        .with_peek_timeout_policy(PeekTimeoutPolicy::FailOpen)
+        .with_peek_timeout_policy(cfg.peek_timeout_policy)
         .with_fallback(maybe_http)
         .serve(bridge)
         .await
@@ -427,16 +476,17 @@ struct RawBridgeService {
     event_tx: mpsc::Sender<ProxyEvent>,
 }
 
-impl<Ingress> Service<BridgeIo<Ingress, RawConnection>> for RawBridgeService
+impl<Ingress, Egress> Service<BridgeIo<Ingress, Egress>> for RawBridgeService
 where
     Ingress: Io + Unpin,
+    Egress: Io + Unpin,
 {
     type Output = ();
     type Error = BoxError;
 
     async fn serve(
         &self,
-        BridgeIo(ingress, egress): BridgeIo<Ingress, RawConnection>,
+        BridgeIo(ingress, egress): BridgeIo<Ingress, Egress>,
     ) -> Result<(), BoxError> {
         super::raw::tunnel(
             ingress,
@@ -463,22 +513,28 @@ where
 
     let https_service = {
         let tls_cfg = cfg.ca.tls_server_config(&target.host);
-        let inner = AddInputExtensionLayer::new(TunnelContext {
-            scheme: Protocol::HTTPS,
-            authority: target.clone(),
-        })
-        .into_layer(mitm_http_service_with_ws(Arc::clone(&cfg)));
+        let inner = (
+            AddInputExtensionLayer::new(TunnelContext {
+                scheme: Protocol::HTTPS,
+                authority: target.clone(),
+            }),
+            ConsumeErrLayer::default(),
+        )
+            .into_layer(mitm_http_service_with_ws(Arc::clone(&cfg)));
         TlsAcceptorLayer::new(tls_cfg)
             .with_store_client_hello(true)
             .into_layer(HttpServer::auto(exec.clone()).service(inner))
     };
 
     let http_service = {
-        let inner = AddInputExtensionLayer::new(TunnelContext {
-            scheme: Protocol::HTTP,
-            authority: target.clone(),
-        })
-        .into_layer(mitm_http_service_with_ws(Arc::clone(&cfg)));
+        let inner = (
+            AddInputExtensionLayer::new(TunnelContext {
+                scheme: Protocol::HTTP,
+                authority: target.clone(),
+            }),
+            ConsumeErrLayer::default(),
+        )
+            .into_layer(mitm_http_service_with_ws(Arc::clone(&cfg)));
         HttpServer::auto(exec.clone()).service(inner)
     };
 
@@ -496,12 +552,12 @@ where
     // an HTTP-looking request-line and then stalls.
     let router = TlsPeekRouter::new(https_service)
         .with_peek_timeout(PEEK_TIMEOUT)
-        .with_peek_timeout_policy(PeekTimeoutPolicy::FailOpen)
+        .with_peek_timeout_policy(cfg.peek_timeout_policy)
         .with_fallback(
             HttpPeekRouter::new(http_service)
                 .with_known_non_http_protocol_methods()
                 .with_peek_timeout(PEEK_TIMEOUT)
-                .with_peek_timeout_policy(PeekTimeoutPolicy::FailOpen)
+                .with_peek_timeout_policy(cfg.peek_timeout_policy)
                 .with_fallback(raw_service),
         );
 
@@ -577,23 +633,35 @@ fn host_matches_listener(host: &Host, listen_addr: std::net::SocketAddr, port: u
     }
 }
 
-/// Rebuild the request URI in absolute form so the captured (user-facing)
-/// request carries a full `scheme://authority/path` URL rather than a bare
-/// origin-form path. Routing itself is pinned by the `ConnectorTarget` extension.
+/// Rebuild an origin-form request URI without replacing explicit request-target
+/// components. HTTP authority takes precedence over TLS SNI/CONNECT metadata;
+/// the latter only supplies the scheme when the inner request has none.
 #[allow(clippy::result_large_err)]
 fn reconstruct_uri(mut req: Request, scheme: Protocol) -> Result<Request, Response> {
-    // The request must still name a host (absolute-form URI, Host header, or
-    // terminated-TLS SNI); a host-less request is a 400.
-    if req.authority().is_none() {
-        return Err(bad_request("Bad Request: missing Host header"));
+    let mut uri = req.uri().clone();
+    if uri.scheme().is_none() {
+        uri.set_scheme(scheme);
     }
-    // rama's `request_uri` assembles scheme://authority/path from the request
-    // context; override the scheme with the tunnel's, since a decrypted (MITM'd)
-    // HTTPS request is otherwise indistinguishable from plaintext.
-    let mut uri = req.request_uri();
-    uri.set_scheme(scheme);
+    if uri.authority().is_none() {
+        let Some(host) = req.headers().typed_get::<HostHeader>() else {
+            return Err(bad_request("Bad Request: missing Host header"));
+        };
+        uri.set_authority(Authority::new(host.0));
+    }
     *req.uri_mut() = uri;
     Ok(req)
+}
+
+/// Typed scheme and authority used to detect an explicit destination rewrite.
+fn request_destination(req: &Request) -> Option<(Protocol, HostWithPort)> {
+    let uri = req.uri();
+    let scheme = uri.scheme()?.clone();
+    let authority = uri.authority()?;
+    let port = authority.port_u16().or_else(|| scheme.default_port())?;
+    Some((
+        scheme,
+        HostWithPort::new(authority.host().into_owned(), port),
+    ))
 }
 
 fn bad_request(message: &'static str) -> Response {
@@ -605,8 +673,8 @@ fn bad_request(message: &'static str) -> Response {
 
 /// Normalize a captured request for upstream forwarding: sanitize forwarded
 /// headers (see [`super::sanitize_forwarded_request_headers`]), drop `Host`, and
-/// pin the upstream connector to the tunnel target so a spoofed inner `Host`
-/// cannot re-route it. WebSocket upgrades keep `Connection`/`Upgrade` and are
+/// retain the eager tunnel target only when request processing did not rewrite
+/// the destination. WebSocket upgrades keep `Connection`/`Upgrade` and are
 /// forced to HTTP/1.1.
 fn prepare_upstream_request(
     mut req: Request,
@@ -690,13 +758,13 @@ impl Service<BridgeIo<Upgraded, Upgraded>> for WsRelayService {
             #[cfg(feature = "scripting")]
             script_engine: self.script_engine.clone(),
         };
-        let Ok(()) = WebSocketRelayEventService::new(middleware)
+        let result = WebSocketRelayEventService::new(middleware)
             .serve(BridgeIo(ingress, egress))
             .await;
         let _ = self
             .event_tx
             .try_send(ProxyEvent::WebSocketClosed { conn_id });
-        Ok(())
+        result.map_err(Into::into)
     }
 }
 
@@ -719,13 +787,19 @@ impl Service<WebSocketRelayEventInput> for WsCaptureMiddleware {
             WebSocketRelayDirection::Ingress => WsDirection::ClientToServer,
             WebSocketRelayDirection::Egress => WsDirection::ServerToClient,
         };
-        emit_ws_frame(&self.event_tx, self.conn_id, &input.event, direction);
-
         // Only data frames are transformable; the relay owns control frames.
         #[cfg(feature = "scripting")]
         if let Some(engine) = self.script_engine.clone() {
             if let WebSocketRelayEvent::Data(message) = &input.event {
                 let messages = script_data_messages(&engine, direction, message);
+                for message in &messages {
+                    emit_ws_frame(
+                        &self.event_tx,
+                        self.conn_id,
+                        &WebSocketRelayEvent::Data(message.clone()),
+                        direction,
+                    );
+                }
                 return Ok(WebSocketRelayEventOutput {
                     messages,
                     close: None,
@@ -734,6 +808,7 @@ impl Service<WebSocketRelayEventInput> for WsCaptureMiddleware {
             }
         }
 
+        emit_ws_frame(&self.event_tx, self.conn_id, &input.event, direction);
         Ok(input.into())
     }
 }
@@ -804,16 +879,19 @@ fn emit_ws_frame(
 /// (WireGuard userspace-capture entry point).
 pub(super) async fn handle_captured_stream<IO>(
     io: IO,
-    _remote_addr: std::net::SocketAddr,
     handler: CapturingHandler,
     ca: Arc<Ssl>,
     client: Arc<UpstreamClient>,
     listen_addr: std::net::SocketAddr,
     authority: HostWithPort,
+    peek_timeout_policy: PeekTimeoutPolicy,
 ) where
     IO: Io + Unpin + ExtensionsRef,
 {
-    let cfg = Arc::new(MitmConfig::new(handler, client, ca, listen_addr));
+    let cfg = Arc::new(
+        MitmConfig::new(handler, client, ca, listen_addr)
+            .with_peek_timeout_policy(peek_timeout_policy),
+    );
     io.extensions().insert(ConnectorTarget(authority.clone()));
     let connector = super::connector::with_timeout(cfg.raw_connector());
     let established = connector
@@ -857,5 +935,118 @@ pub(crate) async fn handle_replay(
                 Bytes::from(format!("Replay request failed: {err}")),
             );
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn absolute_https_uri_is_not_downgraded() {
+        let request = Request::builder()
+            .uri("https://secure.example/path")
+            .header(rama::http::header::HOST, "wrong.example")
+            .body(Body::empty())
+            .unwrap();
+
+        let request = reconstruct_uri(request, Protocol::HTTP).unwrap();
+        assert_eq!(request.uri().to_string(), "https://secure.example/path");
+    }
+
+    #[test]
+    fn host_header_is_preserved_without_forcing_new_egress() {
+        let request = Request::builder()
+            .uri("/fronted")
+            .header(rama::http::header::HOST, "virtual.example")
+            .body(Body::empty())
+            .unwrap();
+        let request = reconstruct_uri(request, Protocol::HTTPS).unwrap();
+        assert_eq!(request.uri().to_string(), "https://virtual.example/fronted");
+        let original = request_destination(&request);
+        assert_eq!(request_destination(&request), original);
+
+        let mut rewritten = request;
+        rewritten
+            .uri_mut()
+            .set_authority(Authority::try_from("rewritten.example").unwrap());
+        assert_ne!(request_destination(&rewritten), original);
+    }
+
+    #[cfg(feature = "scripting")]
+    #[tokio::test]
+    async fn websocket_capture_records_lua_output_and_omits_drops() {
+        use std::io::Write as _;
+
+        use rama::extensions::Extensions;
+
+        let mut script = tempfile::NamedTempFile::new().unwrap();
+        script
+            .write_all(
+                br#"
+                function on_websocket_frame(frame)
+                    if frame.payload == "drop" then return false end
+                    return "changed"
+                end
+                "#,
+            )
+            .unwrap();
+        script.flush().unwrap();
+        let engine = Arc::new(crate::scripting::ScriptEngine::new(script.path()).unwrap());
+        let (event_tx, mut event_rx) = mpsc::channel(4);
+        let middleware = WsCaptureMiddleware {
+            conn_id: 7,
+            event_tx,
+            script_engine: Some(engine),
+        };
+
+        let output = middleware
+            .serve(WebSocketRelayEventInput {
+                direction: WebSocketRelayDirection::Ingress,
+                event: WebSocketRelayEvent::Data(WebSocketRelayMessage::Text(
+                    Utf8Bytes::from_static("original"),
+                )),
+                extensions: Extensions::new(),
+            })
+            .await
+            .unwrap();
+        assert_eq!(
+            output.messages,
+            [WebSocketRelayMessage::Text(Utf8Bytes::from_static(
+                "changed"
+            ))]
+        );
+        let ProxyEvent::WebSocketFrame { frame, .. } = event_rx.recv().await.unwrap() else {
+            panic!("expected WebSocket frame");
+        };
+        assert_eq!(frame.payload.as_ref(), b"changed");
+
+        let output = middleware
+            .serve(WebSocketRelayEventInput {
+                direction: WebSocketRelayDirection::Ingress,
+                event: WebSocketRelayEvent::Data(WebSocketRelayMessage::Text(
+                    Utf8Bytes::from_static("drop"),
+                )),
+                extensions: Extensions::new(),
+            })
+            .await
+            .unwrap();
+        assert!(output.messages.is_empty());
+        assert!(event_rx.try_recv().is_err());
+
+        let output = middleware
+            .serve(WebSocketRelayEventInput {
+                direction: WebSocketRelayDirection::Egress,
+                event: WebSocketRelayEvent::Ping(Bytes::from_static(b"ping")),
+                extensions: Extensions::new(),
+            })
+            .await
+            .unwrap();
+        assert!(output.messages.is_empty());
+        let ProxyEvent::WebSocketFrame { frame, .. } = event_rx.recv().await.unwrap() else {
+            panic!("expected captured control frame");
+        };
+        assert_eq!(frame.opcode, WsOpcode::Ping);
+        assert_eq!(frame.payload.as_ref(), b"ping");
     }
 }
