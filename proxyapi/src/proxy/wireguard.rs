@@ -886,6 +886,43 @@ impl HttpService for WireGuardH3Service {
         let upstreams = Arc::clone(&self.upstreams);
         Box::pin(async move {
             let context = crate::HttpContext { remote_addr };
+            if super::http3::is_extended_websocket(&request) {
+                let websocket_upstreams = Arc::clone(&upstreams);
+                let websocket_verifier = Arc::clone(&verifier);
+                let websocket_cert_path = cert_path.clone();
+                let websocket_key_path = key_path.clone();
+                return super::http3::handle_extended_websocket(
+                    request,
+                    handler,
+                    remote_addr,
+                    None,
+                    move |request| async move {
+                        let authority = request.head.uri.authority().cloned().ok_or_else(|| {
+                            ProtocolError::new(
+                                proxelar_proto::ErrorKind::MalformedMessage,
+                                "HTTP/3 WebSocket request has no authority",
+                            )
+                        })?;
+                        let upstream = {
+                            let mut clients = websocket_upstreams.lock().await;
+                            clients
+                                .entry(authority)
+                                .or_insert_with(|| {
+                                    super::http3::ReverseH3Upstream::new_with_remote(
+                                        request.head.uri.clone(),
+                                        websocket_verifier,
+                                        websocket_cert_path,
+                                        websocket_key_path,
+                                        destination,
+                                    )
+                                })
+                                .clone()
+                        };
+                        upstream.send(request).await
+                    },
+                )
+                .await;
+            }
             let request = match handler.handle_request(&context, request).await {
                 crate::RequestOrResponse::Request(request) => request,
                 crate::RequestOrResponse::Response(response) => return Ok(response),

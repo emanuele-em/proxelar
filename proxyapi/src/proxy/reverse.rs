@@ -339,6 +339,22 @@ impl HttpService for ReverseH3Service {
         let remote_addr = self.remote_addr;
         Box::pin(async move {
             let context = HttpContext { remote_addr };
+            if super::http3::is_extended_websocket(&request) {
+                let wire_target = h3_wire_target(&target).map_err(|error| {
+                    ProtocolError::new(
+                        proxelar_proto::ErrorKind::MalformedMessage,
+                        error.to_string(),
+                    )
+                })?;
+                return super::http3::handle_extended_websocket(
+                    request,
+                    handler,
+                    remote_addr,
+                    Some(wire_target),
+                    move |request| async move { upstream.send(request).await },
+                )
+                .await;
+            }
             let request = match handler.handle_request(&context, request).await {
                 RequestOrResponse::Request(request) => request,
                 RequestOrResponse::Response(response) => return Ok(response),
@@ -583,13 +599,18 @@ mod tests {
     }
 
     #[cfg(feature = "http3")]
-    async fn spawn_test_h3_upstream() -> (
+    async fn spawn_test_h3_upstream_with_service<S>(
+        service: S,
+    ) -> (
         SocketAddr,
         tokio::task::JoinHandle<()>,
         tempfile::TempDir,
         std::path::PathBuf,
         std::path::PathBuf,
-    ) {
+    )
+    where
+        S: HttpService + Clone + Send + 'static,
+    {
         use futures_util::StreamExt as _;
         use tokio_quiche::metrics::DefaultMetrics;
         use tokio_quiche::settings::{CertificateKind, Hooks, QuicSettings, TlsCertificatePaths};
@@ -622,11 +643,68 @@ mod tests {
             let (driver, controller) =
                 ServerH3Driver::new(super::super::http3::default_http3_settings());
             let connection = initial.start(driver);
-            super::super::http3::serve_connection(connection, controller, StaticH3Service)
+            super::super::http3::serve_connection(connection, controller, service)
                 .await
                 .unwrap();
         });
         (address, task, tls_dir, cert_path, key_path)
+    }
+
+    #[cfg(feature = "http3")]
+    async fn spawn_test_h3_upstream() -> (
+        SocketAddr,
+        tokio::task::JoinHandle<()>,
+        tempfile::TempDir,
+        std::path::PathBuf,
+        std::path::PathBuf,
+    ) {
+        spawn_test_h3_upstream_with_service(StaticH3Service).await
+    }
+
+    #[cfg(feature = "http3")]
+    #[derive(Clone)]
+    struct WebSocketH3Service;
+
+    #[cfg(feature = "http3")]
+    impl HttpService for WebSocketH3Service {
+        fn call(
+            &mut self,
+            request: ProxyRequest,
+        ) -> BoxFuture<'_, Result<ProxyResponse, ProtocolError>> {
+            Box::pin(async move {
+                use futures_util::{SinkExt as _, StreamExt as _};
+                use tokio_tungstenite::tungstenite::protocol::Role;
+                use tokio_tungstenite::WebSocketStream;
+
+                assert!(super::super::http3::is_extended_websocket(&request));
+                assert_eq!(
+                    request.head.headers.get("sec-websocket-version"),
+                    Some(b"13".as_slice())
+                );
+                let (tunnel, outbound) =
+                    proxelar_proto::http2::body_tunnel(request.body, 64 * 1024);
+                tokio::spawn(async move {
+                    let mut websocket =
+                        WebSocketStream::from_raw_socket(tunnel, Role::Server, None).await;
+                    while let Some(Ok(message)) = websocket.next().await {
+                        let close = message.is_close();
+                        if websocket.send(message).await.is_err() || close {
+                            break;
+                        }
+                    }
+                });
+                let mut headers = proxyapi_models::HeaderBlock::new();
+                headers.add("sec-websocket-protocol", "chat").unwrap();
+                Ok(ProxyResponse::new(
+                    proxelar_proto::ResponseHead::new(
+                        http::StatusCode::OK,
+                        http::Version::HTTP_3,
+                        headers,
+                    ),
+                    outbound,
+                ))
+            })
+        }
     }
 
     #[cfg(feature = "http3")]
@@ -695,5 +773,167 @@ mod tests {
         proxy_task.abort();
         upstream_task.abort();
         drop(tls_dir);
+    }
+
+    #[cfg(feature = "http3")]
+    #[tokio::test]
+    async fn reverse_http3_extended_connect_websocket_has_event_and_frame_parity() {
+        use std::time::Duration;
+
+        use futures_util::{SinkExt as _, StreamExt as _};
+        use proxyapi_models::{WsDirection, WsOpcode};
+        use tokio_tungstenite::tungstenite::{protocol::Role, Message};
+        use tokio_tungstenite::WebSocketStream;
+
+        use crate::event::ProxyEvent;
+        use crate::handler::DEFAULT_BODY_CAPTURE_LIMIT;
+        use crate::proxy::UpstreamTlsConfig;
+
+        let (upstream_addr, upstream_task, tls_dir, cert_path, key_path) =
+            spawn_test_h3_upstream_with_service(WebSocketH3Service).await;
+        let ca_dir = tempfile::tempdir().unwrap();
+        let ca = Arc::new(Ssl::load_or_generate(ca_dir.path()).unwrap());
+        let (event_tx, mut event_rx) = tokio::sync::mpsc::channel(16);
+        let handler =
+            CapturingHandler::new(event_tx).with_body_capture_limit(DEFAULT_BODY_CAPTURE_LIMIT);
+        #[cfg(feature = "scripting")]
+        let (handler, script_file) = {
+            let file = tempfile::NamedTempFile::new().unwrap();
+            std::fs::write(
+                file.path(),
+                r#"
+                function on_websocket_frame(frame)
+                    if frame.direction == "client_to_server" then
+                        return "changed over h3"
+                    end
+                    return nil
+                end
+                "#,
+            )
+            .unwrap();
+            let handler = handler.with_script_engine(Arc::new(
+                crate::scripting::ScriptEngine::new(file.path()).unwrap(),
+            ));
+            (handler, file)
+        };
+        let proxy = ReverseH3Server::bind(
+            "127.0.0.1:0".parse().unwrap(),
+            format!("http3://{upstream_addr}").parse().unwrap(),
+            handler,
+            ca,
+            &UpstreamTlsConfig::Insecure,
+        )
+        .await
+        .unwrap();
+        let proxy_addr = proxy.local_addr();
+        let proxy_task = tokio::spawn(proxy.serve());
+
+        let verifier = super::super::tls::h3_server_verifier(&UpstreamTlsConfig::Insecure).unwrap();
+        let client = super::super::http3::ReverseH3Upstream::new(
+            format!("https://{proxy_addr}").parse().unwrap(),
+            verifier,
+            cert_path,
+            key_path,
+        );
+        let (tunnel, request_body, response_body) = super::super::http3::websocket_body_tunnel();
+        let mut headers = proxyapi_models::HeaderBlock::new();
+        headers.add(":protocol", "websocket").unwrap();
+        headers.add("sec-websocket-version", "13").unwrap();
+        headers.add("sec-websocket-protocol", "chat").unwrap();
+        let request = ProxyRequest::new(
+            proxelar_proto::RequestHead::new(
+                http::Method::CONNECT,
+                format!("https://{proxy_addr}/socket").parse().unwrap(),
+                http::Version::HTTP_3,
+                headers,
+            ),
+            request_body,
+        );
+        let response = tokio::time::timeout(Duration::from_secs(5), client.send(request))
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(response.head.status, http::StatusCode::OK);
+        assert_eq!(
+            response.head.headers.get("sec-websocket-protocol"),
+            Some(b"chat".as_slice())
+        );
+        response_body.send(response.body).unwrap();
+        let mut websocket = WebSocketStream::from_raw_socket(tunnel, Role::Client, None).await;
+
+        let connected = tokio::time::timeout(Duration::from_secs(2), event_rx.recv())
+            .await
+            .unwrap()
+            .unwrap();
+        let connection_id = match connected {
+            ProxyEvent::WebSocketConnected {
+                id,
+                request,
+                response,
+            } => {
+                assert_eq!(request.method(), http::Method::CONNECT);
+                assert_eq!(request.version(), http::Version::HTTP_3);
+                assert_eq!(response.status(), http::StatusCode::OK);
+                assert_eq!(response.version(), http::Version::HTTP_3);
+                id
+            }
+            other => panic!("expected WebSocketConnected, got {other:?}"),
+        };
+
+        websocket
+            .send(Message::Text("hello over h3".into()))
+            .await
+            .unwrap();
+        #[cfg(feature = "scripting")]
+        let expected_payload = "changed over h3";
+        #[cfg(not(feature = "scripting"))]
+        let expected_payload = "hello over h3";
+        assert_eq!(
+            tokio::time::timeout(Duration::from_secs(2), websocket.next())
+                .await
+                .unwrap()
+                .unwrap()
+                .unwrap(),
+            Message::Text(expected_payload.into())
+        );
+
+        let mut directions = Vec::new();
+        while directions.len() < 2 {
+            match tokio::time::timeout(Duration::from_secs(2), event_rx.recv())
+                .await
+                .unwrap()
+                .unwrap()
+            {
+                ProxyEvent::WebSocketFrame { conn_id, frame } if frame.opcode == WsOpcode::Text => {
+                    assert_eq!(conn_id, connection_id);
+                    assert_eq!(frame.payload, expected_payload);
+                    directions.push(frame.direction);
+                }
+                _ => {}
+            }
+        }
+        assert_eq!(
+            directions,
+            vec![WsDirection::ClientToServer, WsDirection::ServerToClient]
+        );
+
+        websocket.close(None).await.unwrap();
+        loop {
+            if let ProxyEvent::WebSocketClosed { conn_id } =
+                tokio::time::timeout(Duration::from_secs(2), event_rx.recv())
+                    .await
+                    .unwrap()
+                    .unwrap()
+            {
+                assert_eq!(conn_id, connection_id);
+                break;
+            }
+        }
+
+        proxy_task.abort();
+        upstream_task.abort();
+        drop(tls_dir);
+        #[cfg(feature = "scripting")]
+        drop(script_file);
     }
 }

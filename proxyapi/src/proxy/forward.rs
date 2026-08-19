@@ -519,6 +519,18 @@ pub(super) async fn pump_native_websocket<I>(
 {
     let client = Rewind::new_buffered(client.io, client.read_ahead);
     let server = Rewind::new_buffered(server.io, server.read_ahead);
+    pump_websocket_streams(conn_id, client, server, handler).await;
+}
+
+pub(super) async fn pump_websocket_streams<C, S>(
+    conn_id: u64,
+    client: C,
+    server: S,
+    handler: CapturingHandler,
+) where
+    C: AsyncRead + AsyncWrite + Unpin,
+    S: AsyncRead + AsyncWrite + Unpin,
+{
     let event_tx = handler.event_tx_clone();
     #[cfg(feature = "scripting")]
     let script_engine = handler.script_engine_clone();
