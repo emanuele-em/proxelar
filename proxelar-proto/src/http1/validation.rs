@@ -83,7 +83,7 @@ pub(crate) fn validate_request(
     validate_wire_lines(raw_head)?;
     validate_request_target(method, raw_target, uri)?;
     validate_host(version, headers)?;
-    validate_framing(version, headers, true)
+    validate_framing(version, headers)
 }
 
 pub(crate) fn validate_response(
@@ -93,7 +93,7 @@ pub(crate) fn validate_response(
     headers: &HeaderBlock,
 ) -> Result<HeaderSemantics, Http1Error> {
     validate_wire_lines(raw_head)?;
-    let semantics = validate_framing(version, headers, false)?;
+    let semantics = validate_framing(version, headers)?;
     if (status.is_informational() || status == StatusCode::NO_CONTENT)
         && (semantics.content_length.is_some() || semantics.transfer_encoded)
     {
@@ -223,11 +223,10 @@ fn validate_host(version: Version, headers: &HeaderBlock) -> Result<(), Http1Err
 fn validate_framing(
     version: Version,
     headers: &HeaderBlock,
-    request: bool,
 ) -> Result<HeaderSemantics, Http1Error> {
     validate_connection(headers)?;
     let content_length = parse_content_length(headers)?;
-    let (transfer_encoded, chunked) = parse_transfer_encoding(version, headers, request)?;
+    let (transfer_encoded, chunked) = parse_transfer_encoding(version, headers)?;
     if content_length.is_some() && transfer_encoded {
         return Err(Http1Error::new(
             Http1ErrorKind::AmbiguousFraming,
@@ -306,7 +305,6 @@ fn parse_content_length(headers: &HeaderBlock) -> Result<Option<u64>, Http1Error
 fn parse_transfer_encoding(
     version: Version,
     headers: &HeaderBlock,
-    request: bool,
 ) -> Result<(bool, bool), Http1Error> {
     let values = headers.get_all("transfer-encoding").collect::<Vec<_>>();
     if values.is_empty() {
@@ -319,7 +317,7 @@ fn parse_transfer_encoding(
         ));
     }
 
-    let mut codings = Vec::new();
+    let mut coding_count = 0;
     for value in values {
         for item in value.split(|byte| *byte == b',') {
             let item = trim_ows(item);
@@ -337,27 +335,23 @@ fn parse_transfer_encoding(
                     "chunked transfer coding parameters are rejected",
                 ));
             }
-            codings.push(coding);
+            if !coding.eq_ignore_ascii_case(b"chunked") {
+                return Err(Http1Error::new(
+                    Http1ErrorKind::InvalidTransferEncoding,
+                    "unsupported transfer coding",
+                ));
+            }
+            coding_count += 1;
         }
     }
 
-    let chunked_count = codings
-        .iter()
-        .filter(|coding| coding.eq_ignore_ascii_case(b"chunked"))
-        .count();
-    let chunked_is_final = codings
-        .last()
-        .is_some_and(|coding| coding.eq_ignore_ascii_case(b"chunked"));
-    if chunked_count > 1
-        || (request && (chunked_count != 1 || !chunked_is_final))
-        || (!request && chunked_count == 1 && !chunked_is_final)
-    {
+    if coding_count != 1 {
         return Err(Http1Error::new(
             Http1ErrorKind::InvalidTransferEncoding,
-            "chunked must occur exactly once and as the final request coding",
+            "chunked must occur exactly once",
         ));
     }
-    Ok((true, chunked_is_final))
+    Ok((true, true))
 }
 
 pub(crate) fn trim_ows(mut bytes: &[u8]) -> &[u8] {
