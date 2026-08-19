@@ -227,6 +227,7 @@ See the [full comparison](https://proxelar.micheletti.io/reference/comparison.ht
 Proxelar is usable today, but it intentionally has a narrower scope than a full security suite:
 
 - HTTP/1 and HTTP/2 are supported across TCP proxy modes. HTTP/3 interception is intentionally limited to reverse and WireGuard modes: `https://` reverse targets listen on TCP and UDP on the same port, while `http3://` is UDP-only and uses H3 in both directions. There is no heuristic QUIC detection or timeout-based protocol fallback.
+- The current HTTP/3 engine does not expose subsequent inbound HEADERS, so Proxelar cannot capture or forward H3 informational responses or trailers received from a peer. Emitting them and full H1/H2 handling remain supported.
 - Generic TCP streams are captured as directional chunks, and fixed-target or WireGuard UDP traffic records request/response datagrams. Protobuf has a lossless wire-field JSON editor and MessagePack has a JSON editor; descriptor-backed field names and raw-TCP schemas are not yet available.
 - WireGuard mode currently generates one client identity per CA directory. Proxelar does not modify system proxy settings; `--launch-browser` uses a reversible, isolated browser profile instead.
 - HTTPS interception requires trusting Proxelar's local CA. Certificate-pinned apps and many Android apps will not trust user-installed CAs.
