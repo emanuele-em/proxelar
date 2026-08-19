@@ -4,7 +4,7 @@ use std::sync::Arc;
 use bytes::Bytes;
 use futures_util::{SinkExt, StreamExt};
 use http::uri::{Authority, Scheme};
-use http::{Method, Response, Uri};
+use http::{Method, Uri};
 use proxelar_proto::http1::{
     serve_connection_with_upgrades, BoxIo, ConnectionConfig, ServerConnection, UpgradeReceiver,
 };
@@ -1018,9 +1018,14 @@ pub(super) async fn handle_replay(
     let upstream = NativeUpstream::shared(native_pool, route);
     match upstream.send(fwd_req, false).await {
         Ok(res) => {
-            handler
-                .record_upstream_response(response_from_protocol_for_capture(res.response))
-                .await;
+            if let Err(error) = handler.record_protocol_response(res.response).await {
+                tracing::warn!("Replay response conversion failed: {error}");
+                handler.emit_synthetic_completion(
+                    http::StatusCode::BAD_GATEWAY,
+                    http::HeaderMap::new(),
+                    Bytes::from_static(b"Replay response contained invalid headers"),
+                );
+            }
         }
         Err(e) => {
             tracing::warn!("Replay request failed: {e}");
@@ -1031,17 +1036,6 @@ pub(super) async fn handle_replay(
             );
         }
     }
-}
-
-fn response_from_protocol_for_capture(
-    response: crate::ProxyResponse,
-) -> Response<crate::ProxyBody> {
-    let (head, body) = response.into_parts();
-    let mut response = Response::new(body);
-    *response.status_mut() = head.status;
-    *response.version_mut() = head.version;
-    *response.headers_mut() = crate::header::to_http(&head.headers).unwrap_or_default();
-    response
 }
 
 #[cfg(test)]
