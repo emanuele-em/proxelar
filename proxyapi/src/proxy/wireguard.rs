@@ -129,7 +129,7 @@ fn load_or_generate_key(path: &Path) -> io::Result<[u8; 32]> {
         Ok(value) => decode_key(value.trim()),
         Err(error) if error.kind() == io::ErrorKind::NotFound => {
             let mut key = [0_u8; 32];
-            openssl::rand::rand_bytes(&mut key).map_err(io::Error::other)?;
+            getrandom::fill(&mut key).map_err(|error| io::Error::other(error.to_string()))?;
             let encoded = format!("{}\n", encode_key(&key));
             crate::session::write_private(path, encoded.as_bytes())?;
             Ok(key)
@@ -562,8 +562,8 @@ mod tests {
     fn boringtun_peer_roundtrip_decrypts_ipv4_packet() {
         let mut server_key = [0_u8; 32];
         let mut client_key = [0_u8; 32];
-        openssl::rand::rand_bytes(&mut server_key).unwrap();
-        openssl::rand::rand_bytes(&mut client_key).unwrap();
+        getrandom::fill(&mut server_key).unwrap();
+        getrandom::fill(&mut client_key).unwrap();
         let server_private = StaticSecret::from(server_key);
         let client_private = StaticSecret::from(client_key);
         let server_public = PublicKey::from(&server_private);
@@ -755,8 +755,8 @@ mod tests {
     async fn packet_processors_complete_a_handshake_and_exchange_packets() {
         let mut server_key = [0_u8; 32];
         let mut client_key = [0_u8; 32];
-        openssl::rand::rand_bytes(&mut server_key).unwrap();
-        openssl::rand::rand_bytes(&mut client_key).unwrap();
+        getrandom::fill(&mut server_key).unwrap();
+        getrandom::fill(&mut client_key).unwrap();
         let server_private = StaticSecret::from(server_key);
         let client_private = StaticSecret::from(client_key);
         let server_public = PublicKey::from(&server_private);

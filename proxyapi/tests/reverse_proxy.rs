@@ -800,123 +800,42 @@ async fn start_upstream_server() -> (SocketAddr, tokio::sync::oneshot::Sender<()
 
 async fn start_private_ca_https_upstream() -> (SocketAddr, tokio::sync::oneshot::Sender<()>, Vec<u8>)
 {
-    use openssl::{
-        asn1::{Asn1Integer, Asn1Time},
-        bn::BigNum,
-        hash::MessageDigest,
-        pkey::{PKey, Private},
-        rsa::Rsa,
-        x509::{
-            extension::{BasicConstraints, ExtendedKeyUsage, KeyUsage, SubjectAlternativeName},
-            X509Builder, X509NameBuilder, X509,
-        },
+    use rcgen::{
+        BasicConstraints, CertificateParams, DnType, ExtendedKeyUsagePurpose, IsCa, Issuer,
+        KeyPair, KeyUsagePurpose,
     };
-    use rustls_pki_types::{CertificateDer, PrivateKeyDer, PrivatePkcs1KeyDer};
+    use rustls_pki_types::{PrivateKeyDer, PrivatePkcs8KeyDer};
+    use time::{Duration, OffsetDateTime};
     use tokio_rustls::TlsAcceptor;
 
-    fn random_serial_number() -> Asn1Integer {
-        let mut serial = [0; 16];
-        openssl::rand::rand_bytes(&mut serial).unwrap();
-        Asn1Integer::from_bn(&BigNum::from_slice(&serial).unwrap()).unwrap()
+    fn set_validity(params: &mut CertificateParams) {
+        params.not_before = OffsetDateTime::now_utc() - Duration::seconds(60);
+        params.not_after = params.not_before + Duration::days(1);
     }
 
-    fn set_validity(builder: &mut openssl::x509::X509Builder) {
-        let not_before = std::time::SystemTime::now()
-            .duration_since(std::time::SystemTime::UNIX_EPOCH)
-            .unwrap()
-            .as_secs() as i64
-            - 60;
-        builder
-            .set_not_before(Asn1Time::from_unix(not_before).unwrap().as_ref())
-            .unwrap();
-        builder
-            .set_not_after(Asn1Time::from_unix(not_before + 86_400).unwrap().as_ref())
-            .unwrap();
-    }
+    let mut ca_params = CertificateParams::new(Vec::<String>::new()).unwrap();
+    ca_params.is_ca = IsCa::Ca(BasicConstraints::Unconstrained);
+    ca_params
+        .distinguished_name
+        .push(DnType::CommonName, "Proxelar Upstream Test CA");
+    ca_params.key_usages = vec![KeyUsagePurpose::KeyCertSign, KeyUsagePurpose::CrlSign];
+    set_validity(&mut ca_params);
+    let ca_key = KeyPair::generate().unwrap();
+    let ca_cert = ca_params.self_signed(&ca_key).unwrap();
+    let ca_pem = ca_cert.pem().into_bytes();
+    let issuer = Issuer::new(ca_params, ca_key);
 
-    fn generate_ca() -> (PKey<Private>, X509) {
-        let ca_key = PKey::from_rsa(Rsa::generate(2048).unwrap()).unwrap();
-        let mut name_builder = X509NameBuilder::new().unwrap();
-        name_builder
-            .append_entry_by_text("CN", "Proxelar Upstream Test CA")
-            .unwrap();
-        let name = name_builder.build();
-
-        let mut builder = X509Builder::new().unwrap();
-        builder.set_version(2).unwrap();
-        builder
-            .set_serial_number(random_serial_number().as_ref())
-            .unwrap();
-        builder.set_subject_name(&name).unwrap();
-        builder.set_issuer_name(&name).unwrap();
-        builder.set_pubkey(&ca_key).unwrap();
-        set_validity(&mut builder);
-        builder
-            .append_extension(BasicConstraints::new().critical().ca().build().unwrap())
-            .unwrap();
-        builder
-            .append_extension(
-                KeyUsage::new()
-                    .critical()
-                    .key_cert_sign()
-                    .crl_sign()
-                    .build()
-                    .unwrap(),
-            )
-            .unwrap();
-        builder.sign(&ca_key, MessageDigest::sha256()).unwrap();
-        (ca_key, builder.build())
-    }
-
-    fn generate_server_cert(ca_key: &PKey<Private>, ca_cert: &X509) -> (PKey<Private>, X509) {
-        let server_key = PKey::from_rsa(Rsa::generate(2048).unwrap()).unwrap();
-        let mut name_builder = X509NameBuilder::new().unwrap();
-        name_builder
-            .append_entry_by_text("CN", "127.0.0.1")
-            .unwrap();
-        let name = name_builder.build();
-
-        let mut builder = X509Builder::new().unwrap();
-        builder.set_version(2).unwrap();
-        builder
-            .set_serial_number(random_serial_number().as_ref())
-            .unwrap();
-        builder.set_subject_name(&name).unwrap();
-        builder.set_issuer_name(ca_cert.subject_name()).unwrap();
-        builder.set_pubkey(&server_key).unwrap();
-        set_validity(&mut builder);
-        builder
-            .append_extension(BasicConstraints::new().critical().build().unwrap())
-            .unwrap();
-        builder
-            .append_extension(
-                KeyUsage::new()
-                    .critical()
-                    .digital_signature()
-                    .key_encipherment()
-                    .build()
-                    .unwrap(),
-            )
-            .unwrap();
-        builder
-            .append_extension(ExtendedKeyUsage::new().server_auth().build().unwrap())
-            .unwrap();
-        let subject_alt_name = SubjectAlternativeName::new()
-            .ip("127.0.0.1")
-            .build(&builder.x509v3_context(Some(ca_cert), None))
-            .unwrap();
-        builder.append_extension(subject_alt_name).unwrap();
-        builder.sign(ca_key, MessageDigest::sha256()).unwrap();
-        (server_key, builder.build())
-    }
-
-    let (ca_key, ca_cert) = generate_ca();
-    let (server_key, server_cert) = generate_server_cert(&ca_key, &ca_cert);
-    let ca_pem = ca_cert.to_pem().unwrap();
-    let certs = vec![CertificateDer::from(server_cert.to_der().unwrap())];
-    let private_key = PrivateKeyDer::Pkcs1(PrivatePkcs1KeyDer::from(
-        server_key.rsa().unwrap().private_key_to_der().unwrap(),
-    ));
+    let mut server_params = CertificateParams::new(vec!["127.0.0.1".to_owned()]).unwrap();
+    server_params
+        .distinguished_name
+        .push(DnType::CommonName, "127.0.0.1");
+    server_params.key_usages = vec![KeyUsagePurpose::DigitalSignature];
+    server_params.extended_key_usages = vec![ExtendedKeyUsagePurpose::ServerAuth];
+    set_validity(&mut server_params);
+    let server_key = KeyPair::generate().unwrap();
+    let server_cert = server_params.signed_by(&server_key, &issuer).unwrap();
+    let certs = vec![server_cert.der().clone()];
+    let private_key = PrivateKeyDer::Pkcs8(PrivatePkcs8KeyDer::from(server_key.serialize_der()));
 
     let server_config = tokio_rustls::rustls::ServerConfig::builder()
         .with_no_client_auth()

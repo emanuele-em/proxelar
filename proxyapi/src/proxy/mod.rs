@@ -2,6 +2,12 @@ mod dns;
 pub(crate) mod forward;
 mod http1;
 mod http2;
+#[cfg(feature = "http3")]
+#[allow(
+    dead_code,
+    reason = "the feature-gated H3 core is activated by the reverse and WireGuard layers"
+)]
+mod http3;
 mod outbound;
 mod raw;
 pub(crate) mod reverse;

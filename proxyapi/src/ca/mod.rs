@@ -1,29 +1,18 @@
 pub mod cert_server;
 
-use std::{
-    path::Path,
-    sync::Arc,
-    time::{Duration, SystemTime},
-};
+use std::{path::Path, sync::Arc, time::Duration};
 
 use async_trait::async_trait;
 use bytes::Bytes;
 use http::uri::Authority;
 use moka::future::Cache;
-use openssl::{
-    asn1::{Asn1Integer, Asn1Time},
-    bn::BigNum,
-    ec::{EcGroup, EcKey},
-    hash::MessageDigest,
-    nid::Nid,
-    pkey::{PKey, Private},
-    rand,
-    x509::{
-        extension::{BasicConstraints, KeyUsage, SubjectAlternativeName},
-        X509Builder, X509NameBuilder, X509,
-    },
+use rcgen::{
+    BasicConstraints, CertificateParams, DnType, ExtendedKeyUsagePurpose, IsCa, Issuer, KeyPair,
+    KeyUsagePurpose,
 };
+use rustls_pki_types::pem::PemObject as _;
 use rustls_pki_types::{CertificateDer, PrivateKeyDer, PrivatePkcs8KeyDer};
+use time::{Duration as TimeDuration, OffsetDateTime};
 use tokio_rustls::rustls::ServerConfig;
 
 const TTL_SECS: i64 = 365 * 24 * 60 * 60;
@@ -39,13 +28,45 @@ pub trait CertificateAuthority: Send + Sync + 'static {
     ) -> Result<Arc<ServerConfig>, crate::error::Error>;
 }
 
+#[cfg(feature = "http3")]
+#[derive(Clone, Debug)]
+#[allow(
+    dead_code,
+    reason = "consumed by the reverse HTTP/3 listener introduced in the next activation layer"
+)]
+pub(crate) struct H3Certificate {
+    pub(crate) certificate_pem: Bytes,
+    pub(crate) private_key_pem: Bytes,
+}
+
+struct GeneratedCertificate {
+    certificate: CertificateDer<'static>,
+    private_key_der: Vec<u8>,
+    #[cfg(feature = "http3")]
+    #[allow(
+        dead_code,
+        reason = "consumed by the reverse HTTP/3 listener introduced in the next activation layer"
+    )]
+    certificate_pem: Bytes,
+    #[cfg(feature = "http3")]
+    #[allow(
+        dead_code,
+        reason = "consumed by the reverse HTTP/3 listener introduced in the next activation layer"
+    )]
+    private_key_pem: Bytes,
+}
+
 #[derive(Clone)]
 pub struct Ssl {
-    pkey: PKey<Private>,
-    ca_cert: X509,
+    issuer: Arc<Issuer<'static, KeyPair>>,
     ca_cert_pem: Bytes,
-    hash: MessageDigest,
     cache: Cache<Authority, Arc<ServerConfig>>,
+    #[cfg(feature = "http3")]
+    #[allow(
+        dead_code,
+        reason = "consumed by the reverse HTTP/3 listener introduced in the next activation layer"
+    )]
+    h3_cache: Cache<Authority, Arc<H3Certificate>>,
 }
 
 impl Ssl {
@@ -55,47 +76,43 @@ impl Ssl {
         let cert_path = dir.join("proxelar-ca.pem");
         let key_path = dir.join("proxelar-ca.key");
 
-        let (pkey, ca_cert) = if cert_path.exists() && key_path.exists() {
+        let (issuer, ca_cert_pem) = if cert_path.exists() && key_path.exists() {
             tracing::info!("Loading CA certificate from {}", dir.display());
             let key_pem = std::fs::read(&key_path)?;
             let cert_pem = std::fs::read(&cert_path)?;
-            let pkey = PKey::private_key_from_pem(&key_pem)?;
-            let ca_cert = X509::from_pem(&cert_pem)?;
+            verify_certificate_key_pair(&cert_pem, &key_pem)?;
 
-            // Verify the loaded key matches the certificate
-            if !ca_cert.public_key()?.public_eq(&pkey) {
-                return Err(crate::error::Error::Other(
-                    "CA certificate does not match private key".into(),
-                ));
-            }
-
-            (pkey, ca_cert)
+            let key_pem_str = std::str::from_utf8(&key_pem)
+                .map_err(|error| crate::error::Error::Other(error.to_string()))?;
+            let cert_pem_str = std::str::from_utf8(&cert_pem)
+                .map_err(|error| crate::error::Error::Other(error.to_string()))?;
+            let key_pair = KeyPair::from_pem(key_pem_str)?;
+            let issuer = Issuer::from_ca_cert_pem(cert_pem_str, key_pair)?;
+            (issuer, Bytes::from(cert_pem))
         } else {
             tracing::info!("Generating new CA certificate in {}", dir.display());
-            let (pkey, ca_cert) = generate_ca()?;
+            let (issuer, cert_pem, key_pem) = generate_ca()?;
 
-            let key_pem = pkey.private_key_to_pem_pkcs8()?;
-            let cert_pem = ca_cert.to_pem()?;
-
-            std::fs::write(&key_path, &key_pem)?;
+            std::fs::write(&key_path, key_pem.as_bytes())?;
             #[cfg(unix)]
             {
                 use std::os::unix::fs::PermissionsExt;
                 std::fs::set_permissions(&key_path, std::fs::Permissions::from_mode(0o600))?;
             }
-            std::fs::write(&cert_path, &cert_pem)?;
+            std::fs::write(&cert_path, cert_pem.as_bytes())?;
 
-            (pkey, ca_cert)
+            (issuer, Bytes::from(cert_pem))
         };
 
-        let ca_cert_pem = Bytes::from(ca_cert.to_pem()?);
-
         Ok(Self {
-            pkey,
-            ca_cert,
+            issuer: Arc::new(issuer),
             ca_cert_pem,
-            hash: MessageDigest::sha256(),
             cache: Cache::builder()
+                .max_capacity(1_000)
+                .time_to_live(Duration::from_secs(CACHE_TTL))
+                .build(),
+            #[cfg(feature = "http3")]
+            h3_cache: Cache::builder()
                 .max_capacity(1_000)
                 .time_to_live(Duration::from_secs(CACHE_TTL))
                 .build(),
@@ -106,99 +123,108 @@ impl Ssl {
         self.ca_cert_pem.clone()
     }
 
-    fn gen_cert(
+    fn gen_cert(&self, authority: &Authority) -> Result<GeneratedCertificate, crate::error::Error> {
+        let host = authority.host();
+        let mut params = CertificateParams::new(vec![host.to_owned()])?;
+        params.distinguished_name.push(DnType::CommonName, host);
+        params.use_authority_key_identifier_extension = true;
+        params.key_usages.push(KeyUsagePurpose::DigitalSignature);
+        params
+            .extended_key_usages
+            .push(ExtendedKeyUsagePurpose::ServerAuth);
+        params.not_before = OffsetDateTime::now_utc()
+            .checked_sub(TimeDuration::seconds(NOT_BEFORE_OFFSET))
+            .ok_or_else(|| crate::error::Error::Other("certificate validity underflow".into()))?;
+        params.not_after = params
+            .not_before
+            .checked_add(TimeDuration::seconds(TTL_SECS))
+            .ok_or_else(|| crate::error::Error::Other("certificate validity overflow".into()))?;
+
+        // Every leaf gets its own key. Reusing the CA key would expose the root
+        // of trust to every endpoint handshake.
+        let leaf_key = KeyPair::generate()?;
+        let certificate = params.signed_by(&leaf_key, self.issuer.as_ref())?;
+        let private_key_der = leaf_key.serialize_der();
+
+        Ok(GeneratedCertificate {
+            certificate: certificate.der().clone(),
+            private_key_der,
+            #[cfg(feature = "http3")]
+            certificate_pem: Bytes::from(certificate.pem()),
+            #[cfg(feature = "http3")]
+            private_key_pem: Bytes::from(leaf_key.serialize_pem()),
+        })
+    }
+
+    #[cfg(feature = "http3")]
+    #[allow(
+        dead_code,
+        reason = "consumed by the reverse HTTP/3 listener introduced in the next activation layer"
+    )]
+    pub(crate) async fn gen_h3_certificate(
         &self,
         authority: &Authority,
-    ) -> Result<(CertificateDer<'static>, PrivateKeyDer<'static>), crate::error::Error> {
-        // Every leaf gets its own P-256 key. Reusing the CA private key as the
-        // server key would unnecessarily expose the root of trust to every TLS
-        // handshake and makes key rotation/auditing much harder.
-        let group = EcGroup::from_curve_name(Nid::X9_62_PRIME256V1)?;
-        let leaf_key = PKey::from_ec_key(EcKey::generate(&group)?)?;
-        let mut name_builder = X509NameBuilder::new()?;
-        name_builder.append_entry_by_text("CN", authority.host())?;
-        let name = name_builder.build();
-
-        let mut x509_builder = X509Builder::new()?;
-        x509_builder.set_subject_name(&name)?;
-        x509_builder.set_version(2)?;
-
-        let not_before = SystemTime::now()
-            .duration_since(SystemTime::UNIX_EPOCH)?
-            .as_secs() as i64
-            - NOT_BEFORE_OFFSET;
-        x509_builder.set_not_before(Asn1Time::from_unix(not_before)?.as_ref())?;
-        x509_builder.set_not_after(Asn1Time::from_unix(not_before + TTL_SECS)?.as_ref())?;
-
-        x509_builder.set_pubkey(&leaf_key)?;
-        x509_builder.set_issuer_name(self.ca_cert.subject_name())?;
-
-        let mut alternative_names = SubjectAlternativeName::new();
-        if authority.host().parse::<std::net::IpAddr>().is_ok() {
-            alternative_names.ip(authority.host());
-        } else {
-            alternative_names.dns(authority.host());
+    ) -> Result<Arc<H3Certificate>, crate::error::Error> {
+        if let Some(certificate) = self.h3_cache.get(authority).await {
+            return Ok(certificate);
         }
-        let alternative_name =
-            alternative_names.build(&x509_builder.x509v3_context(Some(&self.ca_cert), None))?;
-        x509_builder.append_extension(alternative_name)?;
 
-        let mut serial_number = [0; 16];
-        rand::rand_bytes(&mut serial_number)?;
-
-        let serial_number = BigNum::from_slice(&serial_number)?;
-        let serial_number = Asn1Integer::from_bn(&serial_number)?;
-        x509_builder.set_serial_number(&serial_number)?;
-
-        x509_builder.sign(&self.pkey, self.hash)?;
-        let x509 = x509_builder.build();
-        let key = PrivateKeyDer::Pkcs8(PrivatePkcs8KeyDer::from(leaf_key.private_key_to_pkcs8()?));
-        Ok((CertificateDer::from(x509.to_der()?), key))
+        let generated = self.gen_cert(authority)?;
+        let certificate = Arc::new(H3Certificate {
+            certificate_pem: generated.certificate_pem,
+            private_key_pem: generated.private_key_pem,
+        });
+        self.h3_cache
+            .insert(authority.clone(), Arc::clone(&certificate))
+            .await;
+        Ok(certificate)
     }
 }
 
-fn generate_ca() -> Result<(PKey<Private>, X509), crate::error::Error> {
-    let rsa = openssl::rsa::Rsa::generate(4096)?;
-    let pkey = PKey::from_rsa(rsa)?;
+fn verify_certificate_key_pair(
+    certificate_pem: &[u8],
+    private_key_pem: &[u8],
+) -> Result<(), crate::error::Error> {
+    let certificate = CertificateDer::from_pem_slice(certificate_pem)
+        .map_err(|error| crate::error::Error::Other(error.to_string()))?;
+    let private_key = PrivateKeyDer::from_pem_slice(private_key_pem)
+        .map_err(|error| crate::error::Error::Other(error.to_string()))?;
+    let provider = rustls::crypto::ring::default_provider();
+    rustls::sign::CertifiedKey::from_der(vec![certificate], private_key, &provider)?;
+    Ok(())
+}
 
-    let mut name_builder = X509NameBuilder::new()?;
-    name_builder.append_entry_by_text("CN", "proxelar")?;
-    name_builder.append_entry_by_text("O", "Proxelar")?;
-    let name = name_builder.build();
+fn generate_ca() -> Result<(Issuer<'static, KeyPair>, String, String), crate::error::Error> {
+    let mut params = CertificateParams::new(Vec::<String>::new())?;
+    params.is_ca = IsCa::Ca(BasicConstraints::Unconstrained);
+    params
+        .distinguished_name
+        .push(DnType::CommonName, "proxelar");
+    params
+        .distinguished_name
+        .push(DnType::OrganizationName, "Proxelar");
+    params.key_usages = vec![
+        KeyUsagePurpose::DigitalSignature,
+        KeyUsagePurpose::KeyCertSign,
+        KeyUsagePurpose::CrlSign,
+    ];
+    params.not_before = OffsetDateTime::now_utc()
+        .checked_sub(TimeDuration::seconds(NOT_BEFORE_OFFSET))
+        .ok_or_else(|| crate::error::Error::Other("CA validity underflow".into()))?;
+    params.not_after = params
+        .not_before
+        .checked_add(TimeDuration::seconds(CA_TTL_SECS))
+        .ok_or_else(|| crate::error::Error::Other("CA validity overflow".into()))?;
 
-    let mut builder = X509Builder::new()?;
-    builder.set_version(2)?;
-    builder.set_subject_name(&name)?;
-    builder.set_issuer_name(&name)?;
-    builder.set_pubkey(&pkey)?;
-
-    let not_before = SystemTime::now()
-        .duration_since(SystemTime::UNIX_EPOCH)?
-        .as_secs() as i64
-        - NOT_BEFORE_OFFSET;
-    builder.set_not_before(Asn1Time::from_unix(not_before)?.as_ref())?;
-    builder.set_not_after(Asn1Time::from_unix(not_before + CA_TTL_SECS)?.as_ref())?;
-
-    let mut serial_number = [0; 16];
-    rand::rand_bytes(&mut serial_number)?;
-    let serial_number = BigNum::from_slice(&serial_number)?;
-    let serial_number = Asn1Integer::from_bn(&serial_number)?;
-    builder.set_serial_number(&serial_number)?;
-
-    let basic_constraints = BasicConstraints::new().critical().ca().build()?;
-    builder.append_extension(basic_constraints)?;
-
-    let key_usage = KeyUsage::new()
-        .critical()
-        .key_cert_sign()
-        .crl_sign()
-        .build()?;
-    builder.append_extension(key_usage)?;
-
-    builder.sign(&pkey, MessageDigest::sha512())?;
-    let cert = builder.build();
-
-    Ok((pkey, cert))
+    let key_pair = KeyPair::generate()?;
+    let certificate = params.self_signed(&key_pair)?;
+    let certificate_pem = certificate.pem();
+    let private_key_pem = key_pair.serialize_pem();
+    Ok((
+        Issuer::new(params, key_pair),
+        certificate_pem,
+        private_key_pem,
+    ))
 }
 
 #[async_trait]
@@ -213,21 +239,18 @@ impl CertificateAuthority for Ssl {
         }
         tracing::debug!("Generating server config for {authority}");
 
-        let (certificate, private_key) = self.gen_cert(authority)?;
-        let certs = vec![certificate];
-
+        let generated = self.gen_cert(authority)?;
+        let private_key = PrivateKeyDer::Pkcs8(PrivatePkcs8KeyDer::from(generated.private_key_der));
         let mut server_cfg = ServerConfig::builder()
             .with_no_client_auth()
-            .with_single_cert(certs, private_key)?;
+            .with_single_cert(vec![generated.certificate], private_key)?;
 
         server_cfg.alpn_protocols = vec![b"h2".to_vec(), b"http/1.1".to_vec()];
-
         let server_cfg = Arc::new(server_cfg);
 
         self.cache
             .insert(authority.clone(), Arc::clone(&server_cfg))
             .await;
-
         Ok(server_cfg)
     }
 }
@@ -242,28 +265,56 @@ mod tests {
         let ssl = Ssl::load_or_generate(directory.path()).unwrap();
         let authority: Authority = "api.example.test:443".parse().unwrap();
 
-        let (certificate, private_key) = ssl.gen_cert(&authority).unwrap();
-        let leaf = X509::from_der(certificate.as_ref()).unwrap();
-        let leaf_key = PKey::private_key_from_pkcs8(private_key.secret_der()).unwrap();
-        let leaf_public = leaf.public_key().unwrap();
+        let first = ssl.gen_cert(&authority).unwrap();
+        let second = ssl.gen_cert(&authority).unwrap();
+        let provider = rustls::crypto::ring::default_provider();
+        let key = PrivateKeyDer::Pkcs8(PrivatePkcs8KeyDer::from(first.private_key_der.clone()));
+        rustls::sign::CertifiedKey::from_der(vec![first.certificate], key, &provider).unwrap();
 
-        assert!(leaf_public.public_eq(&leaf_key));
-        assert!(!leaf_public.public_eq(&ssl.pkey));
+        assert_ne!(first.private_key_der, second.private_key_der);
     }
 
     #[test]
     fn minted_ip_leaf_uses_an_ip_subject_alternative_name() {
+        use x509_parser::extensions::GeneralName;
+
         let directory = tempfile::tempdir().unwrap();
         let ssl = Ssl::load_or_generate(directory.path()).unwrap();
         let authority: Authority = "127.0.0.1:443".parse().unwrap();
 
-        let (certificate, _) = ssl.gen_cert(&authority).unwrap();
-        let leaf = X509::from_der(certificate.as_ref()).unwrap();
-        let names = leaf.subject_alt_names().unwrap();
+        let generated = ssl.gen_cert(&authority).unwrap();
+        let (_, leaf) =
+            x509_parser::parse_x509_certificate(generated.certificate.as_ref()).unwrap();
+        let names = leaf.subject_alternative_name().unwrap().unwrap();
 
         assert!(names
+            .value
+            .general_names
             .iter()
-            .any(|name| name.ipaddress() == Some([127, 0, 0, 1].as_slice())));
-        assert!(names.iter().all(|name| name.dnsname().is_none()));
+            .any(|name| matches!(name, GeneralName::IPAddress(bytes) if *bytes == [127, 0, 0, 1])));
+        assert!(names
+            .value
+            .general_names
+            .iter()
+            .all(|name| !matches!(name, GeneralName::DNSName(_))));
+    }
+
+    #[cfg(feature = "http3")]
+    #[tokio::test]
+    async fn h3_certificate_material_is_cached_as_pem() {
+        let directory = tempfile::tempdir().unwrap();
+        let ssl = Ssl::load_or_generate(directory.path()).unwrap();
+        let authority: Authority = "api.example.test:443".parse().unwrap();
+
+        let first = ssl.gen_h3_certificate(&authority).await.unwrap();
+        let second = ssl.gen_h3_certificate(&authority).await.unwrap();
+
+        assert!(Arc::ptr_eq(&first, &second));
+        assert!(first
+            .certificate_pem
+            .starts_with(b"-----BEGIN CERTIFICATE-----"));
+        assert!(first
+            .private_key_pem
+            .starts_with(b"-----BEGIN PRIVATE KEY-----"));
     }
 }

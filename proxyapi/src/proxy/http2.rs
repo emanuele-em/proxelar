@@ -342,7 +342,7 @@ async fn handle_extended_websocket(
         request.head.headers.remove(name);
     }
     let mut nonce = [0_u8; 16];
-    if let Err(error) = openssl::rand::rand_bytes(&mut nonce) {
+    if let Err(error) = getrandom::fill(&mut nonce) {
         return Err(ProtocolError::new(ErrorKind::Io, error.to_string()));
     }
     set_header(&mut request.head.headers, "connection", "Upgrade")?;
