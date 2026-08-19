@@ -16,7 +16,8 @@ use proxyapi_models::{HeaderBlock, HeaderField};
 use crate::{ErrorKind, ProtocolError, RequestHead, ResponseHead};
 
 pub use connection::{
-    body_tunnel, serve_connection, ConnectionConfig, H2Client, H2Connector, H2Pool, H2PoolKey,
+    body_tunnel, serve_connection, websocket_body_tunnel, ConnectionConfig, H2Client, H2Connector,
+    H2Pool, H2PoolKey,
 };
 
 const CONNECTION_SPECIFIC: [&[u8]; 5] = [

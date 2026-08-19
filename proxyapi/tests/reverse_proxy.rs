@@ -1,4 +1,5 @@
 use bytes::Bytes;
+use futures_util::{SinkExt as _, StreamExt as _};
 use http_body_util::{BodyExt, Full};
 use hyper::body::Incoming;
 use hyper::service::service_fn;
@@ -12,6 +13,8 @@ use std::net::SocketAddr;
 use std::sync::Arc;
 use tokio::net::TcpListener;
 use tokio::sync::mpsc;
+use tokio_tungstenite::tungstenite::{protocol::Role, Message};
+use tokio_tungstenite::WebSocketStream;
 
 const EVENT_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(10);
 
@@ -508,6 +511,134 @@ async fn reverse_https_negotiates_h2_with_the_upstream() {
             .unwrap_or_else(|error| error.into_inner()),
         expected_offers
     );
+
+    drop(sender);
+    let _ = shutdown_tx.send(());
+    let _ = upstream_shutdown.send(());
+    assert!(proxy_task.await.unwrap().is_ok());
+    connection_task.abort();
+}
+
+#[tokio::test]
+async fn reverse_https_proxies_rfc8441_to_an_h2_upstream() {
+    use rustls::pki_types::pem::PemObject as _;
+    use rustls::pki_types::{CertificateDer, ServerName};
+    use tokio_rustls::TlsConnector;
+
+    let _ = rustls::crypto::ring::default_provider().install_default();
+    let (upstream_addr, upstream_shutdown, _ca_pem, _upstream_offers) =
+        start_private_ca_https_upstream(true).await;
+    let proxy_addr = reserve_loopback_addr().await;
+    let ca_dir = tempfile::tempdir().unwrap();
+    let (event_tx, mut event_rx) = mpsc::channel::<ProxyEvent>(32);
+    let proxy = Proxy::new(ProxyConfig {
+        addr: proxy_addr,
+        mode: ProxyMode::Reverse {
+            target: format!("https://{upstream_addr}").parse().unwrap(),
+        },
+        event_tx,
+        ca_dir: ca_dir.path().to_path_buf(),
+        upstream_tls: UpstreamTlsConfig::Insecure,
+        intercept: None,
+        body_capture_limit: DEFAULT_BODY_CAPTURE_LIMIT,
+        #[cfg(feature = "scripting")]
+        script_path: None,
+        replay_rx: None,
+    });
+    let (shutdown_tx, shutdown_rx) = tokio::sync::oneshot::channel();
+    let proxy_task = tokio::spawn(async move {
+        proxy
+            .start(async {
+                shutdown_rx.await.ok();
+            })
+            .await
+    });
+    wait_for_tcp(proxy_addr).await;
+
+    let proxy_ca = std::fs::read(ca_dir.path().join("proxelar-ca.pem")).unwrap();
+    let mut roots = rustls::RootCertStore::empty();
+    roots
+        .add(CertificateDer::from_pem_slice(&proxy_ca).unwrap())
+        .unwrap();
+    let mut client_config = rustls::ClientConfig::builder()
+        .with_root_certificates(roots)
+        .with_no_client_auth();
+    client_config.alpn_protocols = vec![b"h2".to_vec(), b"http/1.1".to_vec()];
+    let tcp = tokio::net::TcpStream::connect(proxy_addr).await.unwrap();
+    let tls = TlsConnector::from(Arc::new(client_config))
+        .connect(ServerName::try_from("127.0.0.1").unwrap(), tcp)
+        .await
+        .unwrap();
+    let (mut sender, connection) = hyper::client::conn::http2::Builder::new(TokioExecutor::new())
+        .handshake(TokioIo::new(tls))
+        .await
+        .unwrap();
+    let connection_task = tokio::spawn(connection);
+
+    let ordinary = Request::builder()
+        .uri(format!("https://{proxy_addr}/ready"))
+        .body(Full::new(Bytes::new()))
+        .unwrap();
+    assert_eq!(
+        sender.send_request(ordinary).await.unwrap().status(),
+        http::StatusCode::CREATED
+    );
+
+    let mut request = Request::builder()
+        .method(http::Method::CONNECT)
+        .version(http::Version::HTTP_2)
+        .uri(format!("https://{proxy_addr}/chat"))
+        .header("sec-websocket-version", "13")
+        .header("sec-websocket-protocol", "chat")
+        .body(Full::new(Bytes::new()))
+        .unwrap();
+    request
+        .extensions_mut()
+        .insert(hyper::ext::Protocol::from_static("websocket"));
+    let response = sender.send_request(request).await.unwrap();
+    assert_eq!(response.status(), http::StatusCode::OK);
+    assert_eq!(response.headers()["sec-websocket-protocol"], "chat");
+
+    let upgraded = hyper::upgrade::on(response).await.unwrap();
+    let mut websocket =
+        WebSocketStream::from_raw_socket(TokioIo::new(upgraded), Role::Client, None).await;
+    websocket
+        .send(Message::Text("through-h2".into()))
+        .await
+        .unwrap();
+    assert_eq!(
+        websocket.next().await.unwrap().unwrap(),
+        Message::Text("through-h2".into())
+    );
+    websocket.close(None).await.unwrap();
+
+    let mut connected = false;
+    let mut client_frame = false;
+    let mut server_frame = false;
+    tokio::time::timeout(EVENT_TIMEOUT, async {
+        while !(connected && client_frame && server_frame) {
+            match event_rx.recv().await.unwrap() {
+                ProxyEvent::WebSocketConnected {
+                    request, response, ..
+                } => {
+                    connected = true;
+                    assert_eq!(request.uri().path(), "/chat");
+                    assert_eq!(response.version(), http::Version::HTTP_2);
+                }
+                ProxyEvent::WebSocketFrame { frame, .. } => match frame.direction {
+                    proxyapi_models::WsDirection::ClientToServer => {
+                        client_frame |= frame.payload.as_ref() == b"through-h2";
+                    }
+                    proxyapi_models::WsDirection::ServerToClient => {
+                        server_frame |= frame.payload.as_ref() == b"through-h2";
+                    }
+                },
+                _ => {}
+            }
+        }
+    })
+    .await
+    .unwrap();
 
     drop(sender);
     let _ = shutdown_tx.send(());
@@ -1045,13 +1176,19 @@ async fn start_private_ca_https_upstream(
                         let Ok(stream) = acceptor.accept(stream).await else {
                             return;
                         };
-                        let io = TokioIo::new(stream);
-                        let service = service_fn(upstream_response);
                         if h2 {
-                            let _ = hyper::server::conn::http2::Builder::new(TokioExecutor::new())
-                                .serve_connection(io, service)
-                                .await;
+                            let _ = proxelar_proto::http2::serve_connection(
+                                stream,
+                                ReverseH2Upstream,
+                                proxelar_proto::http2::ConnectionConfig {
+                                    enable_extended_connect: true,
+                                    ..proxelar_proto::http2::ConnectionConfig::default()
+                                },
+                            )
+                            .await;
                         } else {
+                            let io = TokioIo::new(stream);
+                            let service = service_fn(upstream_response);
                             let _ = hyper::server::conn::http1::Builder::new()
                                 .serve_connection(io, service)
                                 .await;
@@ -1064,6 +1201,60 @@ async fn start_private_ca_https_upstream(
     });
 
     (addr, shutdown_tx, ca_pem, offered_alpn)
+}
+
+#[derive(Clone)]
+struct ReverseH2Upstream;
+
+impl proxelar_proto::HttpService for ReverseH2Upstream {
+    fn call(
+        &mut self,
+        request: proxyapi::ProxyRequest,
+    ) -> proxelar_proto::BoxFuture<'_, Result<proxyapi::ProxyResponse, proxyapi::ProtocolError>>
+    {
+        Box::pin(async move {
+            if request.head.method == http::Method::CONNECT
+                && request.head.headers.get(":protocol") == Some(b"websocket".as_slice())
+            {
+                let (tunnel, body) = proxelar_proto::http2::body_tunnel(request.body, 64 * 1024);
+                tokio::spawn(async move {
+                    let mut websocket =
+                        WebSocketStream::from_raw_socket(tunnel, Role::Server, None).await;
+                    while let Some(Ok(message)) = websocket.next().await {
+                        let close = message.is_close();
+                        if websocket.send(message).await.is_err() || close {
+                            break;
+                        }
+                    }
+                });
+                let mut headers = proxyapi_models::HeaderBlock::new();
+                if let Some(protocol) = request.head.headers.get("sec-websocket-protocol") {
+                    headers.add("sec-websocket-protocol", protocol).unwrap();
+                }
+                return Ok(proxyapi::ProxyResponse::new(
+                    proxyapi::ResponseHead::new(
+                        http::StatusCode::OK,
+                        http::Version::HTTP_2,
+                        headers,
+                    ),
+                    body,
+                ));
+            }
+
+            let mut headers = proxyapi_models::HeaderBlock::new();
+            headers
+                .add("x-upstream-path", request.head.uri.path())
+                .unwrap();
+            Ok(proxyapi::ProxyResponse::new(
+                proxyapi::ResponseHead::new(
+                    http::StatusCode::CREATED,
+                    http::Version::HTTP_2,
+                    headers,
+                ),
+                proxyapi::ProxyBody::full(Bytes::from_static(b"upstream response")),
+            ))
+        })
+    }
 }
 
 #[derive(Debug)]
