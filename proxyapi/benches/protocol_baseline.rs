@@ -18,8 +18,9 @@ use hyper::body::Frame;
 use hyper::service::service_fn;
 use hyper::{Request, Response};
 use hyper_util::rt::{TokioExecutor, TokioIo};
-use openssl::x509::X509;
 use proxyapi::ca::{CertificateAuthority, Ssl};
+use rustls::pki_types::pem::PemObject as _;
+use rustls::pki_types::CertificateDer;
 use rustls::pki_types::ServerName;
 use rustls::{ClientConfig, RootCertStore};
 use serde::Serialize;
@@ -476,9 +477,9 @@ async fn tls_pair(
     };
     server_config.alpn_protocols = vec![alpn.to_vec()];
 
-    let certificate = X509::from_pem(&ca.ca_cert_pem())?;
+    let certificate = CertificateDer::from_pem_slice(&ca.ca_cert_pem())?;
     let mut roots = RootCertStore::empty();
-    roots.add(certificate.to_der()?.into())?;
+    roots.add(certificate)?;
     let mut client_config = ClientConfig::builder()
         .with_root_certificates(roots)
         .with_no_client_auth();

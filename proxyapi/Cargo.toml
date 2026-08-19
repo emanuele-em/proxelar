@@ -16,6 +16,7 @@ keywords = ["proxy", "mitm", "http", "https", "lua"]
 [features]
 default = []
 scripting = ["dep:mlua", "dep:semver", "dep:sha2"]
+http3 = ["dep:tokio-quiche"]
 # Statically link a vendored Lua 5.4.
 vendored-lua = ["mlua?/vendored"]
 
@@ -34,7 +35,9 @@ tokio-rustls = "0.26"
 rustls = { version = "0.23", default-features = false, features = ["ring", "logging", "std", "tls12"] }
 rustls-pki-types = "1.14"
 webpki-roots = "1.0"
-openssl = { version = "0.10.80", features = ["vendored"] }
+rcgen = { version = "0.14.9", default-features = false, features = ["pem", "ring", "x509-parser"] }
+getrandom = "0.3"
+time = "0.3"
 moka = { version = "0.12", features = ["future"] }
 tokio = { version = "1.52", features = ["rt", "net", "io-util", "macros", "sync", "time", "fs"] }
 tokio-util = { version = "0.7", features = ["rt"] }
@@ -54,6 +57,7 @@ boringtun = { version = "0.7.1", default-features = false }
 netstack-smoltcp = "0.2.4"
 proxyapi_models = { version = "0.5.1", path = "../proxyapi_models" }
 proxelar-proto = { path = "../proxelar-proto" }
+tokio-quiche = { version = "0.19.1", default-features = false, optional = true }
 
 [dev-dependencies]
 tokio = { version = "1.52", features = ["full"] }
@@ -64,6 +68,7 @@ reqwest = { version = "0.13", features = ["rustls"] }
 rustls = { version = "0.23", features = ["ring"] }
 tempfile = "3"
 stats_alloc = "0.1"
+x509-parser = "0.18"
 
 [[bench]]
 name = "protocol_baseline"

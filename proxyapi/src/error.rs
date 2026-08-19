@@ -9,9 +9,9 @@ pub enum Error {
     /// TLS configuration or handshake error.
     #[error("tls: {0}")]
     Tls(#[from] tokio_rustls::rustls::Error),
-    /// OpenSSL certificate generation/parsing error.
+    /// Certificate generation/parsing error.
     #[error("certificate: {0}")]
-    Certificate(#[from] openssl::error::ErrorStack),
+    Certificate(#[from] rcgen::Error),
     /// System clock error.
     #[error("time: {0}")]
     Time(#[from] std::time::SystemTimeError),
