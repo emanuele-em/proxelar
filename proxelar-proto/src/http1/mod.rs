@@ -4,10 +4,16 @@
 //! bytes arrive. A complete parse reports the exact number of consumed bytes,
 //! leaving pipelined messages untouched for the connection driver.
 
+mod framing;
 mod parser;
+mod serialize;
 mod validation;
 
+pub use framing::{
+    BodyDecodeStatus, BodyDecoder, BodyDecoderLimits, BodyFraming, DecodedBodyFrame,
+};
 pub use parser::{
     HeadParser, HeadParserLimits, ParseStatus, ParsedRequestHead, ParsedResponseHead,
 };
+pub use serialize::{encode_request_head, encode_response_head, BodyEncoder};
 pub use validation::{HeaderSemantics, Http1Error, Http1ErrorKind};
