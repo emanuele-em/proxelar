@@ -8,7 +8,7 @@ function on_request(request)
 end
 
 function on_response(request, response)
-    local ct = response.headers["content-type"] or "unknown"
+    local ct = response.headers:get("content-type") or "unknown"
     local size = #response.body
     print(string.format("[RES] %s %s -> %d (%s, %d bytes)",
         request.method, request.url, response.status, ct, size))

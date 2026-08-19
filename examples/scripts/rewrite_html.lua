@@ -4,7 +4,7 @@
 -- Usage: proxelar --script examples/scripts/rewrite_html.lua
 
 function on_response(request, response)
-    local ct = response.headers["content-type"] or ""
+    local ct = response.headers:get("content-type") or ""
     if not string.find(ct, "text/html") then return end
 
     local banner = '<div style="position:fixed;top:0;left:0;right:0;background:#ff6b35;'
