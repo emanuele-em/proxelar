@@ -63,3 +63,8 @@ tokio = { version = "1.52", features = ["full"] }
 reqwest = { version = "0.13", features = ["rustls"] }
 rustls = { version = "0.23", features = ["ring"] }
 tempfile = "3"
+stats_alloc = "0.1"
+
+[[bench]]
+name = "protocol_baseline"
+harness = false
