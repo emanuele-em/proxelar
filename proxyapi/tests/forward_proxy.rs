@@ -1,28 +1,39 @@
-use bytes::Bytes;
-use futures_util::{SinkExt, StreamExt};
-use http_body_util::{BodyExt, Full};
-use hyper::body::Incoming;
-use hyper::service::service_fn;
-use hyper::{Request, Response};
-use hyper_util::rt::{TokioExecutor, TokioIo};
+use std::convert::Infallible;
+use std::net::SocketAddr;
+use std::sync::Arc;
+
 use proxyapi::{
-    Proxy, ProxyConfig, ProxyEvent, ProxyMode, UpstreamTlsConfig, DEFAULT_BODY_CAPTURE_LIMIT,
+    Proxy, ProxyConfig, ProxyEvent, ProxyMode, RouteRules, UpstreamHttpVersion, UpstreamTlsConfig,
+    DEFAULT_BODY_CAPTURE_LIMIT,
 };
 use proxyapi_models::ProxiedRequest;
-use std::net::SocketAddr;
+use rama::bytes::Bytes;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
-use tokio::net::{TcpListener, TcpStream};
+use tokio::net::TcpStream;
 use tokio::sync::mpsc;
-use tokio_tungstenite::tungstenite::protocol::Role;
-use tokio_tungstenite::tungstenite::Message;
-use tokio_tungstenite::WebSocketStream;
+
+use rama::extensions::ExtensionsRef;
+use rama::http::body::util::BodyExt;
+use rama::http::core::client::conn::http2;
+use rama::http::io::upgrade::handle_upgrade;
+use rama::http::server::HttpServer;
+use rama::http::ws::handshake::server::{ServerWebSocket, WebSocketAcceptor};
+use rama::http::ws::protocol::Role;
+use rama::http::ws::{AsyncWebSocket, Message};
+use rama::http::{Body, HeaderMap, Method, Request, Response, StatusCode, Version};
+use rama::net::uri::Uri;
+use rama::net::AuthorityInputExt as _;
+use rama::rt::Executor;
+use rama::service::service_fn;
+use rama::tcp::server::TcpListener as RamaTcpListener;
+use rama::ServiceInput;
 
 const EVENT_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(10);
 
+type H2Sender = http2::SendRequest<Body>;
+
 #[tokio::test]
 async fn test_forward_proxy_starts_and_shuts_down() {
-    let _ = rustls::crypto::ring::default_provider().install_default();
-
     let addr = reserve_loopback_addr().await;
     let ca_dir = tempfile::tempdir().unwrap();
 
@@ -33,6 +44,7 @@ async fn test_forward_proxy_starts_and_shuts_down() {
         event_tx,
         ca_dir: ca_dir.path().to_path_buf(),
         upstream_tls: UpstreamTlsConfig::Default,
+        upstream_http_version: UpstreamHttpVersion::default(),
         intercept: None,
         body_capture_limit: DEFAULT_BODY_CAPTURE_LIMIT,
         #[cfg(feature = "scripting")]
@@ -61,7 +73,6 @@ async fn test_forward_proxy_starts_and_shuts_down() {
 
 #[tokio::test]
 async fn forward_proxy_forwards_absolute_http_and_emits_request_complete() {
-    let _ = rustls::crypto::ring::default_provider().install_default();
     let (upstream_addr, upstream_shutdown) = start_upstream_server().await;
     let (proxy_addr, shutdown_tx, handle, mut event_rx, _ca_dir) = start_forward_proxy().await;
 
@@ -93,16 +104,16 @@ async fn forward_proxy_forwards_absolute_http_and_emits_request_complete() {
         ProxyEvent::RequestComplete {
             request, response, ..
         } => {
-            assert_eq!(request.method(), http::Method::GET);
+            assert_eq!(request.method(), &Method::GET);
             assert_eq!(request.uri().scheme_str(), Some("http"));
             assert_eq!(
-                request.uri().authority().unwrap().as_str(),
+                request.uri().authority().unwrap().to_string(),
                 upstream_addr.to_string()
             );
-            assert_eq!(request.uri().path(), "/absolute");
-            assert_eq!(request.uri().query(), Some("via=proxy"));
+            assert_eq!(request.uri().path().unwrap(), "/absolute");
+            assert_eq!(request.uri().query().unwrap(), "via=proxy");
             assert_eq!(request.headers()["x-client-test"], "absolute-roundtrip");
-            assert_eq!(response.status(), http::StatusCode::OK);
+            assert_eq!(response.status(), StatusCode::OK);
             assert_eq!(response.body().as_ref(), b"forward response");
         }
         other => panic!("expected RequestComplete event, got {other:?}"),
@@ -114,23 +125,60 @@ async fn forward_proxy_forwards_absolute_http_and_emits_request_complete() {
 }
 
 #[tokio::test]
+async fn forward_proxy_routes_plain_http_through_configured_connect_proxy() {
+    let (upstream_addr, upstream_shutdown) = start_upstream_server().await;
+    let (chain_addr, observed_target, chain_shutdown) = start_http_connect_proxy().await;
+    let upstream_proxy = format!("http://{chain_addr}").parse().unwrap();
+    let (proxy_addr, shutdown_tx, handle, _event_rx, _ca_dir) =
+        start_forward_proxy_with_upstream(Some(upstream_proxy)).await;
+
+    let raw_response = send_raw_request(
+        proxy_addr,
+        format!(
+            "GET http://{upstream_addr}/through-connect-proxy HTTP/1.1\r\n\
+             Host: {upstream_addr}\r\n\
+             Connection: close\r\n\
+             \r\n"
+        ),
+    )
+    .await;
+
+    assert!(
+        raw_response.starts_with("HTTP/1.1 200 OK"),
+        "{raw_response}"
+    );
+    assert!(raw_response.ends_with("forward response"), "{raw_response}");
+    assert_eq!(
+        tokio::time::timeout(std::time::Duration::from_secs(5), observed_target)
+            .await
+            .expect("upstream proxy did not observe CONNECT")
+            .unwrap(),
+        upstream_addr.to_string()
+    );
+
+    let _ = shutdown_tx.send(());
+    let _ = chain_shutdown.send(());
+    let _ = upstream_shutdown.send(());
+    assert!(handle.await.unwrap().is_ok());
+}
+
+#[tokio::test]
 async fn forward_proxy_forwards_h2c_absolute_http_and_emits_http2_capture() {
-    let _ = rustls::crypto::ring::default_provider().install_default();
     let (upstream_addr, upstream_shutdown) = start_upstream_server().await;
     let (proxy_addr, shutdown_tx, handle, mut event_rx, _ca_dir) = start_forward_proxy().await;
 
     let mut sender = connect_h2(proxy_addr).await;
     let request = Request::builder()
-        .method(http::Method::GET)
-        .version(http::Version::HTTP_2)
+        .method(Method::GET)
+        .version(Version::HTTP_2)
         .uri(format!("http://{upstream_addr}/h2c?via=proxy"))
         .header("x-client-test", "h2c-absolute-roundtrip")
-        .body(Full::new(Bytes::new()))
+        .body(Body::empty())
         .unwrap();
     let response = sender.send_request(request).await.unwrap();
 
-    assert_eq!(response.version(), http::Version::HTTP_2);
-    assert_eq!(response.status(), http::StatusCode::OK);
+    assert_eq!(response.version(), Version::HTTP_2);
+    assert_eq!(response.status(), StatusCode::OK);
     assert_eq!(
         response.headers()["x-upstream-path-query"],
         "/h2c?via=proxy"
@@ -139,7 +187,7 @@ async fn forward_proxy_forwards_h2c_absolute_http_and_emits_http2_capture() {
         response.headers()["x-upstream-host"],
         upstream_addr.to_string()
     );
-    assert_eq!(response.headers()["x-upstream-version"], "HTTP/1.1");
+    assert_eq!(response.headers()["x-upstream-version"], "HTTP/2.0");
     assert_eq!(
         response
             .into_body()
@@ -155,15 +203,15 @@ async fn forward_proxy_forwards_h2c_absolute_http_and_emits_http2_capture() {
         ProxyEvent::RequestComplete {
             request, response, ..
         } => {
-            assert_eq!(request.version(), http::Version::HTTP_2);
+            assert_eq!(request.version(), Version::HTTP_2);
             assert_eq!(request.uri().scheme_str(), Some("http"));
             assert_eq!(
-                request.uri().authority().unwrap().as_str(),
+                request.uri().authority().unwrap().to_string(),
                 upstream_addr.to_string()
             );
-            assert_eq!(request.uri().path(), "/h2c");
+            assert_eq!(request.uri().path().unwrap(), "/h2c");
             assert_eq!(request.headers()["x-client-test"], "h2c-absolute-roundtrip");
-            assert_eq!(response.status(), http::StatusCode::OK);
+            assert_eq!(response.status(), StatusCode::OK);
             assert_eq!(response.body().as_ref(), b"forward response");
         }
         other => panic!("expected RequestComplete event, got {other:?}"),
@@ -176,7 +224,6 @@ async fn forward_proxy_forwards_h2c_absolute_http_and_emits_http2_capture() {
 
 #[tokio::test]
 async fn forward_proxy_connect_plain_http_reconstructs_uri_and_emits_request_complete() {
-    let _ = rustls::crypto::ring::default_provider().install_default();
     let (upstream_addr, upstream_shutdown) = start_upstream_server().await;
     let (proxy_addr, shutdown_tx, handle, mut event_rx, _ca_dir) = start_forward_proxy().await;
 
@@ -226,16 +273,16 @@ async fn forward_proxy_connect_plain_http_reconstructs_uri_and_emits_request_com
         ProxyEvent::RequestComplete {
             request, response, ..
         } => {
-            assert_eq!(request.method(), http::Method::GET);
+            assert_eq!(request.method(), &Method::GET);
             assert_eq!(request.uri().scheme_str(), Some("http"));
             assert_eq!(
-                request.uri().authority().unwrap().as_str(),
+                request.uri().authority().unwrap().to_string(),
                 upstream_addr.to_string()
             );
-            assert_eq!(request.uri().path(), "/tunneled");
-            assert_eq!(request.uri().query(), Some("via=connect"));
+            assert_eq!(request.uri().path().unwrap(), "/tunneled");
+            assert_eq!(request.uri().query().unwrap(), "via=connect");
             assert_eq!(request.headers()["x-client-test"], "connect-roundtrip");
-            assert_eq!(response.status(), http::StatusCode::OK);
+            assert_eq!(response.status(), StatusCode::OK);
             assert_eq!(response.body().as_ref(), b"forward response");
         }
         other => panic!("expected RequestComplete event, got {other:?}"),
@@ -247,39 +294,171 @@ async fn forward_proxy_connect_plain_http_reconstructs_uri_and_emits_request_com
 }
 
 #[tokio::test]
+async fn forward_proxy_routes_rewritten_tunnel_request_to_new_authority() {
+    let (original_addr, original_shutdown) = start_upstream_server().await;
+    let (mapped_addr, mapped_shutdown) = start_upstream_server().await;
+    let mut rules = RouteRules::default();
+    rules
+        .map_remote(
+            format!("http://{original_addr}/"),
+            format!("http://{mapped_addr}/"),
+        )
+        .unwrap();
+    let (proxy_addr, shutdown_tx, handle, _events, _ca_dir) =
+        start_forward_proxy_with_rules(rules).await;
+
+    let mut stream = TcpStream::connect(proxy_addr).await.unwrap();
+    write_connect(&mut stream, original_addr).await;
+    assert!(read_headers(&mut stream)
+        .await
+        .starts_with("HTTP/1.1 200 OK"));
+    stream
+        .write_all(
+            format!(
+                "GET /mapped HTTP/1.1\r\n\
+                 Host: {original_addr}\r\n\
+                 Connection: close\r\n\
+                 \r\n"
+            )
+            .as_bytes(),
+        )
+        .await
+        .unwrap();
+    let response = read_to_string_until_eof(&mut stream).await;
+    assert_response_header(&response, "x-upstream-host", &mapped_addr.to_string());
+
+    let _ = shutdown_tx.send(());
+    let _ = original_shutdown.send(());
+    let _ = mapped_shutdown.send(());
+    assert!(handle.await.unwrap().is_ok());
+}
+
+#[tokio::test]
+async fn forward_proxy_forced_http2_adapts_h1_tunnel() {
+    let (upstream_addr, upstream_shutdown) = start_upstream_server().await;
+    let (proxy_addr, shutdown_tx, handle, _event_rx, _ca_dir) =
+        start_forward_proxy_with_options(None, UpstreamHttpVersion::Http2).await;
+
+    let mut stream = TcpStream::connect(proxy_addr).await.unwrap();
+    write_connect(&mut stream, upstream_addr).await;
+    assert!(read_headers(&mut stream)
+        .await
+        .starts_with("HTTP/1.1 200 OK"));
+    stream
+        .write_all(
+            format!(
+                "GET /forced-h2 HTTP/1.1\r\n\
+                 Host: {upstream_addr}\r\n\
+                 Connection: close\r\n\
+                 \r\n"
+            )
+            .as_bytes(),
+        )
+        .await
+        .unwrap();
+
+    let response = read_to_string_until_eof(&mut stream).await;
+    assert!(response.starts_with("HTTP/1.1 200 OK"), "{response}");
+    assert_response_header(&response, "x-upstream-version", "HTTP/2.0");
+
+    let _ = shutdown_tx.send(());
+    let _ = upstream_shutdown.send(());
+    assert!(handle.await.unwrap().is_ok());
+}
+
+#[tokio::test]
+async fn forward_proxy_connect_plain_http_captures_long_method_request() {
+    // Regression: a request whose method token is >= 5 bytes (here DELETE) must
+    // still be routed to the HTTP MITM, not the raw byte tunnel. The raw
+    // fast-fail peeker runs first over the whole opener; a narrower peek window
+    // (e.g. only the bytes rama's 5-byte TLS peeker consumed) would hide the
+    // request-line space and misroute these methods to raw, silently dropping
+    // HTTP capture. A captured RequestComplete proves HTTP routing.
+    let (upstream_addr, upstream_shutdown) = start_upstream_server().await;
+    let (proxy_addr, shutdown_tx, handle, mut event_rx, _ca_dir) = start_forward_proxy().await;
+
+    let mut stream = TcpStream::connect(proxy_addr).await.unwrap();
+    stream
+        .write_all(
+            format!(
+                "CONNECT {upstream_addr} HTTP/1.1\r\n\
+                 Host: {upstream_addr}\r\n\
+                 \r\n"
+            )
+            .as_bytes(),
+        )
+        .await
+        .unwrap();
+    let connect_response = read_headers(&mut stream).await;
+    assert!(connect_response.starts_with("HTTP/1.1 200 OK"));
+
+    stream
+        .write_all(
+            format!(
+                "DELETE /resource/42 HTTP/1.1\r\n\
+                 Host: {upstream_addr}\r\n\
+                 Connection: close\r\n\
+                 \r\n"
+            )
+            .as_bytes(),
+        )
+        .await
+        .unwrap();
+    let raw_response = read_to_string_until_eof(&mut stream).await;
+    assert!(
+        raw_response.starts_with("HTTP/1.1 200 OK"),
+        "long-method request was not served as HTTP:\n{raw_response}"
+    );
+
+    match recv_request_complete(&mut event_rx).await {
+        ProxyEvent::RequestComplete {
+            request, response, ..
+        } => {
+            assert_eq!(request.method(), &Method::DELETE);
+            assert_eq!(request.uri().path().unwrap(), "/resource/42");
+            assert_eq!(response.status(), StatusCode::OK);
+        }
+        other => panic!("expected RequestComplete event, got {other:?}"),
+    }
+
+    let _ = shutdown_tx.send(());
+    let _ = upstream_shutdown.send(());
+    assert!(handle.await.unwrap().is_ok());
+}
+
+#[tokio::test]
 async fn forward_proxy_h2_connect_tunnels_h2c_requests() {
-    let _ = rustls::crypto::ring::default_provider().install_default();
     let (upstream_addr, upstream_shutdown) = start_upstream_server().await;
     let (proxy_addr, shutdown_tx, handle, mut event_rx, _ca_dir) = start_forward_proxy().await;
 
     let mut outer_sender = connect_h2(proxy_addr).await;
     let connect = Request::builder()
-        .method(http::Method::CONNECT)
-        .version(http::Version::HTTP_2)
-        .uri(upstream_addr.to_string())
-        .body(Full::new(Bytes::new()))
+        .method(Method::CONNECT)
+        .version(Version::HTTP_2)
+        .uri(Uri::parse_authority_form(upstream_addr.to_string()).unwrap())
+        .body(Body::empty())
         .unwrap();
     let connect_response = outer_sender.send_request(connect).await.unwrap();
-    assert_eq!(connect_response.status(), http::StatusCode::OK);
+    assert_eq!(connect_response.status(), StatusCode::OK);
 
-    let upgraded = hyper::upgrade::on(connect_response).await.unwrap();
+    let upgraded = handle_upgrade(&connect_response).await.unwrap();
     let mut inner_sender = connect_h2_io(upgraded).await;
     let request = Request::builder()
-        .method(http::Method::POST)
-        .version(http::Version::HTTP_2)
+        .method(Method::POST)
+        .version(Version::HTTP_2)
         .uri(format!("http://{upstream_addr}/h2-tunnel?via=connect"))
         .header("x-client-test", "h2-connect-roundtrip")
-        .body(Full::new(Bytes::from_static(b"body through h2 connect")))
+        .body(Body::from(Bytes::from_static(b"body through h2 connect")))
         .unwrap();
     let response = inner_sender.send_request(request).await.unwrap();
 
-    assert_eq!(response.version(), http::Version::HTTP_2);
-    assert_eq!(response.status(), http::StatusCode::OK);
+    assert_eq!(response.version(), Version::HTTP_2);
+    assert_eq!(response.status(), StatusCode::OK);
     assert_eq!(
         response.headers()["x-upstream-path-query"],
         "/h2-tunnel?via=connect"
     );
-    assert_eq!(response.headers()["x-upstream-version"], "HTTP/1.1");
+    assert_eq!(response.headers()["x-upstream-version"], "HTTP/2.0");
     assert_eq!(
         response
             .into_body()
@@ -295,13 +474,13 @@ async fn forward_proxy_h2_connect_tunnels_h2c_requests() {
         ProxyEvent::RequestComplete {
             request, response, ..
         } => {
-            assert_eq!(request.version(), http::Version::HTTP_2);
-            assert_eq!(request.method(), http::Method::POST);
-            assert_eq!(request.uri().path(), "/h2-tunnel");
-            assert_eq!(request.uri().query(), Some("via=connect"));
+            assert_eq!(request.version(), Version::HTTP_2);
+            assert_eq!(request.method(), &Method::POST);
+            assert_eq!(request.uri().path().unwrap(), "/h2-tunnel");
+            assert_eq!(request.uri().query().unwrap(), "via=connect");
             assert_eq!(request.headers()["x-client-test"], "h2-connect-roundtrip");
             assert_eq!(request.body().as_ref(), b"body through h2 connect");
-            assert_eq!(response.status(), http::StatusCode::OK);
+            assert_eq!(response.status(), StatusCode::OK);
         }
         other => panic!("expected RequestComplete event, got {other:?}"),
     }
@@ -313,7 +492,6 @@ async fn forward_proxy_h2_connect_tunnels_h2c_requests() {
 
 #[tokio::test]
 async fn forward_proxy_serves_certificate_page_for_direct_and_proxelar_requests() {
-    let _ = rustls::crypto::ring::default_provider().install_default();
     let (proxy_addr, shutdown_tx, handle, _event_rx, _ca_dir) = start_forward_proxy().await;
 
     let direct = send_raw_request(
@@ -348,7 +526,6 @@ async fn forward_proxy_serves_certificate_page_for_direct_and_proxelar_requests(
 
 #[tokio::test]
 async fn forward_proxy_returns_502_when_upstream_connection_fails() {
-    let _ = rustls::crypto::ring::default_provider().install_default();
     let unused_upstream = reserve_loopback_addr().await;
     let (proxy_addr, shutdown_tx, handle, mut event_rx, _ca_dir) = start_forward_proxy().await;
 
@@ -369,8 +546,8 @@ async fn forward_proxy_returns_502_when_upstream_connection_fails() {
         ProxyEvent::RequestComplete {
             request, response, ..
         } => {
-            assert_eq!(request.uri().path(), "/missing");
-            assert_eq!(response.status(), http::StatusCode::BAD_GATEWAY);
+            assert_eq!(request.uri().path().unwrap(), "/missing");
+            assert_eq!(response.status(), StatusCode::BAD_GATEWAY);
             assert_eq!(response.body().as_ref(), b"Bad Gateway");
         }
         other => panic!("expected RequestComplete event, got {other:?}"),
@@ -382,16 +559,15 @@ async fn forward_proxy_returns_502_when_upstream_connection_fails() {
 
 #[tokio::test]
 async fn forward_proxy_connect_plain_http_requires_host_header() {
-    let _ = rustls::crypto::ring::default_provider().install_default();
     let (proxy_addr, shutdown_tx, handle, _event_rx, _ca_dir) = start_forward_proxy().await;
-    let unused_upstream = reserve_loopback_addr().await;
+    let (upstream_addr, upstream_shutdown) = start_raw_echo_server().await;
 
     let mut stream = TcpStream::connect(proxy_addr).await.unwrap();
     stream
         .write_all(
             format!(
-                "CONNECT {unused_upstream} HTTP/1.1\r\n\
-                 Host: {unused_upstream}\r\n\
+                "CONNECT {upstream_addr} HTTP/1.1\r\n\
+                 Host: {upstream_addr}\r\n\
                  \r\n"
             )
             .as_bytes(),
@@ -416,12 +592,12 @@ async fn forward_proxy_connect_plain_http_requires_host_header() {
     assert!(raw_response.ends_with("Bad Request: missing Host header"));
 
     let _ = shutdown_tx.send(());
+    let _ = upstream_shutdown.send(());
     assert!(handle.await.unwrap().is_ok());
 }
 
 #[tokio::test]
 async fn forward_proxy_connect_unknown_protocol_tunnels_raw_bytes() {
-    let _ = rustls::crypto::ring::default_provider().install_default();
     let (echo_addr, echo_shutdown) = start_raw_echo_server().await;
     let (proxy_addr, shutdown_tx, handle, _event_rx, _ca_dir) = start_forward_proxy().await;
 
@@ -459,12 +635,11 @@ async fn forward_proxy_connect_unknown_protocol_tunnels_raw_bytes() {
 
 #[tokio::test]
 async fn forward_proxy_connect_plain_http_serves_cert_page_inside_tunnel() {
-    let _ = rustls::crypto::ring::default_provider().install_default();
-    let unused_upstream = reserve_loopback_addr().await;
+    let (upstream_addr, upstream_shutdown) = start_raw_echo_server().await;
     let (proxy_addr, shutdown_tx, handle, _event_rx, _ca_dir) = start_forward_proxy().await;
 
     let mut stream = TcpStream::connect(proxy_addr).await.unwrap();
-    write_connect(&mut stream, unused_upstream).await;
+    write_connect(&mut stream, upstream_addr).await;
     assert!(read_headers(&mut stream)
         .await
         .starts_with("HTTP/1.1 200 OK"));
@@ -485,47 +660,20 @@ async fn forward_proxy_connect_plain_http_serves_cert_page_inside_tunnel() {
     assert!(raw_response.contains(&format!("http://{proxy_addr}/cert/pem")));
 
     let _ = shutdown_tx.send(());
+    let _ = upstream_shutdown.send(());
     assert!(handle.await.unwrap().is_ok());
 }
 
 #[tokio::test]
-async fn forward_proxy_connect_plain_http_returns_502_when_upstream_fails() {
-    let _ = rustls::crypto::ring::default_provider().install_default();
+async fn forward_proxy_connect_reports_egress_failure_before_success() {
     let unused_upstream = reserve_loopback_addr().await;
-    let (proxy_addr, shutdown_tx, handle, mut event_rx, _ca_dir) = start_forward_proxy().await;
+    let (proxy_addr, shutdown_tx, handle, _event_rx, _ca_dir) = start_forward_proxy().await;
 
     let mut stream = TcpStream::connect(proxy_addr).await.unwrap();
     write_connect(&mut stream, unused_upstream).await;
     assert!(read_headers(&mut stream)
         .await
-        .starts_with("HTTP/1.1 200 OK"));
-
-    stream
-        .write_all(
-            format!(
-                "GET /fail HTTP/1.1\r\n\
-                 Host: {unused_upstream}\r\n\
-                 Connection: close\r\n\
-                 \r\n"
-            )
-            .as_bytes(),
-        )
-        .await
-        .unwrap();
-
-    let raw_response = read_to_string_until_eof(&mut stream).await;
-    assert!(raw_response.starts_with("HTTP/1.1 502 Bad Gateway"));
-    assert!(raw_response.ends_with("Bad Gateway"));
-    match recv_request_complete(&mut event_rx).await {
-        ProxyEvent::RequestComplete {
-            request, response, ..
-        } => {
-            assert_eq!(request.uri().path(), "/fail");
-            assert_eq!(response.status(), http::StatusCode::BAD_GATEWAY);
-            assert_eq!(response.body().as_ref(), b"Bad Gateway");
-        }
-        other => panic!("expected RequestComplete event, got {other:?}"),
-    }
+        .starts_with("HTTP/1.1 502 Bad Gateway"));
 
     let _ = shutdown_tx.send(());
     assert!(handle.await.unwrap().is_ok());
@@ -533,19 +681,18 @@ async fn forward_proxy_connect_plain_http_returns_502_when_upstream_fails() {
 
 #[tokio::test]
 async fn forward_proxy_replays_captured_request_through_proxy_loop() {
-    let _ = rustls::crypto::ring::default_provider().install_default();
     let (upstream_addr, upstream_shutdown) = start_upstream_server().await;
     let (_proxy_addr, shutdown_tx, handle, mut event_rx, replay_tx, _ca_dir) =
         start_forward_proxy_with_replay().await;
 
-    let mut headers = http::HeaderMap::new();
+    let mut headers = HeaderMap::new();
     headers.insert("x-replay", "yes".parse().unwrap());
     let req = ProxiedRequest::new(
-        http::Method::GET,
+        Method::GET,
         format!("http://{upstream_addr}/replayed?from=ui")
             .parse()
             .unwrap(),
-        http::Version::HTTP_11,
+        Version::HTTP_11,
         headers,
         Bytes::new(),
         10,
@@ -556,10 +703,10 @@ async fn forward_proxy_replays_captured_request_through_proxy_loop() {
         ProxyEvent::RequestComplete {
             request, response, ..
         } => {
-            assert_eq!(request.uri().path(), "/replayed");
-            assert_eq!(request.uri().query(), Some("from=ui"));
+            assert_eq!(request.uri().path().unwrap(), "/replayed");
+            assert_eq!(request.uri().query().unwrap(), "from=ui");
             assert_eq!(request.headers()["x-replay"], "yes");
-            assert_eq!(response.status(), http::StatusCode::OK);
+            assert_eq!(response.status(), StatusCode::OK);
             assert_eq!(response.body().as_ref(), b"forward response");
         }
         other => panic!("expected RequestComplete event, got {other:?}"),
@@ -572,16 +719,15 @@ async fn forward_proxy_replays_captured_request_through_proxy_loop() {
 
 #[tokio::test]
 async fn forward_proxy_replay_failure_emits_request_complete() {
-    let _ = rustls::crypto::ring::default_provider().install_default();
     let unused_upstream = reserve_loopback_addr().await;
     let (_proxy_addr, shutdown_tx, handle, mut event_rx, replay_tx, _ca_dir) =
         start_forward_proxy_with_replay().await;
 
     let req = ProxiedRequest::new(
-        http::Method::GET,
+        Method::GET,
         format!("http://{unused_upstream}/missing").parse().unwrap(),
-        http::Version::HTTP_11,
-        http::HeaderMap::new(),
+        Version::HTTP_11,
+        HeaderMap::new(),
         Bytes::new(),
         10,
     );
@@ -591,8 +737,8 @@ async fn forward_proxy_replay_failure_emits_request_complete() {
         ProxyEvent::RequestComplete {
             request, response, ..
         } => {
-            assert_eq!(request.uri().path(), "/missing");
-            assert_eq!(response.status(), http::StatusCode::BAD_GATEWAY);
+            assert_eq!(request.uri().path().unwrap(), "/missing");
+            assert_eq!(response.status(), StatusCode::BAD_GATEWAY);
             assert!(String::from_utf8_lossy(response.body()).contains("Replay request failed"));
         }
         other => panic!("expected RequestComplete event, got {other:?}"),
@@ -604,7 +750,6 @@ async fn forward_proxy_replay_failure_emits_request_complete() {
 
 #[tokio::test]
 async fn forward_proxy_websocket_upgrade_emits_connection_frames_and_close() {
-    let _ = rustls::crypto::ring::default_provider().install_default();
     let (upstream_addr, upstream_shutdown) = start_websocket_upstream_server().await;
     let (proxy_addr, shutdown_tx, handle, mut event_rx, _ca_dir) = start_forward_proxy().await;
 
@@ -628,11 +773,12 @@ async fn forward_proxy_websocket_upgrade_emits_connection_frames_and_close() {
     let handshake = read_headers(&mut stream).await;
     assert!(handshake.starts_with("HTTP/1.1 101 Switching Protocols"));
 
-    let mut ws = WebSocketStream::from_raw_socket(stream, Role::Client, None).await;
-    ws.send(Message::Text("hello".into())).await.unwrap();
-    let reply = ws.next().await.unwrap().unwrap();
-    assert_eq!(reply, Message::Text("echo:hello".into()));
-    ws.close(None).await.unwrap();
+    let mut ws =
+        AsyncWebSocket::from_raw_socket(ServiceInput::new(stream), Role::Client, None).await;
+    ws.send_message(Message::text("hello")).await.unwrap();
+    let reply = ws.recv_message().await.unwrap();
+    assert_eq!(reply, Message::text("echo:hello"));
+    ws.send_message(Message::Close(None)).await.unwrap();
 
     let mut saw_connected = false;
     let mut saw_client_frame = false;
@@ -646,8 +792,8 @@ async fn forward_proxy_websocket_upgrade_emits_connection_frames_and_close() {
                     request, response, ..
                 } => {
                     saw_connected = true;
-                    assert_eq!(request.uri().path(), "/ws");
-                    assert_eq!(response.status(), http::StatusCode::SWITCHING_PROTOCOLS);
+                    assert_eq!(request.uri().path().unwrap(), "/ws");
+                    assert_eq!(response.status(), StatusCode::SWITCHING_PROTOCOLS);
                 }
                 ProxyEvent::WebSocketFrame { frame, .. } => match frame.direction {
                     proxyapi_models::WsDirection::ClientToServer => {
@@ -681,6 +827,31 @@ async fn start_forward_proxy() -> (
     mpsc::Receiver<ProxyEvent>,
     tempfile::TempDir,
 ) {
+    start_forward_proxy_with_upstream(None).await
+}
+
+async fn start_forward_proxy_with_upstream(
+    upstream_proxy: Option<proxyapi::UpstreamProxyConfig>,
+) -> (
+    SocketAddr,
+    tokio::sync::oneshot::Sender<()>,
+    tokio::task::JoinHandle<Result<(), proxyapi::Error>>,
+    mpsc::Receiver<ProxyEvent>,
+    tempfile::TempDir,
+) {
+    start_forward_proxy_with_options(upstream_proxy, UpstreamHttpVersion::default()).await
+}
+
+async fn start_forward_proxy_with_options(
+    upstream_proxy: Option<proxyapi::UpstreamProxyConfig>,
+    upstream_http_version: UpstreamHttpVersion,
+) -> (
+    SocketAddr,
+    tokio::sync::oneshot::Sender<()>,
+    tokio::task::JoinHandle<Result<(), proxyapi::Error>>,
+    mpsc::Receiver<ProxyEvent>,
+    tempfile::TempDir,
+) {
     let proxy_addr = reserve_loopback_addr().await;
     let ca_dir = tempfile::tempdir().unwrap();
     let (event_tx, event_rx) = mpsc::channel::<ProxyEvent>(100);
@@ -690,6 +861,7 @@ async fn start_forward_proxy() -> (
         event_tx,
         ca_dir: ca_dir.path().to_path_buf(),
         upstream_tls: UpstreamTlsConfig::Default,
+        upstream_http_version,
         intercept: None,
         body_capture_limit: DEFAULT_BODY_CAPTURE_LIMIT,
         #[cfg(feature = "scripting")]
@@ -697,7 +869,10 @@ async fn start_forward_proxy() -> (
         replay_rx: None,
     };
 
-    let proxy = Proxy::new(config);
+    let proxy = match upstream_proxy {
+        Some(upstream) => Proxy::new(config).with_upstream_proxy(upstream),
+        None => Proxy::new(config),
+    };
     let (shutdown_tx, shutdown_rx) = tokio::sync::oneshot::channel();
     let handle = tokio::spawn(async move {
         proxy
@@ -709,6 +884,44 @@ async fn start_forward_proxy() -> (
 
     wait_for_tcp(proxy_addr).await.unwrap();
 
+    (proxy_addr, shutdown_tx, handle, event_rx, ca_dir)
+}
+
+async fn start_forward_proxy_with_rules(
+    rules: RouteRules,
+) -> (
+    SocketAddr,
+    tokio::sync::oneshot::Sender<()>,
+    tokio::task::JoinHandle<Result<(), proxyapi::Error>>,
+    mpsc::Receiver<ProxyEvent>,
+    tempfile::TempDir,
+) {
+    let proxy_addr = reserve_loopback_addr().await;
+    let ca_dir = tempfile::tempdir().unwrap();
+    let (event_tx, event_rx) = mpsc::channel::<ProxyEvent>(100);
+    let config = ProxyConfig {
+        addr: proxy_addr,
+        mode: ProxyMode::Forward,
+        event_tx,
+        ca_dir: ca_dir.path().to_path_buf(),
+        upstream_tls: UpstreamTlsConfig::Default,
+        upstream_http_version: UpstreamHttpVersion::default(),
+        intercept: None,
+        body_capture_limit: DEFAULT_BODY_CAPTURE_LIMIT,
+        #[cfg(feature = "scripting")]
+        script_path: None,
+        replay_rx: None,
+    };
+    let proxy = Proxy::new(config).with_route_rules(Arc::new(rules));
+    let (shutdown_tx, shutdown_rx) = tokio::sync::oneshot::channel();
+    let handle = tokio::spawn(async move {
+        proxy
+            .start(async {
+                shutdown_rx.await.ok();
+            })
+            .await
+    });
+    wait_for_tcp(proxy_addr).await.unwrap();
     (proxy_addr, shutdown_tx, handle, event_rx, ca_dir)
 }
 
@@ -730,6 +943,7 @@ async fn start_forward_proxy_with_replay() -> (
         event_tx,
         ca_dir: ca_dir.path().to_path_buf(),
         upstream_tls: UpstreamTlsConfig::Default,
+        upstream_http_version: UpstreamHttpVersion::default(),
         intercept: None,
         body_capture_limit: DEFAULT_BODY_CAPTURE_LIMIT,
         #[cfg(feature = "scripting")]
@@ -753,7 +967,7 @@ async fn start_forward_proxy_with_replay() -> (
 }
 
 async fn reserve_loopback_addr() -> SocketAddr {
-    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let addr = listener.local_addr().unwrap();
     drop(listener);
     addr
@@ -772,19 +986,16 @@ async fn wait_for_tcp(addr: SocketAddr) -> Result<(), std::io::Error> {
     }
 }
 
-async fn connect_h2(addr: SocketAddr) -> hyper::client::conn::http2::SendRequest<Full<Bytes>> {
+async fn connect_h2(addr: SocketAddr) -> H2Sender {
     let stream = TcpStream::connect(addr).await.unwrap();
-    connect_h2_io(TokioIo::new(stream)).await
+    connect_h2_io(ServiceInput::new(stream)).await
 }
 
-async fn connect_h2_io<I>(io: I) -> hyper::client::conn::http2::SendRequest<Full<Bytes>>
+async fn connect_h2_io<I>(io: I) -> H2Sender
 where
-    I: hyper::rt::Read + hyper::rt::Write + Unpin + Send + 'static,
+    I: tokio::io::AsyncRead + tokio::io::AsyncWrite + ExtensionsRef + Send + Unpin + 'static,
 {
-    let (sender, connection) = hyper::client::conn::http2::Builder::new(TokioExecutor::new())
-        .handshake(io)
-        .await
-        .unwrap();
+    let (sender, connection) = http2::handshake(Executor::default(), io).await.unwrap();
     tokio::spawn(async move {
         let _ = connection.await;
     });
@@ -806,27 +1017,19 @@ async fn write_connect(stream: &mut TcpStream, authority: SocketAddr) {
 }
 
 async fn start_upstream_server() -> (SocketAddr, tokio::sync::oneshot::Sender<()>) {
-    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let exec = Executor::default();
+    let listener = RamaTcpListener::bind_address("127.0.0.1:0", exec.clone())
+        .await
+        .unwrap();
     let addr = listener.local_addr().unwrap();
-    let (shutdown_tx, mut shutdown_rx) = tokio::sync::oneshot::channel::<()>();
+    let (shutdown_tx, shutdown_rx) = tokio::sync::oneshot::channel::<()>();
+
+    let service = HttpServer::auto(exec).service(service_fn(upstream_response));
 
     tokio::spawn(async move {
-        loop {
-            tokio::select! {
-                result = listener.accept() => {
-                    let Ok((stream, _)) = result else {
-                        break;
-                    };
-                    tokio::spawn(async move {
-                        let io = TokioIo::new(stream);
-                        let service = service_fn(upstream_response);
-                        let _ = hyper::server::conn::http1::Builder::new()
-                            .serve_connection(io, service)
-                            .await;
-                    });
-                }
-                _ = &mut shutdown_rx => break,
-            }
+        tokio::select! {
+            () = listener.serve(service) => {}
+            _ = shutdown_rx => {}
         }
     });
 
@@ -834,7 +1037,7 @@ async fn start_upstream_server() -> (SocketAddr, tokio::sync::oneshot::Sender<()
 }
 
 async fn start_raw_echo_server() -> (SocketAddr, tokio::sync::oneshot::Sender<()>) {
-    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let addr = listener.local_addr().unwrap();
     let (shutdown_tx, mut shutdown_rx) = tokio::sync::oneshot::channel::<()>();
 
@@ -856,77 +1059,102 @@ async fn start_raw_echo_server() -> (SocketAddr, tokio::sync::oneshot::Sender<()
     (addr, shutdown_tx)
 }
 
-async fn start_websocket_upstream_server() -> (SocketAddr, tokio::sync::oneshot::Sender<()>) {
-    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+async fn start_http_connect_proxy() -> (
+    SocketAddr,
+    tokio::sync::oneshot::Receiver<String>,
+    tokio::sync::oneshot::Sender<()>,
+) {
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let addr = listener.local_addr().unwrap();
-    let (shutdown_tx, mut shutdown_rx) = tokio::sync::oneshot::channel::<()>();
+    let (target_tx, target_rx) = tokio::sync::oneshot::channel();
+    let (shutdown_tx, mut shutdown_rx) = tokio::sync::oneshot::channel();
+    tokio::spawn(async move {
+        tokio::select! {
+            accepted = listener.accept() => {
+                let (mut ingress, _) = accepted.unwrap();
+                let request = read_http_head(&mut ingress).await;
+                let target = request
+                    .lines()
+                    .next()
+                    .and_then(|line| line.split_whitespace().nth(1))
+                    .unwrap()
+                    .to_owned();
+                let mut egress = TcpStream::connect(&target).await.unwrap();
+                ingress
+                    .write_all(b"HTTP/1.1 200 Connection Established\r\n\r\n")
+                    .await
+                    .unwrap();
+                let _ = target_tx.send(target);
+                let _ = tokio::io::copy_bidirectional(&mut ingress, &mut egress).await;
+            }
+            _ = &mut shutdown_rx => {}
+        }
+    });
+    (addr, target_rx, shutdown_tx)
+}
+
+async fn read_http_head(stream: &mut TcpStream) -> String {
+    let mut bytes = Vec::new();
+    while !bytes.ends_with(b"\r\n\r\n") {
+        let mut byte = [0];
+        stream.read_exact(&mut byte).await.unwrap();
+        bytes.push(byte[0]);
+    }
+    String::from_utf8(bytes).unwrap()
+}
+
+async fn start_websocket_upstream_server() -> (SocketAddr, tokio::sync::oneshot::Sender<()>) {
+    let exec = Executor::default();
+    let listener = RamaTcpListener::bind_address("127.0.0.1:0", exec.clone())
+        .await
+        .unwrap();
+    let addr = listener.local_addr().unwrap();
+    let (shutdown_tx, shutdown_rx) = tokio::sync::oneshot::channel::<()>();
+
+    let service = HttpServer::new_http1(exec)
+        .service(WebSocketAcceptor::new().into_service(service_fn(websocket_upstream_response)));
 
     tokio::spawn(async move {
-        loop {
-            tokio::select! {
-                result = listener.accept() => {
-                    let Ok((stream, _)) = result else {
-                        break;
-                    };
-                    tokio::spawn(async move {
-                        let io = TokioIo::new(stream);
-                        let service = service_fn(websocket_upstream_response);
-                        let _ = hyper::server::conn::http1::Builder::new()
-                            .serve_connection(io, service)
-                            .with_upgrades()
-                            .await;
-                    });
-                }
-                _ = &mut shutdown_rx => break,
-            }
+        tokio::select! {
+            () = listener.serve(service) => {}
+            _ = shutdown_rx => {}
         }
     });
 
     (addr, shutdown_tx)
 }
 
-async fn websocket_upstream_response(
-    mut req: Request<Incoming>,
-) -> Result<Response<Full<Bytes>>, hyper::Error> {
-    tokio::spawn(async move {
-        let Ok(upgraded) = hyper::upgrade::on(&mut req).await else {
-            return;
-        };
-        let mut ws =
-            WebSocketStream::from_raw_socket(TokioIo::new(upgraded), Role::Server, None).await;
-        if let Some(Ok(Message::Text(text))) = ws.next().await {
-            let _ = ws.send(Message::Text(format!("echo:{text}").into())).await;
-        }
-        let _ = ws.close(None).await;
-    });
-
-    Ok(Response::builder()
-        .status(http::StatusCode::SWITCHING_PROTOCOLS)
-        .header(hyper::header::CONNECTION, "Upgrade")
-        .header(hyper::header::UPGRADE, "websocket")
-        .header("sec-websocket-accept", "s3pPLMBiTxaQ9kYGzzhZRbK+xOo=")
-        .body(Full::new(Bytes::new()))
-        .unwrap())
+async fn websocket_upstream_response(mut ws: ServerWebSocket) -> Result<(), Infallible> {
+    if let Ok(Message::Text(text)) = ws.recv_message().await {
+        let _ = ws
+            .send_message(Message::text(format!("echo:{}", text.as_str())))
+            .await;
+    }
+    let _ = ws.send_message(Message::Close(None)).await;
+    Ok(())
 }
 
-async fn upstream_response(req: Request<Incoming>) -> Result<Response<Full<Bytes>>, hyper::Error> {
-    let path_query = req
-        .uri()
-        .path_and_query()
-        .map(http::uri::PathAndQuery::as_str)
-        .unwrap_or("/");
+async fn upstream_response(req: Request) -> Result<Response, Infallible> {
+    let path_query = if req.uri().query_or_empty().is_empty() {
+        req.uri().path_or_root().to_string()
+    } else {
+        format!(
+            "{}?{}",
+            req.uri().path_or_root(),
+            req.uri().query_or_empty()
+        )
+    };
     let host = req
-        .headers()
-        .get(http::header::HOST)
-        .and_then(|value| value.to_str().ok())
-        .unwrap_or("");
+        .authority()
+        .map_or_else(String::new, |value| value.to_string());
+    let version = format!("{:?}", req.version());
 
     Ok(Response::builder()
-        .status(http::StatusCode::OK)
+        .status(StatusCode::OK)
         .header("x-upstream-path-query", path_query)
         .header("x-upstream-host", host)
-        .header("x-upstream-version", format!("{:?}", req.version()))
-        .body(Full::new(Bytes::from_static(b"forward response")))
+        .header("x-upstream-version", version)
+        .body(Body::from(Bytes::from_static(b"forward response")))
         .unwrap())
 }
 

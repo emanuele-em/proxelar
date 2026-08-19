@@ -1,5 +1,6 @@
 //! Privilege-free WireGuard capture backed by a userspace TCP/IP stack.
 
+use rama::telemetry::tracing;
 use std::future::Future;
 use std::io;
 use std::net::{IpAddr, Ipv4Addr, SocketAddr};
@@ -10,10 +11,10 @@ use std::time::Duration;
 use base64::Engine;
 use boringtun::noise::{Tunn, TunnResult};
 use boringtun::x25519::{PublicKey, StaticSecret};
-use futures_util::{SinkExt, StreamExt};
-use http::uri::Authority;
 use netstack_smoltcp::{StackBuilder, TcpListener, UdpSocket as VirtualUdpSocket};
 use proxyapi_models::ProxiedRequest;
+use rama::futures::{SinkExt, StreamExt};
+use rama::net::address::HostWithPort;
 use tokio::net::UdpSocket;
 use tokio::sync::mpsc;
 use tokio::task::JoinSet;
@@ -23,7 +24,7 @@ use crate::ca::Ssl;
 use crate::event::ProxyEvent;
 use crate::handler::CapturingHandler;
 
-use super::{dns, forward, udp, Client, DnsConfig};
+use super::{dns, forward, udp, DnsConfig, PeekTimeoutPolicy, UpstreamClient};
 
 const MAX_PACKET_SIZE: usize = 65_535;
 const WIREGUARD_OVERHEAD: usize = 80;
@@ -115,12 +116,8 @@ impl WireGuardConfig {
 }
 
 fn validate_endpoint(endpoint: &str) -> io::Result<()> {
-    let authority = endpoint
-        .parse::<Authority>()
+    HostWithPort::try_from(endpoint)
         .map_err(|_| invalid_input("WireGuard endpoint must be HOST:PORT"))?;
-    if authority.host().is_empty() || authority.port_u16().is_none() {
-        return Err(invalid_input("WireGuard endpoint must be HOST:PORT"));
-    }
     Ok(())
 }
 
@@ -129,7 +126,7 @@ fn load_or_generate_key(path: &Path) -> io::Result<[u8; 32]> {
         Ok(value) => decode_key(value.trim()),
         Err(error) if error.kind() == io::ErrorKind::NotFound => {
             let mut key = [0_u8; 32];
-            openssl::rand::rand_bytes(&mut key).map_err(io::Error::other)?;
+            rama::crypto::dep::boring::rand::rand_bytes(&mut key).map_err(io::Error::other)?;
             let encoded = format!("{}\n", encode_key(&key));
             crate::session::write_private(path, encoded.as_bytes())?;
             Ok(key)
@@ -183,7 +180,8 @@ pub async fn serve(
     config: WireGuardConfig,
     handler: CapturingHandler,
     ca: Arc<Ssl>,
-    client: Arc<Client>,
+    client: Arc<UpstreamClient>,
+    peek_timeout_policy: PeekTimeoutPolicy,
     event_tx: mpsc::Sender<ProxyEvent>,
     replay_rx: Option<mpsc::Receiver<ProxiedRequest>>,
     shutdown: impl Future<Output = ()>,
@@ -227,6 +225,7 @@ pub async fn serve(
         handler.clone(),
         ca,
         Arc::clone(&client),
+        peek_timeout_policy,
         cancel.clone(),
     ));
     tasks.spawn(udp_loop(virtual_udp, config.dns, event_tx, cancel.clone()));
@@ -249,7 +248,7 @@ pub async fn serve(
 
 async fn replay_loop(
     handler: CapturingHandler,
-    client: Arc<Client>,
+    client: Arc<UpstreamClient>,
     mut replay_rx: Option<mpsc::Receiver<ProxiedRequest>>,
     cancel: CancellationToken,
 ) -> io::Result<()> {
@@ -429,26 +428,27 @@ async fn tcp_loop(
     mut listener: TcpListener,
     handler: CapturingHandler,
     ca: Arc<Ssl>,
-    client: Arc<Client>,
+    client: Arc<UpstreamClient>,
+    peek_timeout_policy: PeekTimeoutPolicy,
     cancel: CancellationToken,
 ) -> io::Result<()> {
     loop {
         tokio::select! {
             () = cancel.cancelled() => return Ok(()),
             connection = listener.next() => {
-                let Some((stream, source, destination)) = connection else { return Ok(()); };
-                let authority = destination
-                    .to_string()
-                    .parse::<Authority>()
-                    .map_err(|_| invalid_input("invalid WireGuard TCP destination"))?;
+                let Some((stream, _source, destination)) = connection else { return Ok(()); };
+                let authority = HostWithPort::from(destination);
+                // The netstack stream is a bare tokio duplex; wrap it so it
+                // satisfies rama's `Io + ExtensionsRef` bound.
+                let stream = rama::ServiceInput::new(stream);
                 tokio::spawn(forward::handle_captured_stream(
                     stream,
-                    source,
                     handler.clone(),
                     Arc::clone(&ca),
                     Arc::clone(&client),
                     SocketAddr::new(IpAddr::V4(SERVER_ADDRESS), 80),
                     authority,
+                    peek_timeout_policy,
                 ));
             }
         }
@@ -550,8 +550,8 @@ mod tests {
     fn boringtun_peer_roundtrip_decrypts_ipv4_packet() {
         let mut server_key = [0_u8; 32];
         let mut client_key = [0_u8; 32];
-        openssl::rand::rand_bytes(&mut server_key).unwrap();
-        openssl::rand::rand_bytes(&mut client_key).unwrap();
+        rama::crypto::dep::boring::rand::rand_bytes(&mut server_key).unwrap();
+        rama::crypto::dep::boring::rand::rand_bytes(&mut client_key).unwrap();
         let server_private = StaticSecret::from(server_key);
         let client_private = StaticSecret::from(client_key);
         let server_public = PublicKey::from(&server_private);
@@ -596,7 +596,6 @@ mod tests {
 
     #[tokio::test]
     async fn proxy_mode_starts_and_shuts_down_cleanly() {
-        let _ = rustls::crypto::ring::default_provider().install_default();
         let probe = std::net::UdpSocket::bind("127.0.0.1:0").unwrap();
         let address = probe.local_addr().unwrap();
         drop(probe);
@@ -614,6 +613,7 @@ mod tests {
             event_tx,
             ca_dir: directory.path().to_path_buf(),
             upstream_tls: crate::UpstreamTlsConfig::Default,
+            upstream_http_version: crate::UpstreamHttpVersion::default(),
             intercept: None,
             body_capture_limit: Some(1_024),
             #[cfg(feature = "scripting")]
@@ -681,18 +681,23 @@ mod tests {
     #[tokio::test]
     async fn replay_receivers_and_cancelled_loops_stop_cleanly() {
         let request = ProxiedRequest::new(
-            http::Method::GET,
+            rama::http::Method::GET,
             "http://example.test/".parse().unwrap(),
-            http::Version::HTTP_11,
-            http::HeaderMap::new(),
-            bytes::Bytes::new(),
+            rama::http::Version::HTTP_11,
+            rama::http::HeaderMap::new(),
+            rama::bytes::Bytes::new(),
             1,
         );
         let (request_tx, request_rx) = mpsc::channel(1);
         request_tx.send(request).await.unwrap();
         let mut request_rx = Some(request_rx);
         assert_eq!(
-            receive_replay(&mut request_rx).await.unwrap().uri().host(),
+            receive_replay(&mut request_rx)
+                .await
+                .unwrap()
+                .uri()
+                .host_str()
+                .as_deref(),
             Some("example.test")
         );
         drop(request_tx);
@@ -743,8 +748,8 @@ mod tests {
     async fn packet_processors_complete_a_handshake_and_exchange_packets() {
         let mut server_key = [0_u8; 32];
         let mut client_key = [0_u8; 32];
-        openssl::rand::rand_bytes(&mut server_key).unwrap();
-        openssl::rand::rand_bytes(&mut client_key).unwrap();
+        rama::crypto::dep::boring::rand::rand_bytes(&mut server_key).unwrap();
+        rama::crypto::dep::boring::rand::rand_bytes(&mut client_key).unwrap();
         let server_private = StaticSecret::from(server_key);
         let client_private = StaticSecret::from(client_key);
         let server_public = PublicKey::from(&server_private);

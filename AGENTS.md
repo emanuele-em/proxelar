@@ -3,6 +3,6 @@
 - Build with `cargo build --workspace`; also check `cargo build --workspace --no-default-features` when touching Lua scripting or feature gates.
 - Keep the dependency direction `proxelar-cli` -> `proxyapi` -> `proxyapi_models`; `proxyapi_models` must stay pure data types with no async or network code.
 - Keep `#![forbid(unsafe_code)]` intact.
-- For TLS tests/startup, install the rustls ring provider and ignore repeated install errors with `let _ =`.
-- Preserve proxy invariants: `normalize_request()` removes `Host`, joins duplicate `Cookie` headers with `"; "`, and pins HTTP/1.1.
+- TLS is provided by rama's BoringSSL backend (`rama = { features = ["boring", ...] }`); there is no global crypto provider to install (the old rustls-ring `install_default()` call is gone).
+- Preserve proxy invariants: `prepare_upstream_request()` removes `Host`, joins duplicate `Cookie` headers with `"; "`, and strips hop-by-hop headers. The upstream HTTP version is preserved end to end by default (h1→h1, h2→h2) and only forced when `--upstream-http-version` is set.
 - Lua script errors must log and pass through, not crash the proxy.

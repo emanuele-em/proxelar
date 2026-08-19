@@ -28,7 +28,11 @@ Map-local rules read files below explicitly configured directories and reject tr
 
 ## Captures and exports
 
-Native sessions preserve data exactly, including secrets, and are created with owner-only permissions on Unix. HAR, curl, and raw exports redact common credentials and secret query keys unless `--export-secrets` is used. Redaction is a safety baseline, not a data-loss-prevention system; application-specific secrets in bodies or custom headers may remain.
+Native sessions preserve data exactly, including secrets, and are created with
+owner-only permissions on Unix. HAR, curl, and raw exports redact common
+credentials and secret query keys unless `--export-secrets` is used. Redaction
+is a safety baseline, not a data-loss-prevention system; application-specific
+secrets in HTTP bodies, WebSocket messages, or custom headers may remain.
 
 ## Release artifacts
 

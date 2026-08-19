@@ -2,8 +2,9 @@
 
 use std::path::{Component, Path, PathBuf};
 
-use bytes::Bytes;
-use http::{HeaderMap, HeaderName, HeaderValue, Method, StatusCode, Uri};
+use rama::bytes::Bytes;
+use rama::http::{HeaderMap, HeaderName, HeaderValue, Method, StatusCode};
+use rama::net::uri::Uri;
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
@@ -219,9 +220,11 @@ impl RouteRules {
                     target_prefix,
                 } if current.starts_with(url_prefix) => {
                     let mapped = format!("{target_prefix}{}", &current[url_prefix.len()..]);
-                    *uri = mapped.parse().map_err(|error: http::uri::InvalidUri| {
-                        RuleError::Invalid(error.to_string())
-                    })?;
+                    *uri = mapped
+                        .parse()
+                        .map_err(|error: rama::net::uri::ParseError| {
+                            RuleError::Invalid(error.to_string())
+                        })?;
                 }
                 RouteRule::MapLocal {
                     url_prefix,
@@ -274,7 +277,7 @@ impl RouteRules {
                             }
                             let mut response_headers = HeaderMap::new();
                             response_headers.insert(
-                                http::header::CONTENT_TYPE,
+                                rama::http::header::CONTENT_TYPE,
                                 HeaderValue::from_static(content_type_for_path(&canonical_path)),
                             );
                             Ok(response(StatusCode::OK, response_headers, body))
@@ -295,7 +298,7 @@ impl RouteRules {
                     let target = format!("{location}{}", &current[url_prefix.len()..]);
                     let mut response_headers = HeaderMap::new();
                     response_headers.insert(
-                        http::header::LOCATION,
+                        rama::http::header::LOCATION,
                         HeaderValue::from_str(&target)
                             .map_err(|error| RuleError::Invalid(error.to_string()))?,
                     );
@@ -454,7 +457,7 @@ mod tests {
                 .unwrap(),
             RuleOutcome::Forward
         ));
-        assert_eq!(uri, "http://localhost:3000/v2/items");
+        assert_eq!(uri.to_string(), "http://localhost:3000/v2/items");
         assert_eq!(headers["x-proxelar"], "yes");
 
         rules.rules = vec![RouteRule::MapLocal {
@@ -697,7 +700,7 @@ mod tests {
         };
         assert_eq!(status, StatusCode::TEMPORARY_REDIRECT);
         assert_eq!(
-            headers[http::header::LOCATION],
+            headers[rama::http::header::LOCATION],
             "https://site.test/new/path"
         );
         assert!(body.is_empty());
@@ -723,7 +726,7 @@ mod tests {
         };
         assert_eq!(status, StatusCode::OK);
         assert_eq!(
-            headers[http::header::CONTENT_TYPE],
+            headers[rama::http::header::CONTENT_TYPE],
             "text/css; charset=utf-8"
         );
         assert!(body.is_empty());

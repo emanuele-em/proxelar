@@ -1,6 +1,6 @@
-use http::Request;
-use http_body_util::BodyExt;
 use proxyapi::ca::{cert_server, Ssl};
+use rama::http::body::util::BodyExt;
+use rama::http::Request;
 
 #[test]
 fn test_is_cert_request_with_host_header() {

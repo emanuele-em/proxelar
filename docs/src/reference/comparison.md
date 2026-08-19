@@ -6,7 +6,7 @@ This page is intentionally practical, not promotional. Proxelar overlaps with se
 
 Use Proxelar when you want a local, scriptable, Rust-native traffic workbench with a TUI, web GUI, Lua hooks, request intercept, replay, and WebSocket frame inspection.
 
-Choose another tool when you need end-to-end HTTP/2/HTTP/3 interception, a large pre-existing addon inventory, polished desktop UX, or professional security testing workflows.
+If you need HTTP/3 and QUIC interception today, choose a tool that already provides it. Proxelar will add HTTP/3 and QUIC support later this year. Another tool may also be a better fit when you need a large pre-existing addon inventory, polished desktop UX, or professional security testing workflows.
 
 ## mitmproxy
 
@@ -20,7 +20,7 @@ Choose mitmproxy if you need the most mature general-purpose MITM proxy today. C
 
 proxyfor is the closest Rust CLI neighbor: it provides forward/reverse proxy modes, TUI/WebUI, filtering, CA install help, export formats, and portable binaries.
 
-Proxelar emphasizes interactive intercept/edit, replay, redacted native/HAR/curl/raw exports, Lua request/response/WebSocket hooks, declarative rules, and an embeddable `proxyapi` core.
+Proxelar emphasizes interactive intercept/edit, replay, lossless native sessions, redacted HAR/curl/raw exports, Lua request/response/WebSocket hooks, declarative rules, and an embeddable `proxyapi` core.
 
 Choose proxyfor if its simpler capture workflow and interface fit are the main requirement. Choose Proxelar if traffic transformation, automation, portable sessions, or library embedding are central.
 

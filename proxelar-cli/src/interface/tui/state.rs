@@ -598,10 +598,10 @@ impl AppState {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use bytes::Bytes;
     use crossterm::event::KeyModifiers;
-    use http::{HeaderMap, Method, StatusCode, Version};
     use proxyapi_models::{WsDirection, WsFrame, WsOpcode};
+    use rama::bytes::Bytes;
+    use rama::http::{HeaderMap, Method, StatusCode, Version};
 
     fn key(code: KeyCode) -> KeyEvent {
         KeyEvent::new(code, KeyModifiers::NONE)
@@ -628,7 +628,10 @@ mod tests {
     ) -> Box<ProxiedResponse> {
         let mut headers = HeaderMap::new();
         if let Some(content_type) = content_type {
-            headers.insert(http::header::CONTENT_TYPE, content_type.parse().unwrap());
+            headers.insert(
+                rama::http::header::CONTENT_TYPE,
+                content_type.parse().unwrap(),
+            );
         }
         Box::new(ProxiedResponse::new(
             status,
@@ -696,7 +699,13 @@ mod tests {
         assert_eq!(state.pending_count(), 1);
         assert_eq!(state.selected_pending_id(), Some(7));
         assert_eq!(
-            state.selected_pending_request().unwrap().1.uri().path(),
+            state
+                .selected_pending_request()
+                .unwrap()
+                .1
+                .uri()
+                .path()
+                .unwrap(),
             "/pending"
         );
 
@@ -713,7 +722,10 @@ mod tests {
 
         assert_eq!(state.pending_count(), 0);
         assert_eq!(state.entries.len(), 1);
-        assert_eq!(state.selected_request().unwrap().uri().path(), "/done");
+        assert_eq!(
+            state.selected_request().unwrap().uri().path().unwrap(),
+            "/done"
+        );
         assert!(matches!(
             state.entries.front().unwrap(),
             FlowEntry::Complete { .. }

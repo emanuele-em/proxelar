@@ -2,9 +2,68 @@
 
 #![forbid(unsafe_code)]
 
-use bytes::Bytes;
-use http::{HeaderMap, Method, StatusCode, Uri, Version};
-use serde::{Deserialize, Serialize};
+use rama::bytes::Bytes;
+use rama::http::{HeaderMap, HeaderName, HeaderValue, Method, StatusCode, Version};
+use rama::net::uri::Uri;
+use serde::{de::Error as _, Deserialize, Deserializer, Serialize, Serializer};
+use std::collections::HashMap;
+
+/// Serialize headers using rama's ordered representation while accepting the
+/// object representation emitted by Proxelar before the rama migration.
+///
+/// The ordered sequence is the canonical format because HTTP/1 field order and
+/// duplicates are observable. The legacy map fallback exists only at read
+/// boundaries; a map cannot recover ordering that its writer already discarded.
+mod header_map_serde {
+    use super::*;
+
+    #[derive(Deserialize)]
+    #[serde(untagged)]
+    enum LegacyHeaderValues {
+        One(HeaderValue),
+        Many(Vec<HeaderValue>),
+    }
+
+    #[derive(Deserialize)]
+    #[serde(untagged)]
+    enum HeaderMapRepr {
+        Ordered(HeaderMap),
+        Legacy(HashMap<String, LegacyHeaderValues>),
+    }
+
+    pub fn serialize<S>(headers: &HeaderMap, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: Serializer,
+    {
+        headers.serialize(serializer)
+    }
+
+    pub fn deserialize<'de, D>(deserializer: D) -> Result<HeaderMap, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        match HeaderMapRepr::deserialize(deserializer)? {
+            HeaderMapRepr::Ordered(headers) => Ok(headers),
+            HeaderMapRepr::Legacy(headers) => {
+                let mut output = HeaderMap::new();
+                for (name, values) in headers {
+                    let name = HeaderName::try_from(name).map_err(D::Error::custom)?;
+                    match values {
+                        LegacyHeaderValues::One(value) => {
+                            output.append(name, value);
+                        }
+                        LegacyHeaderValues::Many(values) => {
+                            for value in values {
+                                output.append(name.clone(), value);
+                            }
+                        }
+                    }
+                }
+                Ok(output)
+            }
+        }
+    }
+}
 
 /// Capture metadata for an HTTP message body.
 ///
@@ -41,13 +100,10 @@ impl Default for BodyMetadata {
 /// The `time` field stores the capture timestamp as milliseconds since the Unix epoch.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct ProxiedRequest {
-    #[serde(with = "http_serde::method")]
     method: Method,
-    #[serde(with = "http_serde::uri")]
     uri: Uri,
-    #[serde(with = "http_serde::version")]
     version: Version,
-    #[serde(with = "http_serde::header_map")]
+    #[serde(with = "header_map_serde")]
     headers: HeaderMap,
     body: Bytes,
     #[serde(default)]
@@ -198,11 +254,9 @@ impl WsFrame {
 /// The `time` field stores the capture timestamp as milliseconds since the Unix epoch.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct ProxiedResponse {
-    #[serde(with = "http_serde::status_code")]
     status: StatusCode,
-    #[serde(with = "http_serde::version")]
     version: Version,
-    #[serde(with = "http_serde::header_map")]
+    #[serde(with = "header_map_serde")]
     headers: HeaderMap,
     body: Bytes,
     #[serde(default)]
@@ -274,7 +328,7 @@ impl ProxiedResponse {
 }
 
 /// Current version of Proxelar's portable session format.
-pub const SESSION_FORMAT_VERSION: u32 = 1;
+pub const SESSION_FORMAT_VERSION: u32 = 2;
 
 /// A completed HTTP request/response exchange stored in a session.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]

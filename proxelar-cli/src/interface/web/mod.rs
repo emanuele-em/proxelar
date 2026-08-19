@@ -1,22 +1,27 @@
-use axum::{
-    extract::{
-        ws::{Message, WebSocket, WebSocketUpgrade},
-        Path, Query, State,
-    },
-    response::{Html, IntoResponse},
-    routing::{get, post, put},
-    Json, Router,
-};
-use bytes::Bytes;
-use http::{
-    header::{AUTHORIZATION, CACHE_CONTROL, CONTENT_TYPE, COOKIE, HOST, ORIGIN, SET_COOKIE},
-    HeaderMap, Uri,
-};
 use proxyapi::{FlowFilter, InterceptConfig, InterceptDecision, ProxyEvent, SessionRecorder};
 use proxyapi_models::{CapturedFlow, ProxiedRequest, TrafficSession};
+use rama::bytes::Bytes;
+use rama::http::header::{
+    AUTHORIZATION, CACHE_CONTROL, CONTENT_TYPE, COOKIE, HOST, ORIGIN, SET_COOKIE,
+};
+use rama::http::layer::error_handling::ErrorHandlerLayer;
+use rama::http::server::HttpServer;
+use rama::http::service::web::extract::{Json, Path, Query, State};
+use rama::http::service::web::response::{Html, IntoResponse};
+use rama::http::service::web::Router;
+use rama::http::ws::handshake::server::{ServerWebSocket, WebSocketAcceptor};
+use rama::http::ws::Message;
+use rama::http::{HeaderMap, Request, Response, StatusCode};
+use rama::net::uri::Uri;
+use rama::rt::Executor;
+use rama::service::service_fn;
+use rama::tcp::server::TcpListener;
+use rama::telemetry::tracing;
+use rama::{Layer, Service};
 use rand::RngExt;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
+use std::net::SocketAddr;
 use std::sync::Arc;
 use tokio::sync::{broadcast, mpsc, RwLock};
 use tokio_util::sync::CancellationToken;
@@ -104,19 +109,36 @@ enum ClientHeaders {
 #[derive(Deserialize)]
 #[serde(untagged)]
 enum HeaderValues {
-    One(String),
-    Many(Vec<String>),
+    One(ClientHeaderValue),
+    Many(Vec<ClientHeaderValue>),
+}
+
+#[derive(Deserialize)]
+#[serde(untagged)]
+enum ClientHeaderValue {
+    Text(String),
+    Bytes(Vec<u8>),
 }
 
 #[derive(Deserialize)]
 struct ClientHeader {
     name: String,
-    value: String,
+    value: ClientHeaderValue,
+}
+
+impl ClientHeaderValue {
+    fn try_into_header_value(self) -> Result<rama::http::HeaderValue, String> {
+        match self {
+            Self::Text(value) => rama::http::HeaderValue::from_str(&value),
+            Self::Bytes(value) => rama::http::HeaderValue::from_bytes(&value),
+        }
+        .map_err(|error| format!("invalid header value: {error}"))
+    }
 }
 
 impl ClientHeaders {
     fn try_into_header_map(self) -> Result<HeaderMap, String> {
-        let values: Vec<(String, String)> = match self {
+        let values: Vec<(String, ClientHeaderValue)> = match self {
             Self::Map(headers) => headers
                 .into_iter()
                 .flat_map(|(name, values)| match values {
@@ -134,10 +156,9 @@ impl ClientHeaders {
         };
         let mut headers = HeaderMap::new();
         for (name, value) in values {
-            let name = http::header::HeaderName::from_bytes(name.as_bytes())
+            let name = rama::http::header::HeaderName::from_bytes(name.as_bytes())
                 .map_err(|error| format!("invalid header name: {error}"))?;
-            let value = http::header::HeaderValue::from_str(&value)
-                .map_err(|error| format!("invalid header value: {error}"))?;
+            let value = value.try_into_header_value()?;
             headers.append(name, value);
         }
         Ok(headers)
@@ -200,36 +221,67 @@ pub async fn run(
         }
     });
 
-    let app = Router::new()
-        .route("/", get(index_handler))
-        .route("/style.css", get(css_handler))
-        .route("/app.js", get(js_handler))
-        .route("/api/v1/auth", post(api_authenticate_browser))
-        .route("/api/v1/wireguard.svg", get(api_wireguard_svg))
-        .route("/ws", get(ws_handler))
-        .route("/api/v1/status", get(api_status))
-        .route("/api/v1/session", get(api_session))
-        .route("/api/v1/flows", get(api_flows).delete(api_clear_flows))
-        .route("/api/v1/filter", get(api_filter_matches))
-        .route("/api/v1/flows/{id}", get(api_flow))
-        .route("/api/v1/flows/{id}/content/{side}", get(api_content))
-        .route("/api/v1/flows/{id}/replay", post(api_replay))
-        .route("/api/v1/intercept", put(api_set_intercept))
-        .route("/api/v1/intercept/{id}", post(api_resolve_intercept))
-        .with_state(state);
+    // GET /ws — gated on same-origin + browser cookie, then handed to the
+    // WebSocket acceptor. Auth must run before the acceptor consumes the request.
+    let ws_route = {
+        let socket_state = Arc::clone(&state);
+        let acceptor =
+            WebSocketAcceptor::new().into_service(service_fn(move |ws: ServerWebSocket| {
+                let state = Arc::clone(&socket_state);
+                async move {
+                    handle_socket(ws, state).await;
+                    Ok::<(), std::convert::Infallible>(())
+                }
+            }));
+        let auth_state = Arc::clone(&state);
+        service_fn(move |req: Request| {
+            let state = Arc::clone(&auth_state);
+            let acceptor = acceptor.clone();
+            async move {
+                // Same-origin (compared against Host) plus browser cookie: allows
+                // LAN addresses/hostnames without permitting cross-site WebSocket use.
+                if !origin_matches_host(req.headers())
+                    || !browser_cookie_matches(req.headers(), &state.browser_token)
+                {
+                    return Ok::<Response, std::convert::Infallible>(
+                        (StatusCode::FORBIDDEN, "Forbidden").into_response(),
+                    );
+                }
+                acceptor.serve(req).await
+            }
+        })
+    };
 
-    let addr = format!("{}:{}", config.addr, config.port);
+    let router = Router::new_with_state(Arc::clone(&state))
+        .with_get("/", index_handler)
+        .with_get("/style.css", css_handler)
+        .with_get("/app.js", js_handler)
+        .with_post("/api/v1/auth", api_authenticate_browser)
+        .with_get("/api/v1/wireguard.svg", api_wireguard_svg)
+        .with_get("/ws", ws_route)
+        .with_get("/api/v1/status", api_status)
+        .with_get("/api/v1/session", api_session)
+        .with_get("/api/v1/flows", api_flows)
+        .with_delete("/api/v1/flows", api_clear_flows)
+        .with_get("/api/v1/filter", api_filter_matches)
+        .with_get("/api/v1/flows/{id}", api_flow)
+        .with_get("/api/v1/flows/{id}/content/{side}", api_content)
+        .with_post("/api/v1/flows/{id}/replay", api_replay)
+        .with_put("/api/v1/intercept", api_set_intercept)
+        .with_post("/api/v1/intercept/{id}", api_resolve_intercept);
 
-    let listener = match tokio::net::TcpListener::bind(&addr).await {
+    let bind_addr = SocketAddr::new(config.addr, config.port);
+    let exec = Executor::default();
+    let listener = match TcpListener::bind_address(bind_addr, exec.clone()).await {
         Ok(l) => l,
         Err(e) => {
-            tracing::error!("Failed to bind web GUI on {addr}: {e}");
+            tracing::error!("Failed to bind web GUI on {bind_addr}: {e}");
             return;
         }
     };
 
     // Open browser *after* successful bind
-    let url = format!("http://{addr}");
+    let url = format!("http://{bind_addr}");
     let browser_url = format!("{url}/#token={browser_token}");
     tracing::info!("Web/API server available at {url}");
     tracing::info!("Browser GUI login URL: {browser_url}");
@@ -244,23 +296,26 @@ pub async fn run(
         }
     }
 
-    if let Err(e) = axum::serve(listener, app)
-        .with_graceful_shutdown(cancel.cancelled_owned())
-        .await
-    {
-        tracing::error!("Web GUI server error: {e}");
+    // `Arc<S>` is always `Clone`, which the per-connection serve loop requires.
+    let app = Arc::new(ErrorHandlerLayer::new().into_layer(router));
+    let server = HttpServer::auto(exec).service(app);
+    tokio::select! {
+        () = listener.serve(server) => {}
+        () = cancel.cancelled() => {
+            tracing::info!("Web GUI shutting down");
+        }
     }
 }
 
 async fn api_wireguard_svg(
-    headers: HeaderMap,
     State(state): State<Arc<WebState>>,
-) -> axum::response::Response {
+    headers: HeaderMap,
+) -> rama::http::Response {
     if !api_authorized(&headers, &state) {
         return forbidden();
     }
     let Some(setup) = &state.wireguard_setup else {
-        return axum::http::StatusCode::NOT_FOUND.into_response();
+        return rama::http::StatusCode::NOT_FOUND.into_response();
     };
     let mut response = setup.svg().to_owned().into_response();
     response.headers_mut().insert(
@@ -322,14 +377,14 @@ fn api_authorized(headers: &HeaderMap, state: &WebState) -> bool {
         || browser_cookie_matches(headers, &state.browser_token)
 }
 
-fn forbidden() -> axum::response::Response {
-    (axum::http::StatusCode::FORBIDDEN, "Forbidden").into_response()
+fn forbidden() -> rama::http::Response {
+    (rama::http::StatusCode::FORBIDDEN, "Forbidden").into_response()
 }
 
 async fn api_authenticate_browser(
-    headers: HeaderMap,
     State(state): State<Arc<WebState>>,
-) -> axum::response::Response {
+    headers: HeaderMap,
+) -> rama::http::Response {
     if !bearer_token(&headers).is_some_and(|token| token == state.browser_token) {
         return forbidden();
     }
@@ -338,7 +393,7 @@ async fn api_authenticate_browser(
         "{BROWSER_COOKIE}={}; HttpOnly; SameSite=Strict; Path=/",
         state.browser_token
     );
-    let mut response = axum::http::StatusCode::NO_CONTENT.into_response();
+    let mut response = rama::http::StatusCode::NO_CONTENT.into_response();
     response.headers_mut().insert(
         SET_COOKIE,
         cookie
@@ -361,9 +416,9 @@ struct ApiStatus {
 }
 
 async fn api_status(
-    headers: HeaderMap,
     State(state): State<Arc<WebState>>,
-) -> axum::response::Response {
+    headers: HeaderMap,
+) -> rama::http::Response {
     if !api_authorized(&headers, &state) {
         return forbidden();
     }
@@ -382,9 +437,9 @@ async fn api_status(
 }
 
 async fn api_session(
-    headers: HeaderMap,
     State(state): State<Arc<WebState>>,
-) -> axum::response::Response {
+    headers: HeaderMap,
+) -> rama::http::Response {
     if !api_authorized(&headers, &state) {
         return forbidden();
     }
@@ -392,10 +447,10 @@ async fn api_session(
 }
 
 async fn api_flows(
-    headers: HeaderMap,
     Query(params): Query<HashMap<String, String>>,
     State(state): State<Arc<WebState>>,
-) -> axum::response::Response {
+    headers: HeaderMap,
+) -> rama::http::Response {
     if !api_authorized(&headers, &state) {
         return forbidden();
     }
@@ -403,7 +458,7 @@ async fn api_flows(
         Some(expression) => match FlowFilter::parse(expression) {
             Ok(filter) => Some(filter),
             Err(error) => {
-                return (axum::http::StatusCode::BAD_REQUEST, error.to_string()).into_response()
+                return (rama::http::StatusCode::BAD_REQUEST, error.to_string()).into_response()
             }
         },
         None => None,
@@ -435,10 +490,10 @@ struct ApiFilterMatches {
 }
 
 async fn api_filter_matches(
-    headers: HeaderMap,
     Query(params): Query<HashMap<String, String>>,
     State(state): State<Arc<WebState>>,
-) -> axum::response::Response {
+    headers: HeaderMap,
+) -> rama::http::Response {
     if !api_authorized(&headers, &state) {
         return forbidden();
     }
@@ -446,7 +501,7 @@ async fn api_filter_matches(
     let filter = match FlowFilter::parse(expression) {
         Ok(filter) => filter,
         Err(error) => {
-            return (axum::http::StatusCode::BAD_REQUEST, error.to_string()).into_response()
+            return (rama::http::StatusCode::BAD_REQUEST, error.to_string()).into_response()
         }
     };
     let recorder = state.recorder.read().await;
@@ -490,16 +545,16 @@ async fn api_filter_matches(
 
 async fn api_flow(
     Path(id): Path<u64>,
-    headers: HeaderMap,
     State(state): State<Arc<WebState>>,
-) -> axum::response::Response {
+    headers: HeaderMap,
+) -> rama::http::Response {
     if !api_authorized(&headers, &state) {
         return forbidden();
     }
     let session = state.recorder.read().await;
     match session.session().flows.iter().find(|flow| flow.id == id) {
         Some(flow) => Json(flow.clone()).into_response(),
-        None => (axum::http::StatusCode::NOT_FOUND, "Flow not found").into_response(),
+        None => (rama::http::StatusCode::NOT_FOUND, "Flow not found").into_response(),
     }
 }
 
@@ -517,15 +572,15 @@ struct ApiContentView {
 
 async fn api_content(
     Path((id, side)): Path<(u64, String)>,
-    headers: HeaderMap,
     State(state): State<Arc<WebState>>,
-) -> axum::response::Response {
+    headers: HeaderMap,
+) -> rama::http::Response {
     if !api_authorized(&headers, &state) {
         return forbidden();
     }
     let session = state.recorder.read().await;
     let Some(flow) = session.session().flows.iter().find(|flow| flow.id == id) else {
-        return (axum::http::StatusCode::NOT_FOUND, "Flow not found").into_response();
+        return (rama::http::StatusCode::NOT_FOUND, "Flow not found").into_response();
     };
     let (headers, body, metadata) = match side.as_str() {
         "request" => (
@@ -540,7 +595,7 @@ async fn api_content(
         ),
         _ => {
             return (
-                axum::http::StatusCode::BAD_REQUEST,
+                rama::http::StatusCode::BAD_REQUEST,
                 "side must be request or response",
             )
                 .into_response()
@@ -566,7 +621,7 @@ async fn api_content(
             .into_response()
         }
         Err(error) => (
-            axum::http::StatusCode::UNPROCESSABLE_ENTITY,
+            rama::http::StatusCode::UNPROCESSABLE_ENTITY,
             error.to_string(),
         )
             .into_response(),
@@ -574,21 +629,21 @@ async fn api_content(
 }
 
 async fn api_clear_flows(
-    headers: HeaderMap,
     State(state): State<Arc<WebState>>,
-) -> axum::response::Response {
+    headers: HeaderMap,
+) -> rama::http::Response {
     if !api_authorized(&headers, &state) {
         return forbidden();
     }
     state.recorder.write().await.clear();
-    axum::http::StatusCode::NO_CONTENT.into_response()
+    rama::http::StatusCode::NO_CONTENT.into_response()
 }
 
 async fn api_replay(
     Path(id): Path<u64>,
-    headers: HeaderMap,
     State(state): State<Arc<WebState>>,
-) -> axum::response::Response {
+    headers: HeaderMap,
+) -> rama::http::Response {
     if !api_authorized(&headers, &state) {
         return forbidden();
     }
@@ -602,12 +657,12 @@ async fn api_replay(
         .find(|flow| flow.id == id)
         .map(|flow| flow.request.clone());
     let Some(request) = request else {
-        return (axum::http::StatusCode::NOT_FOUND, "Flow not found").into_response();
+        return (rama::http::StatusCode::NOT_FOUND, "Flow not found").into_response();
     };
     match state.replay_tx.try_send(request) {
-        Ok(()) => axum::http::StatusCode::ACCEPTED.into_response(),
+        Ok(()) => rama::http::StatusCode::ACCEPTED.into_response(),
         Err(_) => (
-            axum::http::StatusCode::SERVICE_UNAVAILABLE,
+            rama::http::StatusCode::SERVICE_UNAVAILABLE,
             "Replay queue full",
         )
             .into_response(),
@@ -620,15 +675,15 @@ struct SetInterceptBody {
 }
 
 async fn api_set_intercept(
-    headers: HeaderMap,
     State(state): State<Arc<WebState>>,
+    headers: HeaderMap,
     Json(body): Json<SetInterceptBody>,
-) -> axum::response::Response {
+) -> rama::http::Response {
     if !api_authorized(&headers, &state) {
         return forbidden();
     }
     state.intercept.set_enabled(body.enabled);
-    axum::http::StatusCode::NO_CONTENT.into_response()
+    rama::http::StatusCode::NO_CONTENT.into_response()
 }
 
 #[derive(Deserialize)]
@@ -656,19 +711,19 @@ const fn default_drop_status() -> u16 {
 
 async fn api_resolve_intercept(
     Path(id): Path<u64>,
-    headers: HeaderMap,
     State(state): State<Arc<WebState>>,
+    headers: HeaderMap,
     Json(body): Json<ApiInterceptDecision>,
-) -> axum::response::Response {
+) -> rama::http::Response {
     if !api_authorized(&headers, &state) {
         return forbidden();
     }
     let decision = match body {
         ApiInterceptDecision::Forward => InterceptDecision::Forward,
         ApiInterceptDecision::Drop { status, body } => {
-            if http::StatusCode::from_u16(status).is_err() {
+            if rama::http::StatusCode::from_u16(status).is_err() {
                 return (
-                    axum::http::StatusCode::UNPROCESSABLE_ENTITY,
+                    rama::http::StatusCode::UNPROCESSABLE_ENTITY,
                     "Invalid HTTP status",
                 )
                     .into_response();
@@ -684,16 +739,16 @@ async fn api_resolve_intercept(
             headers,
             body,
         } => {
-            if method.parse::<http::Method>().is_err() || uri.parse::<Uri>().is_err() {
+            if method.parse::<rama::http::Method>().is_err() || uri.parse::<Uri>().is_err() {
                 return (
-                    axum::http::StatusCode::UNPROCESSABLE_ENTITY,
+                    rama::http::StatusCode::UNPROCESSABLE_ENTITY,
                     "Invalid method or URI",
                 )
                     .into_response();
             }
             let Ok(headers) = headers.try_into_header_map() else {
                 return (
-                    axum::http::StatusCode::UNPROCESSABLE_ENTITY,
+                    rama::http::StatusCode::UNPROCESSABLE_ENTITY,
                     "Invalid headers",
                 )
                     .into_response();
@@ -701,7 +756,7 @@ async fn api_resolve_intercept(
             let body = match body.try_into_bytes() {
                 Ok(body) => body,
                 Err(error) => {
-                    return (axum::http::StatusCode::UNPROCESSABLE_ENTITY, error).into_response()
+                    return (rama::http::StatusCode::UNPROCESSABLE_ENTITY, error).into_response()
                 }
             };
             InterceptDecision::Modified {
@@ -713,9 +768,9 @@ async fn api_resolve_intercept(
         }
     };
     if state.intercept.resolve(id, decision) {
-        axum::http::StatusCode::NO_CONTENT.into_response()
+        rama::http::StatusCode::NO_CONTENT.into_response()
     } else {
-        (axum::http::StatusCode::NOT_FOUND, "Pending flow not found").into_response()
+        (rama::http::StatusCode::NOT_FOUND, "Pending flow not found").into_response()
     }
 }
 
@@ -724,12 +779,12 @@ async fn index_handler() -> Html<&'static str> {
 }
 
 async fn css_handler() -> impl IntoResponse {
-    ([(axum::http::header::CONTENT_TYPE, "text/css")], STYLE_CSS)
+    ([(rama::http::header::CONTENT_TYPE, "text/css")], STYLE_CSS)
 }
 
 async fn js_handler() -> impl IntoResponse {
     (
-        [(axum::http::header::CONTENT_TYPE, "application/javascript")],
+        [(rama::http::header::CONTENT_TYPE, "application/javascript")],
         APP_JS,
     )
 }
@@ -748,31 +803,12 @@ fn origin_matches_host(headers: &HeaderMap) -> bool {
     origin.scheme_str() == Some("http")
         && origin
             .authority()
-            .is_some_and(|authority| authority.as_str().eq_ignore_ascii_case(host))
-        && origin
-            .path_and_query()
-            .is_none_or(|path_and_query| path_and_query.as_str() == "/")
+            .is_some_and(|authority| authority.to_string().eq_ignore_ascii_case(host))
+        && origin.path_or_root().as_ref() == "/"
+        && origin.query().is_none()
 }
 
-async fn ws_handler(
-    ws: WebSocketUpgrade,
-    headers: HeaderMap,
-    State(state): State<Arc<WebState>>,
-) -> axum::response::Response {
-    // The GUI and its WebSocket are same-origin. Comparing against Host allows
-    // LAN addresses and hostnames without permitting cross-site WebSocket use.
-    if !origin_matches_host(&headers) {
-        return (axum::http::StatusCode::FORBIDDEN, "Forbidden").into_response();
-    }
-
-    if !browser_cookie_matches(&headers, &state.browser_token) {
-        return (axum::http::StatusCode::FORBIDDEN, "Forbidden").into_response();
-    }
-
-    ws.on_upgrade(move |socket| handle_socket(socket, state))
-}
-
-async fn handle_socket(mut socket: WebSocket, state: Arc<WebState>) {
+async fn handle_socket(mut ws: ServerWebSocket, state: Arc<WebState>) {
     let mut rx = state.broadcast_tx.subscribe();
 
     loop {
@@ -781,7 +817,7 @@ async fn handle_socket(mut socket: WebSocket, state: Arc<WebState>) {
             result = rx.recv() => {
                 match result {
                     Ok(msg) => {
-                        if socket.send(Message::Text(msg.into())).await.is_err() {
+                        if ws.send_message(Message::text(msg)).await.is_err() {
                             break;
                         }
                     }
@@ -792,16 +828,13 @@ async fn handle_socket(mut socket: WebSocket, state: Arc<WebState>) {
                 }
             }
             // Browser → proxy commands
-            result = socket.recv() => {
+            result = ws.recv_message() => {
                 match result {
-                    Some(Ok(Message::Text(text))) => {
-                        handle_client_message(&text, &state).await;
+                    Ok(Message::Text(text)) => {
+                        handle_client_message(text.as_str(), &state).await;
                     }
-                    Some(Ok(Message::Close(_))) | None => break,
-                    Some(Err(e)) => {
-                        tracing::debug!("WebSocket receive error: {e}");
-                        break;
-                    }
+                    // A receive error signals a closed/reset connection in rama-ws.
+                    Ok(Message::Close(_)) | Err(_) => break,
                     _ => {} // Ping/Pong/Binary ignored
                 }
             }
@@ -847,7 +880,7 @@ async fn handle_client_message(text: &str, state: &WebState) {
             headers,
             body,
         } => {
-            let Ok(method) = method.parse::<http::Method>() else {
+            let Ok(method) = method.parse::<rama::http::Method>() else {
                 tracing::warn!("Invalid method in browser intercept edit");
                 return;
             };
@@ -904,8 +937,14 @@ async fn handle_client_message(text: &str, state: &WebState) {
                 tracing::warn!("Invalid structured body in browser replay");
                 return;
             };
-            let req =
-                ProxiedRequest::new(method, uri, http::Version::HTTP_11, header_map, body, now);
+            let req = ProxiedRequest::new(
+                method,
+                uri,
+                rama::http::Version::HTTP_11,
+                header_map,
+                body,
+                now,
+            );
             if state.replay_tx.try_send(req).is_err() {
                 tracing::warn!("Replay channel full");
             }
@@ -916,10 +955,10 @@ async fn handle_client_message(text: &str, state: &WebState) {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use axum::body::to_bytes;
-    use axum::response::IntoResponse;
-    use http::{HeaderValue, Method, Version};
     use proxyapi_models::{ProxiedResponse, WsDirection, WsFrame, WsOpcode};
+    use rama::http::body::util::BodyExt as _;
+    use rama::http::service::web::response::IntoResponse;
+    use rama::http::{HeaderValue, Method, Version};
 
     fn test_state() -> (
         WebState,
@@ -943,8 +982,8 @@ mod tests {
         )
     }
 
-    async fn response_text(response: axum::response::Response) -> String {
-        let bytes = to_bytes(response.into_body(), usize::MAX).await.unwrap();
+    async fn response_text(response: rama::http::Response) -> String {
+        let bytes = response.into_body().collect().await.unwrap().to_bytes();
         String::from_utf8(bytes.to_vec()).unwrap()
     }
 
@@ -970,16 +1009,16 @@ mod tests {
     #[tokio::test]
     async fn static_asset_handlers_return_expected_content() {
         let index = index_handler().await.into_response();
-        assert_eq!(index.status(), http::StatusCode::OK);
+        assert_eq!(index.status(), rama::http::StatusCode::OK);
         assert!(response_text(index).await.contains("<html"));
 
         let css = css_handler().await.into_response();
-        assert_eq!(css.headers()[http::header::CONTENT_TYPE], "text/css");
+        assert_eq!(css.headers()[rama::http::header::CONTENT_TYPE], "text/css");
         assert!(response_text(css).await.contains(":root"));
 
         let js = js_handler().await.into_response();
         assert_eq!(
-            js.headers()[http::header::CONTENT_TYPE],
+            js.headers()[rama::http::header::CONTENT_TYPE],
             "application/javascript"
         );
         let js_text = response_text(js).await;
@@ -1060,9 +1099,9 @@ mod tests {
         let mut headers = HeaderMap::new();
         headers.insert(AUTHORIZATION, "Bearer browser-token".parse().unwrap());
 
-        let response = api_authenticate_browser(headers, State(Arc::new(state))).await;
+        let response = api_authenticate_browser(State(Arc::new(state)), headers).await;
 
-        assert_eq!(response.status(), http::StatusCode::NO_CONTENT);
+        assert_eq!(response.status(), rama::http::StatusCode::NO_CONTENT);
         assert_eq!(
             response.headers()[SET_COOKIE],
             "proxelar_session=browser-token; HttpOnly; SameSite=Strict; Path=/"
@@ -1076,9 +1115,9 @@ mod tests {
             let mut headers = HeaderMap::new();
             headers.insert(AUTHORIZATION, format!("Bearer {token}").parse().unwrap());
 
-            let response = api_authenticate_browser(headers, State(Arc::new(state))).await;
+            let response = api_authenticate_browser(State(Arc::new(state)), headers).await;
 
-            assert_eq!(response.status(), http::StatusCode::FORBIDDEN);
+            assert_eq!(response.status(), rama::http::StatusCode::FORBIDDEN);
             assert!(!response.headers().contains_key(SET_COOKIE));
         }
     }
@@ -1097,14 +1136,17 @@ mod tests {
         let state = Arc::new(state);
 
         let forbidden_response =
-            api_wireguard_svg(HeaderMap::new(), State(Arc::clone(&state))).await;
-        assert_eq!(forbidden_response.status(), http::StatusCode::FORBIDDEN);
+            api_wireguard_svg(State(Arc::clone(&state)), HeaderMap::new()).await;
+        assert_eq!(
+            forbidden_response.status(),
+            rama::http::StatusCode::FORBIDDEN
+        );
 
         let mut headers = HeaderMap::new();
         headers.insert(COOKIE, "proxelar_session=browser-token".parse().unwrap());
-        let response = api_wireguard_svg(headers, State(state)).await;
+        let response = api_wireguard_svg(State(state), headers).await;
 
-        assert_eq!(response.status(), http::StatusCode::OK);
+        assert_eq!(response.status(), rama::http::StatusCode::OK);
         assert_eq!(
             response.headers()[CONTENT_TYPE],
             "image/svg+xml; charset=utf-8"
@@ -1184,7 +1226,7 @@ mod tests {
     fn intercepted_protobuf_event_includes_structured_editor() {
         let mut headers = HeaderMap::new();
         headers.insert(
-            http::header::CONTENT_TYPE,
+            rama::http::header::CONTENT_TYPE,
             "application/x-protobuf".parse().unwrap(),
         );
         let request = ProxiedRequest::new(
@@ -1251,10 +1293,44 @@ mod tests {
 
         let req = replay_rx.recv().await.unwrap();
         assert_eq!(req.method(), Method::POST);
-        assert_eq!(req.uri().path(), "/replay");
+        assert_eq!(req.uri().path().unwrap(), "/replay");
         assert_eq!(req.version(), Version::HTTP_11);
-        assert_eq!(req.headers()[http::header::CONTENT_TYPE], "text/plain");
+        assert_eq!(
+            req.headers()[rama::http::header::CONTENT_TYPE],
+            "text/plain"
+        );
         assert_eq!(req.body().as_ref(), b"again");
+    }
+
+    #[tokio::test]
+    async fn replay_accepts_ordered_header_pairs_without_losing_duplicates() {
+        let (state, _broadcast_rx, mut replay_rx) = test_state();
+
+        handle_client_message(
+            r#"{
+                "type":"Replay",
+                "method":"GET",
+                "uri":"http://api.test/ordered",
+                "headers":[
+                    ["x-repeat","one"],
+                    ["x-opaque",[128,255]],
+                    ["x-repeat","two"]
+                ],
+                "body":""
+            }"#,
+            &state,
+        )
+        .await;
+
+        let request = replay_rx.recv().await.unwrap();
+        let repeated = request
+            .headers()
+            .get_all("x-repeat")
+            .iter()
+            .map(|value| value.as_bytes())
+            .collect::<Vec<_>>();
+        assert_eq!(repeated, [b"one".as_slice(), b"two".as_slice()]);
+        assert_eq!(request.headers()["x-opaque"].as_bytes(), &[128, 255]);
     }
 
     #[tokio::test]
@@ -1307,7 +1383,7 @@ mod tests {
                 1,
             )),
             response: Box::new(ProxiedResponse::new(
-                http::StatusCode::OK,
+                rama::http::StatusCode::OK,
                 Version::HTTP_11,
                 HeaderMap::new(),
                 Bytes::new(),

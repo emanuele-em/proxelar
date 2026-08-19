@@ -13,10 +13,10 @@ Configure your client (browser, curl, application) to use `127.0.0.1:8080` as th
 ## How it works
 
 1. The client sends a request to the proxy
-2. For HTTPS, the client sends a `CONNECT` request. Proxelar upgrades the connection and detects the protocol:
-   - **TLS ClientHello** — generates a leaf certificate for the target host, terminates TLS, and inspects the decrypted traffic
-   - **Plain HTTP** (e.g., `GET` prefix) — serves the stream directly
-   - **Unknown protocol** — tunnels the raw TCP connection without inspection
+2. For HTTPS, the client sends a `CONNECT` request. Proxelar establishes the target before returning success, then detects the tunneled protocol:
+   - **TLS ClientHello** — Rama mirrors the upstream TLS connection and origin certificate through Proxelar's persistent CA, allowing decrypted traffic to be inspected
+   - **Plain HTTP** (e.g., `GET` prefix) — Rama relays the established connection through Proxelar's capture middleware
+   - **Unknown protocol** — the same established connection is tunneled while its raw bytes are observed
 3. For plain HTTP, the request is forwarded directly
 4. Lua `on_request` / `on_response` hooks run at each step (if a script is loaded)
 

@@ -1,11 +1,12 @@
 use std::collections::VecDeque;
 
 use chrono::{Local, TimeZone};
-use http::{HeaderMap, Uri};
 use proxyapi_models::{
     CapturedDnsExchange, CapturedTcpStream, CapturedUdpExchange, StreamDirection, WsDirection,
     WsFrame, WsOpcode,
 };
+use rama::http::HeaderMap;
+use rama::net::uri::Uri;
 use ratatui::{
     layout::{Alignment, Constraint, Direction, Layout, Rect},
     style::{Color, Modifier, Style},
@@ -79,7 +80,7 @@ pub fn draw(f: &mut Frame, state: &mut AppState, wireguard_setup: Option<&WireGu
                 let method = request.method().as_str();
                 let status = response.status().as_u16();
                 let uri = request.uri();
-                let host = uri.host().unwrap_or("-");
+                let host = host_label(uri);
                 let path = path_and_query(uri);
                 let body_len = response.body().len();
                 let size = format_size(body_len);
@@ -105,7 +106,7 @@ pub fn draw(f: &mut Frame, state: &mut AppState, wireguard_setup: Option<&WireGu
             FlowEntry::Pending { request, .. } => {
                 let method = request.method().as_str();
                 let uri = request.uri();
-                let host = uri.host().unwrap_or("-");
+                let host = host_label(uri);
                 let path = path_and_query(uri);
                 let time_str = format_time(request.time());
                 let proto = proto_from_uri(uri, false);
@@ -146,7 +147,7 @@ pub fn draw(f: &mut Frame, state: &mut AppState, wireguard_setup: Option<&WireGu
                 ..
             } => {
                 let uri = request.uri();
-                let host = uri.host().unwrap_or("-");
+                let host = host_label(uri);
                 let path = path_and_query(uri);
                 let time_str = format_time(request.time());
                 let proto = proto_from_uri(uri, true);
@@ -673,9 +674,12 @@ fn build_request_lines(request: &proxyapi_models::ProxiedRequest) -> Vec<Line<'s
         Line::from(""),
     ];
 
-    for (name, value) in request.headers() {
+    for (name, value) in request.headers().ordered_iter() {
         lines.push(Line::from(vec![
-            Span::styled(name.as_str().to_owned(), Style::default().fg(Color::Cyan)),
+            Span::styled(
+                name.display_original().to_string(),
+                Style::default().fg(Color::Cyan),
+            ),
             Span::raw(": "),
             Span::raw(String::from_utf8_lossy(value.as_bytes()).into_owned()),
         ]));
@@ -715,9 +719,12 @@ fn build_response_lines(response: &proxyapi_models::ProxiedResponse) -> Vec<Line
         Line::from(""),
     ];
 
-    for (name, value) in response.headers() {
+    for (name, value) in response.headers().ordered_iter() {
         lines.push(Line::from(vec![
-            Span::styled(name.as_str().to_owned(), Style::default().fg(Color::Cyan)),
+            Span::styled(
+                name.display_original().to_string(),
+                Style::default().fg(Color::Cyan),
+            ),
             Span::raw(": "),
             Span::raw(String::from_utf8_lossy(value.as_bytes()).into_owned()),
         ]));
@@ -742,7 +749,7 @@ fn build_response_lines(response: &proxyapi_models::ProxiedResponse) -> Vec<Line
     lines
 }
 
-fn render_body(headers: &http::HeaderMap, body: &[u8]) -> String {
+fn render_body(headers: &rama::http::HeaderMap, body: &[u8]) -> String {
     match proxyapi::content::content_view(headers, body) {
         Ok(view) => view.text,
         Err(error) => format!(
@@ -981,9 +988,18 @@ fn format_time(millis: i64) -> String {
 }
 
 fn path_and_query(uri: &Uri) -> String {
-    uri.path_and_query()
-        .map(|pq| pq.as_str().to_owned())
-        .unwrap_or_else(|| uri.path().to_owned())
+    let path = uri.path_or_root();
+    let query = uri.query_or_empty();
+    if query.is_empty() {
+        path.into_owned()
+    } else {
+        format!("{path}?{query}")
+    }
+}
+
+fn host_label(uri: &Uri) -> String {
+    uri.host_str()
+        .map_or_else(|| "-".to_owned(), |host| host.into_owned())
 }
 
 fn proto_from_uri(uri: &Uri, is_ws: bool) -> &'static str {
@@ -998,7 +1014,7 @@ fn proto_from_uri(uri: &Uri, is_ws: bool) -> &'static str {
 
 fn abbrev_content_type(headers: &HeaderMap) -> String {
     headers
-        .get(http::header::CONTENT_TYPE)
+        .get(rama::http::header::CONTENT_TYPE)
         .and_then(|v| v.to_str().ok())
         .map(|s| s.split(';').next().unwrap_or(s).trim().to_owned())
         .unwrap_or_else(|| "[no content]".to_owned())
@@ -1199,9 +1215,9 @@ fn draw_help_modal(f: &mut Frame) {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use bytes::Bytes;
-    use http::{HeaderMap, Method, StatusCode, Version};
     use proxyapi_models::{ProxiedRequest, ProxiedResponse};
+    use rama::bytes::Bytes;
+    use rama::http::{HeaderMap, Method, StatusCode, Version};
     use ratatui::{backend::TestBackend, buffer::Buffer, Terminal};
 
     fn request(method: Method, uri: &str, body: Bytes, time: i64) -> Box<ProxiedRequest> {
@@ -1226,7 +1242,10 @@ mod tests {
     ) -> Box<ProxiedResponse> {
         let mut headers = HeaderMap::new();
         if let Some(content_type) = content_type {
-            headers.insert(http::header::CONTENT_TYPE, content_type.parse().unwrap());
+            headers.insert(
+                rama::http::header::CONTENT_TYPE,
+                content_type.parse().unwrap(),
+            );
         }
         Box::new(ProxiedResponse::new(
             status,

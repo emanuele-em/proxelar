@@ -22,12 +22,14 @@ proxelar addon <list|inspect|verify|install> [OPTIONS]
 | `--ca-dir` | | `~/.proxelar` | Directory for CA certificate and key files |
 | `--body-capture-limit` | | `free` | Maximum body bytes buffered for capture/editing; use `free`, `unlimited`, or `none` for unlimited |
 | `--upstream-trust` | | `default` | Upstream TLS trust policy: `default`, `default+ca:/path/ca.pem`, `ca-only:/path/ca.pem`, or `insecure` |
+| `--upstream-http-version` | | `auto` | Preserve the incoming HTTP version, or force `http1`/`http2` upstream |
+| `--peek-timeout-policy` | | `fail-open` | On inconclusive TLS/HTTP peeks, use observed raw forwarding (`fail-open`) or close (`fail-closed`) |
 | `--upstream-proxy` | | — | Chain traffic through `http://HOST:PORT` or `socks5://HOST:PORT` |
 | `--upstream-proxy-auth` | | — | Upstream proxy credentials as `USERNAME:PASSWORD` |
 | `--load-session` | | — | Load a native session before capture |
 | `--import-har` | | — | Import HAR before capture (conflicts with `--load-session`) |
 | `--save-session` | | — | Save a native session on clean shutdown |
-| `--export-har` | | — | Export HTTP flows as HAR on clean shutdown |
+| `--export-har` | | — | Export HTTP and WebSocket traffic as HAR on clean shutdown |
 | `--export-curl` | | — | Export requests as curl commands on clean shutdown |
 | `--export-raw` | | — | Write raw request/response files to a directory on clean shutdown |
 | `--export-secrets` | | off | Disable default credential/query-secret redaction in exports |

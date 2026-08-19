@@ -7,13 +7,26 @@ use std::io::Write as _;
 use std::path::Path;
 
 use base64::Engine as _;
-use bytes::Bytes;
 use chrono::{TimeZone as _, Utc};
-use http::{HeaderMap, HeaderName, HeaderValue, Method, StatusCode, Uri, Version};
 use proxyapi_models::{
     BodyMetadata, CapturedDnsExchange, CapturedFlow, CapturedTcpStream, CapturedWebSocket,
-    ProxiedRequest, ProxiedResponse, TrafficSession, SESSION_FORMAT_VERSION,
+    ProxiedRequest, ProxiedResponse, TrafficSession, WsDirection, WsFrame, WsOpcode,
+    SESSION_FORMAT_VERSION,
 };
+use rama::bytes::Bytes;
+use rama::http::convert::curl::{
+    cmd_string_for_request_parts_with_options,
+    try_cmd_string_for_request_parts_and_payload_with_options, CurlExportOptions,
+    CurlScriptCompatibility, CurlScriptPayloadMode,
+};
+use rama::http::layer::har::spec::{
+    Request as HarRequest, Response as HarResponse, WebSocketMessage, WebSocketMessageType,
+};
+use rama::http::{
+    HeaderMap, HeaderName, HeaderValue, Method, Request, Response, StatusCode, Version,
+};
+use rama::net::uri::Uri;
+use rama::net::Protocol;
 use serde_json::{json, Value};
 use thiserror::Error;
 
@@ -93,7 +106,7 @@ impl RedactionPolicy {
 
     fn redact_headers(&self, headers: &HeaderMap) -> HeaderMap {
         let mut redacted = HeaderMap::new();
-        for (name, value) in headers {
+        for (name, value) in headers.ordered_iter() {
             let value = if self.header_names.contains(name) {
                 HeaderValue::from_str(&self.replacement)
                     .unwrap_or_else(|_| HeaderValue::from_static("[REDACTED]"))
@@ -106,11 +119,12 @@ impl RedactionPolicy {
     }
 
     fn redact_uri(&self, uri: &Uri) -> Uri {
-        let Some(query) = uri.query() else {
+        let query = uri.query_or_empty();
+        if query.is_empty() {
             return uri.clone();
-        };
+        }
         let mut changed = false;
-        let query = query
+        let redacted_query = query
             .split('&')
             .map(|pair| {
                 let (name, value) = pair.split_once('=').unwrap_or((pair, ""));
@@ -129,10 +143,7 @@ impl RedactionPolicy {
             return uri.clone();
         }
 
-        let mut parts = uri.clone().into_parts();
-        let path = uri.path();
-        parts.path_and_query = format!("{path}?{query}").parse().ok();
-        Uri::from_parts(parts).unwrap_or_else(|_| uri.clone())
+        uri.clone().with_query_from_bytes(redacted_query)
     }
 
     fn redact_request(&self, request: &ProxiedRequest) -> ProxiedRequest {
@@ -179,7 +190,7 @@ impl SessionRecorder {
     }
 
     pub fn from_session(session: TrafficSession) -> Result<Self, SessionError> {
-        validate_version(&session)?;
+        let session = migrate_session(session)?;
         let largest_id = session
             .flows
             .iter()
@@ -394,8 +405,7 @@ pub(crate) fn write_private(path: &Path, bytes: &[u8]) -> Result<(), std::io::Er
 pub fn load_session(path: impl AsRef<Path>) -> Result<TrafficSession, SessionError> {
     let bytes = fs::read(path)?;
     let session = serde_json::from_slice(&bytes)?;
-    validate_version(&session)?;
-    Ok(session)
+    migrate_session(session)
 }
 
 /// Recreate the public event stream represented by a stored session.
@@ -498,16 +508,45 @@ fn validate_version(session: &TrafficSession) -> Result<(), SessionError> {
     Ok(())
 }
 
+fn migrate_session(mut session: TrafficSession) -> Result<TrafficSession, SessionError> {
+    match session.version {
+        // Version 2 changed headers from name-keyed objects to ordered
+        // [name, value] tuples. proxyapi_models accepts both representations,
+        // so migration only needs to advance the version marker.
+        1 => session.version = SESSION_FORMAT_VERSION,
+        SESSION_FORMAT_VERSION => {}
+        _ => {
+            return Err(SessionError::UnsupportedVersion {
+                found: session.version,
+                supported: SESSION_FORMAT_VERSION,
+            });
+        }
+    }
+    Ok(session)
+}
+
 pub fn export_har(
     path: impl AsRef<Path>,
     session: &TrafficSession,
     redaction: Option<&RedactionPolicy>,
 ) -> Result<(), SessionError> {
-    let entries: Vec<Value> = session
+    let mut entries: Vec<(i64, u64, Value)> = session
         .flows
         .iter()
-        .map(|flow| har_entry(flow, redaction))
+        .map(|flow| (flow.request.time(), flow.id, har_entry(flow, redaction)))
+        .chain(session.websockets.iter().map(|connection| {
+            (
+                connection.request.time(),
+                connection.id,
+                har_websocket_entry(connection, redaction),
+            )
+        }))
         .collect();
+    entries.sort_by_key(|(time, id, _)| (*time, *id));
+    let entries = entries
+        .into_iter()
+        .map(|(_, _, entry)| entry)
+        .collect::<Vec<_>>();
     let har = json!({
         "log": {
             "version": "1.2",
@@ -520,104 +559,142 @@ pub fn export_har(
 }
 
 fn har_entry(flow: &CapturedFlow, redaction: Option<&RedactionPolicy>) -> Value {
+    har_exchange_entry(&flow.request, &flow.response, redaction)
+}
+
+fn har_websocket_entry(
+    connection: &CapturedWebSocket,
+    redaction: Option<&RedactionPolicy>,
+) -> Value {
+    let mut uri = connection.request.uri().clone();
+    match uri.scheme() {
+        Some(scheme) if scheme == &Protocol::HTTP => {
+            uri.set_scheme(Protocol::WS);
+        }
+        Some(scheme) if scheme == &Protocol::HTTPS => {
+            uri.set_scheme(Protocol::WSS);
+        }
+        _ => {}
+    }
+    let request = ProxiedRequest::new_with_body_metadata(
+        connection.request.method().clone(),
+        uri,
+        connection.request.version(),
+        connection.request.headers().clone(),
+        connection.request.body().clone(),
+        connection.request.body_metadata(),
+        connection.request.time(),
+    );
+    let mut entry = har_exchange_entry(&request, &connection.response, redaction);
+    let object = entry
+        .as_object_mut()
+        .expect("HAR entries are always JSON objects");
+    object.insert("_resourceType".to_owned(), json!("websocket"));
+    object.insert(
+        "_webSocketMessages".to_owned(),
+        Value::Array(
+            connection
+                .frames
+                .iter()
+                .filter_map(har_websocket_message)
+                .collect(),
+        ),
+    );
+    entry
+}
+
+fn har_websocket_message(frame: &WsFrame) -> Option<Value> {
+    let direction = match frame.direction {
+        WsDirection::ClientToServer => WebSocketMessageType::Send,
+        WsDirection::ServerToClient => WebSocketMessageType::Receive,
+    };
+    let time = frame.time as f64 / 1_000.0;
+    let message = match frame.opcode {
+        WsOpcode::Text => WebSocketMessage::text(
+            direction,
+            time,
+            String::from_utf8_lossy(&frame.payload).into_owned(),
+        ),
+        WsOpcode::Binary => WebSocketMessage::binary(direction, time, &frame.payload),
+        // Chromium's HAR extension stores complete data messages, not control
+        // frames or fragmentation details. Keep those in the native session.
+        WsOpcode::Continuation | WsOpcode::Close | WsOpcode::Ping | WsOpcode::Pong => return None,
+    };
+    let mut value = serde_json::to_value(message).expect("WebSocket HAR message serializes");
+    if frame.truncated {
+        value
+            .as_object_mut()
+            .expect("WebSocket HAR messages are JSON objects")
+            .insert("_proxelarTruncated".to_owned(), Value::Bool(true));
+    }
+    Some(value)
+}
+
+fn har_exchange_entry(
+    captured_request: &ProxiedRequest,
+    captured_response: &ProxiedResponse,
+    redaction: Option<&RedactionPolicy>,
+) -> Value {
     let request = redaction
-        .map(|policy| policy.redact_request(&flow.request))
-        .unwrap_or_else(|| flow.request.clone());
+        .map(|policy| policy.redact_request(captured_request))
+        .unwrap_or_else(|| captured_request.clone());
     let response = redaction
-        .map(|policy| policy.redact_response(&flow.response))
-        .unwrap_or_else(|| flow.response.clone());
+        .map(|policy| policy.redact_response(captured_response))
+        .unwrap_or_else(|| captured_response.clone());
     let duration = response.time().saturating_sub(request.time()).max(0);
     let started = Utc
         .timestamp_millis_opt(request.time())
         .single()
         .unwrap_or_else(Utc::now)
         .to_rfc3339();
-    let request_body = har_content(request.body(), request.headers(), request.body_metadata());
-    let response_body = har_content(
-        response.body(),
-        response.headers(),
-        response.body_metadata(),
-    );
-    let query = request
-        .uri()
-        .query()
-        .map(|query| {
-            query
-                .split('&')
-                .map(|pair| {
-                    let (name, value) = pair.split_once('=').unwrap_or((pair, ""));
-                    json!({"name": name, "value": value})
-                })
-                .collect::<Vec<_>>()
-        })
-        .unwrap_or_default();
+    let request = har_request(&request);
+    let response = har_response(&response);
 
     json!({
         "startedDateTime": started,
         "time": duration,
-        "request": {
-            "method": request.method().as_str(),
-            "url": request.uri().to_string(),
-            "httpVersion": version_string(request.version()),
-            "headers": har_headers(request.headers()),
-            "queryString": query,
-            "cookies": [],
-            "headersSize": -1,
-            "bodySize": request.body_metadata().total_seen,
-            "postData": request_body,
-            "comment": truncation_comment(request.body_metadata())
-        },
-        "response": {
-            "status": response.status().as_u16(),
-            "statusText": response.status().canonical_reason().unwrap_or(""),
-            "httpVersion": version_string(response.version()),
-            "headers": har_headers(response.headers()),
-            "cookies": [],
-            "content": response_body,
-            "redirectURL": response.headers().get(http::header::LOCATION)
-                .and_then(|value| value.to_str().ok()).unwrap_or(""),
-            "headersSize": -1,
-            "bodySize": response.body_metadata().total_seen,
-            "comment": truncation_comment(response.body_metadata())
-        },
+        "request": request,
+        "response": response,
         "cache": {},
         "timings": { "send": 0, "wait": duration, "receive": 0 }
     })
 }
 
-fn har_headers(headers: &HeaderMap) -> Vec<Value> {
-    headers
-        .iter()
-        .map(|(name, value)| {
-            json!({
-                "name": name.as_str(),
-                "value": String::from_utf8_lossy(value.as_bytes())
-            })
-        })
-        .collect()
+fn har_request(captured: &ProxiedRequest) -> HarRequest {
+    let mut request = Request::builder()
+        .method(captured.method().clone())
+        .uri(captured.uri().clone())
+        .version(captured.version())
+        .body(())
+        .expect("captured request parts remain valid");
+    *request.headers_mut() = captured.headers().clone();
+    let (parts, ()) = request.into_parts();
+    let mut request = HarRequest::from_http_request_parts(&parts, captured.body(), true)
+        .expect("captured request converts to HAR");
+    request.body_size = i64::try_from(captured.body_metadata().total_seen).unwrap_or(i64::MAX);
+    request.comment = truncation_comment(captured.body_metadata()).map(Into::into);
+    if let Some(post_data) = request.post_data.as_mut() {
+        post_data.comment = truncation_comment(captured.body_metadata()).map(Into::into);
+    }
+    request
 }
 
-fn har_content(body: &Bytes, headers: &HeaderMap, metadata: BodyMetadata) -> Value {
-    let mime = headers
-        .get(http::header::CONTENT_TYPE)
-        .and_then(|value| value.to_str().ok())
-        .unwrap_or("application/octet-stream");
-    if let Ok(text) = std::str::from_utf8(body) {
-        json!({
-            "size": metadata.total_seen,
-            "mimeType": mime,
-            "text": text,
-            "comment": truncation_comment(metadata)
-        })
-    } else {
-        json!({
-            "size": metadata.total_seen,
-            "mimeType": mime,
-            "text": base64::engine::general_purpose::STANDARD.encode(body),
-            "encoding": "base64",
-            "comment": truncation_comment(metadata)
-        })
-    }
+fn har_response(captured: &ProxiedResponse) -> HarResponse {
+    let mut response = Response::builder()
+        .status(captured.status())
+        .version(captured.version())
+        .body(())
+        .expect("captured response parts remain valid");
+    *response.headers_mut() = captured.headers().clone();
+    let (parts, ()) = response.into_parts();
+    let mut response = HarResponse::from_http_response_parts(&parts, captured.body(), true)
+        .expect("captured response converts to HAR");
+    let total_seen = i64::try_from(captured.body_metadata().total_seen).unwrap_or(i64::MAX);
+    response.body_size = total_seen;
+    response.content.size = total_seen;
+    response.comment = truncation_comment(captured.body_metadata()).map(Into::into);
+    response.content.comment = truncation_comment(captured.body_metadata()).map(Into::into);
+    response
 }
 
 fn truncation_comment(metadata: BodyMetadata) -> Option<String> {
@@ -640,39 +717,42 @@ pub fn export_curl(
             .map(|policy| policy.redact_request(&flow.request))
             .unwrap_or_else(|| flow.request.clone());
         writeln!(output, "# flow {}", flow.id).expect("writing to String cannot fail");
-        write!(
-            output,
-            "curl --request {} {}",
-            shell_quote(request.method().as_str()),
-            shell_quote(&request.uri().to_string())
-        )
-        .expect("writing to String cannot fail");
-        for (name, value) in request.headers() {
-            let header = format!(
-                "{}: {}",
-                name.as_str(),
-                String::from_utf8_lossy(value.as_bytes())
-            );
-            output.push_str(" \\");
-            output.push('\n');
-            write!(output, "  --header {}", shell_quote(&header))
-                .expect("writing to String cannot fail");
-        }
-        if !request.body().is_empty() {
-            let encoded = base64::engine::general_purpose::STANDARD.encode(request.body());
-            output.push_str(" \\");
-            output.push('\n');
-            write!(
-                output,
-                "  --data-binary \"$(printf %s {} | base64 --decode)\"",
-                shell_quote(&encoded)
+
+        // Delegate the curl command to rama. `Unix` script compatibility keeps
+        // binary bodies replayable (base64-piped) in the generated shell script.
+        let req = curl_request(&request)?;
+        let options =
+            CurlExportOptions::default().with_script_compatibility(CurlScriptCompatibility::Unix);
+        let command = if request.body().is_empty() {
+            cmd_string_for_request_parts_with_options(&req, options)
+        } else {
+            try_cmd_string_for_request_parts_and_payload_with_options(
+                &req,
+                request.body(),
+                options,
+                &CurlScriptPayloadMode::Inline,
             )
-            .expect("writing to String cannot fail");
-        }
+            .map_err(|error| SessionError::InvalidHttp(error.to_string()))?
+        };
+        output.push_str(&command);
         output.push_str("\n\n");
     }
     fs::write(path, output)?;
     Ok(())
+}
+
+/// Rebuild a bodyless rama request from a captured snapshot so rama's curl
+/// exporter can read its method, URI, version and headers. The body is passed
+/// to the exporter separately.
+fn curl_request(request: &ProxiedRequest) -> Result<Request<()>, SessionError> {
+    let mut req = Request::builder()
+        .method(request.method().clone())
+        .uri(request.uri().clone())
+        .version(request.version())
+        .body(())
+        .map_err(|error| SessionError::InvalidHttp(error.to_string()))?;
+    *req.headers_mut() = request.headers().clone();
+    Ok(req)
 }
 
 pub fn export_raw(
@@ -702,10 +782,13 @@ pub fn export_raw(
 }
 
 fn raw_request(request: &ProxiedRequest) -> Vec<u8> {
-    let target = request
-        .uri()
-        .path_and_query()
-        .map_or("/", |value| value.as_str());
+    let path = request.uri().path_or_root();
+    let raw_query = request.uri().query_or_empty();
+    let target = if raw_query.is_empty() {
+        path.into_owned()
+    } else {
+        format!("{path}?{raw_query}")
+    };
     let mut output = format!(
         "{} {} {}\r\n",
         request.method(),
@@ -730,18 +813,14 @@ fn raw_response(response: &ProxiedResponse) -> Vec<u8> {
 }
 
 fn append_headers_and_body(output: &mut Vec<u8>, headers: &HeaderMap, body: &Bytes) {
-    for (name, value) in headers {
-        output.extend_from_slice(name.as_str().as_bytes());
+    for (name, value) in headers.ordered_iter() {
+        output.extend_from_slice(name.as_original_str().as_bytes());
         output.extend_from_slice(b": ");
         output.extend_from_slice(value.as_bytes());
         output.extend_from_slice(b"\r\n");
     }
     output.extend_from_slice(b"\r\n");
     output.extend_from_slice(body);
-}
-
-fn shell_quote(value: &str) -> String {
-    format!("'{}'", value.replace('\'', "'\\''"))
 }
 
 fn version_string(version: Version) -> &'static str {
@@ -751,7 +830,6 @@ fn version_string(version: Version) -> &'static str {
         Version::HTTP_11 => "HTTP/1.1",
         Version::HTTP_2 => "HTTP/2",
         Version::HTTP_3 => "HTTP/3",
-        _ => "HTTP/1.1",
     }
 }
 
@@ -1019,14 +1097,137 @@ mod tests {
                 .len(),
             1
         );
-        assert!(fs::read_to_string(curl).unwrap().contains("curl --request"));
+        assert!(fs::read_to_string(curl).unwrap().contains("curl "));
         assert!(raw.join("00000003-request.http").exists());
         assert!(raw.join("00000003-response.http").exists());
     }
 
     #[test]
-    fn shell_quote_handles_single_quotes() {
-        assert_eq!(shell_quote("it's"), "'it'\\''s'");
+    fn exports_websockets_in_chromium_har_format() {
+        let dir = tempdir().unwrap();
+        let mut session = TrafficSession::new(1);
+        session.flows.push(flow(3));
+
+        let mut request_headers = HeaderMap::new();
+        request_headers.insert("authorization", "Bearer secret".parse().unwrap());
+        session.websockets.push(CapturedWebSocket {
+            id: 2,
+            request: ProxiedRequest::new(
+                Method::GET,
+                "https://example.test/socket?token=secret".parse().unwrap(),
+                Version::HTTP_11,
+                request_headers,
+                Bytes::new(),
+                500,
+            ),
+            response: ProxiedResponse::new(
+                StatusCode::SWITCHING_PROTOCOLS,
+                Version::HTTP_11,
+                HeaderMap::new(),
+                Bytes::new(),
+                525,
+            ),
+            frames: vec![
+                WsFrame::new(
+                    WsDirection::ClientToServer,
+                    WsOpcode::Text,
+                    1_500,
+                    Bytes::from_static(b"hello"),
+                    false,
+                ),
+                WsFrame::new(
+                    WsDirection::ServerToClient,
+                    WsOpcode::Binary,
+                    1_600,
+                    Bytes::from_static(&[0, 1, 2, 0xaa]),
+                    true,
+                ),
+                WsFrame::new(
+                    WsDirection::ServerToClient,
+                    WsOpcode::Ping,
+                    1_700,
+                    Bytes::from_static(b"ping"),
+                    false,
+                ),
+            ],
+            closed: true,
+        });
+
+        let path = dir.path().join("websocket.har");
+        export_har(&path, &session, Some(&RedactionPolicy::default())).unwrap();
+        let har: Value = serde_json::from_slice(&fs::read(path).unwrap()).unwrap();
+        let entries = har["log"]["entries"].as_array().unwrap();
+        assert_eq!(entries.len(), 2);
+        let websocket = &entries[0];
+        assert_eq!(websocket["_resourceType"], "websocket");
+        assert_eq!(
+            websocket["request"]["url"],
+            "wss://example.test/socket?token=%5BREDACTED%5D"
+        );
+        assert_eq!(websocket["request"]["headers"][0]["value"], "[REDACTED]");
+
+        let raw_messages = websocket["_webSocketMessages"].clone();
+        assert_eq!(raw_messages[1]["_proxelarTruncated"], true);
+        assert_eq!(raw_messages.as_array().unwrap().len(), 2);
+        let messages: Vec<WebSocketMessage> = serde_json::from_value(raw_messages).unwrap();
+        assert_eq!(messages.len(), 2);
+        assert_eq!(messages[0].r#type, WebSocketMessageType::Send);
+        assert_eq!(
+            messages[0].opcode,
+            rama::http::layer::har::spec::WebSocketMessageOpcode::TEXT
+        );
+        assert_eq!(messages[0].data.as_str(), "hello");
+        assert!((messages[0].time - 1.5).abs() < f64::EPSILON);
+        assert_eq!(messages[1].r#type, WebSocketMessageType::Receive);
+        assert_eq!(
+            messages[1]
+                .binary_data()
+                .expect("binary message")
+                .expect("valid base64"),
+            [0, 1, 2, 0xaa]
+        );
+    }
+
+    #[test]
+    fn exports_headers_in_wire_order_with_original_spelling() {
+        let mut headers = HeaderMap::new();
+        headers.append(
+            HeaderName::from_bytes(b"X-Field").unwrap(),
+            HeaderValue::from_static("one"),
+        );
+        headers.append(
+            HeaderName::from_bytes(b"Host").unwrap(),
+            HeaderValue::from_static("example.test"),
+        );
+        headers.append(
+            HeaderName::from_bytes(b"X-Field").unwrap(),
+            HeaderValue::from_static("two"),
+        );
+        let request = ProxiedRequest::new(
+            Method::GET,
+            "http://example.test/".parse().unwrap(),
+            Version::HTTP_11,
+            headers,
+            Bytes::new(),
+            1,
+        );
+
+        let redacted = RedactionPolicy::default().redact_request(&request);
+        let raw = String::from_utf8(raw_request(&redacted)).unwrap();
+        assert!(raw.contains("X-Field: one\r\nHost: example.test\r\nX-Field: two\r\n"));
+        let har_fields = har_request(&redacted)
+            .headers
+            .into_iter()
+            .map(|header| (header.name.to_string(), header.value.to_string()))
+            .collect::<Vec<_>>();
+        assert_eq!(
+            har_fields,
+            [
+                ("X-Field".to_owned(), "one".to_owned()),
+                ("Host".to_owned(), "example.test".to_owned()),
+                ("X-Field".to_owned(), "two".to_owned()),
+            ]
+        );
     }
 
     #[test]
@@ -1211,17 +1412,20 @@ mod tests {
                 .unwrap(),
             Version::HTTP_11,
             HeaderMap::from_iter([(
-                http::header::AUTHORIZATION,
+                rama::http::header::AUTHORIZATION,
                 HeaderValue::from_static("Bearer secret"),
             )]),
             Bytes::new(),
             1,
         );
         let redacted = policy.redact_request(&request);
-        assert_eq!(redacted.headers()[http::header::AUTHORIZATION], "hidden");
         assert_eq!(
-            redacted.uri().query(),
-            Some("secret=hidden&flag&other=visible")
+            redacted.headers()[rama::http::header::AUTHORIZATION],
+            "hidden"
+        );
+        assert_eq!(
+            redacted.uri().query().unwrap(),
+            "secret=hidden&flag&other=visible"
         );
 
         let unchanged: Uri = "https://example.test/no-query".parse().unwrap();
@@ -1233,9 +1437,51 @@ mod tests {
             RedactionPolicy::new(["authorization"], std::iter::empty::<&str>())
                 .with_replacement("bad\nvalue");
         assert_eq!(
-            invalid_replacement.redact_headers(request.headers())[http::header::AUTHORIZATION],
+            invalid_replacement.redact_headers(request.headers())
+                [rama::http::header::AUTHORIZATION],
             "[REDACTED]"
         );
+    }
+
+    #[test]
+    fn loads_and_migrates_version_one_header_objects() {
+        let directory = tempdir().unwrap();
+        let path = directory.path().join("legacy.pxsession");
+        let mut value = serde_json::to_value(TrafficSession::new(123)).unwrap();
+        value["version"] = json!(1);
+        value["flows"] = json!([{
+            "id": 7,
+            "request": {
+                "method": "GET",
+                "uri": "http://example.test/",
+                "version": "HTTP/1.1",
+                "headers": {"x-repeat": ["one", "two"]},
+                "body": [],
+                "time": 123
+            },
+            "response": {
+                "status": 200,
+                "version": "HTTP/1.1",
+                "headers": {"content-type": "text/plain"},
+                "body": [111, 107],
+                "time": 124
+            }
+        }]);
+        std::fs::write(&path, serde_json::to_vec(&value).unwrap()).unwrap();
+
+        let session = load_session(&path).unwrap();
+
+        assert_eq!(session.version, SESSION_FORMAT_VERSION);
+        assert_eq!(
+            session.flows[0]
+                .request
+                .headers()
+                .get_all("x-repeat")
+                .iter()
+                .count(),
+            2
+        );
+        assert_eq!(session.flows[0].response.body().as_ref(), b"ok");
     }
 
     #[test]
@@ -1368,10 +1614,19 @@ mod tests {
             total_seen: 100,
             truncated: true,
         };
-        let content = har_content(&binary, &HeaderMap::new(), metadata);
-        assert_eq!(content["encoding"], "base64");
-        assert!(content["comment"]
-            .as_str()
+        let response = ProxiedResponse::new_with_body_metadata(
+            StatusCode::OK,
+            Version::HTTP_11,
+            HeaderMap::new(),
+            binary,
+            metadata,
+            1,
+        );
+        let content = har_response(&response).content;
+        assert_eq!(content.encoding.as_deref(), Some("base64"));
+        assert!(content
+            .comment
+            .as_deref()
             .unwrap()
             .contains("observed 100 wire bytes"));
         assert!(truncation_comment(BodyMetadata::complete(0)).is_none());

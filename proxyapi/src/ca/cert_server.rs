@@ -1,9 +1,13 @@
-use bytes::Bytes;
-use hyper::{Request, Response};
+use rama::bytes::Bytes;
+use rama::http::protocols::html::{a, div, h3, HtmlBuf, PreEscaped};
+use rama::http::service::web::response::IntoResponse;
+use rama::http::{Body, Request, Response};
+use rama::telemetry::tracing;
 
-use crate::body::{self, ProxyBody};
-
-const CERT_PAGE_HTML: &str = r#"<!DOCTYPE html>
+/// Static head of the certificate install page (up to the download cards). The
+/// platform cards are built dynamically (rama `html!`) so their download links
+/// can point at the proxy directly; the rest is emitted verbatim.
+const CERT_PAGE_HEAD: &str = r#"<!DOCTYPE html>
 <html lang="en">
 <head>
     <meta charset="UTF-8">
@@ -249,48 +253,11 @@ const CERT_PAGE_HTML: &str = r#"<!DOCTYPE html>
             <code>http://localhost:PORT</code> directly in your browser
             (replacing PORT with your proxy port, e.g. 8080) for reliable
             certificate downloads.
-        </div>
+        </div>"#;
 
-        <div class="platforms">
-            <div class="platform-card">
-                <div class="platform-icon">&#127823;</div>
-                <h3>macOS</h3>
-                <div class="ext">proxelar-ca.cer</div>
-                <a href="/cert/cer">Download</a>
-            </div>
-            <div class="platform-card">
-                <div class="platform-icon">&#128039;</div>
-                <h3>Linux</h3>
-                <div class="ext">proxelar-ca.pem</div>
-                <a href="/cert/pem">Download</a>
-            </div>
-            <div class="platform-card">
-                <div class="platform-icon">&#128187;</div>
-                <h3>Windows</h3>
-                <div class="ext">proxelar-ca.cer</div>
-                <a href="/cert/cer">Download</a>
-            </div>
-            <div class="platform-card">
-                <div class="platform-icon">&#128241;</div>
-                <h3>iOS</h3>
-                <div class="ext">proxelar-ca.pem</div>
-                <a href="/cert/pem">Download</a>
-            </div>
-            <div class="platform-card">
-                <div class="platform-icon">&#129302;</div>
-                <h3>Android</h3>
-                <div class="ext">proxelar-ca.cer</div>
-                <a href="/cert/cer">Download</a>
-            </div>
-            <div class="platform-card">
-                <div class="platform-icon">&#128272;</div>
-                <h3>Other</h3>
-                <div class="ext">PEM format</div>
-                <a href="/cert/pem">Download</a>
-            </div>
-        </div>
-
-        <details class="instructions">
+/// Static tail of the certificate install page: installation instructions and
+/// footer, emitted verbatim after the dynamically-built platform cards.
+const CERT_PAGE_TAIL: &str = r#"        <details class="instructions">
             <summary>macOS Installation</summary>
             <div class="content">
                 <ol>
@@ -381,8 +348,19 @@ sudo update-ca-trust</pre>
 </body>
 </html>"#;
 
+/// Platform download cards rendered between the page head and tail:
+/// (icon entity, label, displayed file name, `/cert/{kind}` route suffix).
+const CERT_DOWNLOADS: [(&str, &str, &str, &str); 6] = [
+    ("&#127823;", "macOS", "proxelar-ca.cer", "cer"),
+    ("&#128039;", "Linux", "proxelar-ca.pem", "pem"),
+    ("&#128187;", "Windows", "proxelar-ca.cer", "cer"),
+    ("&#128241;", "iOS", "proxelar-ca.pem", "pem"),
+    ("&#129302;", "Android", "proxelar-ca.cer", "cer"),
+    ("&#128272;", "Other", "PEM format", "pem"),
+];
+
 pub fn is_cert_request<T>(req: &Request<T>) -> bool {
-    req.uri().host().is_some_and(|h| h == "proxel.ar")
+    req.uri().host_str().is_some_and(|h| h == "proxel.ar")
         || req
             .headers()
             .get("host")
@@ -394,8 +372,8 @@ pub fn handle<T>(
     req: &Request<T>,
     ca_cert_pem: &[u8],
     proxy_addr: Option<std::net::SocketAddr>,
-) -> Response<ProxyBody> {
-    match req.uri().path() {
+) -> Response<Body> {
+    match req.uri().path_or_root().as_ref() {
         "/cert/pem" => {
             let len = ca_cert_pem.len();
             Response::builder()
@@ -405,10 +383,10 @@ pub fn handle<T>(
                     "content-disposition",
                     "attachment; filename=\"proxelar-ca-cert.pem\"",
                 )
-                .body(body::full(Bytes::from(ca_cert_pem.to_vec())))
+                .body(Body::from(Bytes::from(ca_cert_pem.to_vec())))
                 .unwrap_or_else(|e| {
                     tracing::error!("Failed to build PEM response: {e}");
-                    Response::new(body::empty())
+                    Response::new(Body::empty())
                 })
         }
         "/cert/cer" => {
@@ -421,40 +399,44 @@ pub fn handle<T>(
                     "content-disposition",
                     "attachment; filename=\"proxelar-ca-cert.cer\"",
                 )
-                .body(body::full(Bytes::from(der)))
+                .body(Body::from(Bytes::from(der)))
                 .unwrap_or_else(|e| {
                     tracing::error!("Failed to build DER response: {e}");
-                    Response::new(body::empty())
+                    Response::new(Body::empty())
                 })
         }
         _ => {
-            // When accessed via proxel.ar (proxied), rewrite download links
-            // to point directly at the proxy server (http://localhost:PORT/cert/...)
-            // so that downloads bypass the proxy and work in all browsers.
-            let html = if let Some(addr) = proxy_addr {
-                let base = format!("http://{addr}");
-                CERT_PAGE_HTML
-                    .replace("href=\"/cert/pem\"", &format!("href=\"{base}/cert/pem\""))
-                    .replace("href=\"/cert/cer\"", &format!("href=\"{base}/cert/cer\""))
-            } else {
-                CERT_PAGE_HTML.to_string()
-            };
-
-            let len = html.len();
-            Response::builder()
-                .header("content-type", "text/html; charset=utf-8")
-                .header("content-length", len.to_string())
-                .body(body::full(Bytes::from(html)))
-                .unwrap_or_else(|e| {
-                    tracing::error!("Failed to build cert page response: {e}");
-                    Response::new(body::empty())
+            // Served directly the download links stay relative; reached through
+            // the proxy (proxel.ar) they point at the proxy server so downloads
+            // bypass the proxy and work in all browsers.
+            let base = proxy_addr
+                .map(|addr| format!("http://{addr}"))
+                .unwrap_or_default();
+            let cards: Vec<_> = CERT_DOWNLOADS
+                .iter()
+                .map(|(icon, name, file, kind)| {
+                    div!(
+                        class = "platform-card",
+                        div!(class = "platform-icon", PreEscaped(*icon)),
+                        h3!(*name),
+                        div!(class = "ext", *file),
+                        a!(href = format!("{base}/cert/{kind}"), "Download"),
+                    )
                 })
+                .collect();
+            HtmlBuf((
+                PreEscaped(CERT_PAGE_HEAD),
+                div!(class = "platforms", cards),
+                PreEscaped(CERT_PAGE_TAIL),
+            ))
+            .into_response()
         }
     }
 }
 
 fn pem_to_der(pem: &[u8]) -> Vec<u8> {
-    match openssl::x509::X509::from_pem(pem).and_then(|cert| cert.to_der()) {
+    use rama::crypto::dep::boring::x509::X509;
+    match X509::from_pem(pem).and_then(|cert| cert.to_der()) {
         Ok(der) => der,
         Err(e) => {
             tracing::error!("Failed to convert PEM to DER: {e}");

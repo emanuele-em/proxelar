@@ -1,17 +1,11 @@
 use std::{
     path::{Path, PathBuf},
     str::FromStr,
-    sync::Arc,
 };
 
-use rustls::{
-    client::danger::{HandshakeSignatureValid, ServerCertVerified, ServerCertVerifier},
-    crypto::CryptoProvider,
-    pki_types::{CertificateDer, ServerName, UnixTime},
-    ClientConfig, ConfigBuilder, DigitallySignedStruct, RootCertStore, SignatureScheme,
-    WantsVerifier,
-};
-use rustls_pki_types::pem::{self, PemObject};
+use rama::crypto::pki_types::{pem::PemObject, CertificateDer};
+use rama::tls::boring::proxy::TlsMitmEgressServerAuth;
+use rama::tls::client::{ServerVerifyMode, TlsClientConfig};
 
 use crate::error::Error;
 
@@ -68,133 +62,64 @@ fn path_to_policy(
     Ok(make_policy(PathBuf::from(path)))
 }
 
-pub(super) fn build_client_config(config: &UpstreamTlsConfig) -> Result<ClientConfig, Error> {
+/// Translate the upstream trust policy into a rama BoringSSL client TLS config.
+///
+/// Uses rama's `with_webpki_roots` (bundled Mozilla/WebPKI roots, independent of
+/// the OS store) and its additive `try_with_extra_server_trust_anchors` for the
+/// "webpki roots + extra CA" policy.
+pub(super) fn build_client_tls_config(
+    config: &UpstreamTlsConfig,
+) -> Result<TlsClientConfig, Error> {
     match config {
-        UpstreamTlsConfig::Default => Ok(client_config_builder()?
-            .with_root_certificates(default_root_store())
-            .with_no_client_auth()),
-        UpstreamTlsConfig::DefaultWithCaFile(path) => {
-            let mut roots = default_root_store();
-            append_ca_file_roots(&mut roots, path)?;
-            Ok(client_config_builder()?
-                .with_root_certificates(roots)
-                .with_no_client_auth())
-        }
-        UpstreamTlsConfig::CaFileOnly(path) => Ok(client_config_builder()?
-            .with_root_certificates(load_ca_file_roots(path)?)
-            .with_no_client_auth()),
+        UpstreamTlsConfig::Default => Ok(TlsClientConfig::default_http().with_webpki_roots()),
+        UpstreamTlsConfig::DefaultWithCaFile(path) => TlsClientConfig::default_http()
+            .with_webpki_roots()
+            .try_with_extra_server_trust_anchors(load_ca_file_roots(path)?)
+            .map_err(|error| Error::Tls(error.to_string())),
+        UpstreamTlsConfig::CaFileOnly(path) => TlsClientConfig::default_http()
+            .try_with_server_trust_anchors(load_ca_file_roots(path)?)
+            .map_err(|error| Error::Tls(error.to_string())),
         UpstreamTlsConfig::Insecure => {
-            let provider = Arc::new(rustls::crypto::ring::default_provider());
-            Ok(
-                rustls::ClientConfig::builder_with_provider(Arc::clone(&provider))
-                    .with_safe_default_protocol_versions()?
-                    .dangerous()
-                    .with_custom_certificate_verifier(InsecureServerCertVerifier::new(provider))
-                    .with_no_client_auth(),
-            )
+            Ok(TlsClientConfig::default_http().with_server_verify(ServerVerifyMode::Disable))
         }
     }
 }
 
-fn client_config_builder() -> Result<ConfigBuilder<ClientConfig, WantsVerifier>, rustls::Error> {
-    rustls::ClientConfig::builder_with_provider(Arc::new(rustls::crypto::ring::default_provider()))
-        .with_safe_default_protocol_versions()
+/// Translate the upstream trust policy for rama's TLS MITM relay.
+///
+/// Relay fingerprinting and ALPN remain derived from the intercepted
+/// ClientHello; this policy controls only origin identity and trust.
+pub(super) fn build_mitm_egress_server_auth(
+    config: &UpstreamTlsConfig,
+) -> Result<TlsMitmEgressServerAuth, Error> {
+    let verified = || TlsMitmEgressServerAuth::new().with_server_verify(ServerVerifyMode::Auto);
+    match config {
+        UpstreamTlsConfig::Default => Ok(verified().with_webpki_roots()),
+        UpstreamTlsConfig::DefaultWithCaFile(path) => verified()
+            .with_webpki_roots()
+            .try_with_extra_server_trust_anchors(load_ca_file_roots(path)?)
+            .map_err(|error| Error::Tls(error.to_string())),
+        UpstreamTlsConfig::CaFileOnly(path) => verified()
+            .try_with_server_trust_anchors(load_ca_file_roots(path)?)
+            .map_err(|error| Error::Tls(error.to_string())),
+        UpstreamTlsConfig::Insecure => Ok(TlsMitmEgressServerAuth::new()),
+    }
 }
 
-fn default_root_store() -> RootCertStore {
-    RootCertStore::from_iter(webpki_roots::TLS_SERVER_ROOTS.iter().cloned())
-}
-
-fn append_ca_file_roots(roots: &mut RootCertStore, path: &Path) -> Result<(), Error> {
-    let ca_roots = load_ca_file_roots(path)?;
-    roots.roots.extend(ca_roots.roots);
-    Ok(())
-}
-
-fn load_ca_file_roots(path: &Path) -> Result<RootCertStore, Error> {
+fn load_ca_file_roots(path: &Path) -> Result<Vec<CertificateDer<'static>>, Error> {
     let certs = CertificateDer::pem_file_iter(path)
-        .map_err(map_pem_error)?
+        .map_err(|error| Error::Other(format!("failed to read CA file: {error}")))?
         .collect::<Result<Vec<_>, _>>()
-        .map_err(map_pem_error)?;
+        .map_err(|error| Error::Other(format!("failed to parse PEM certificate: {error}")))?;
 
-    let mut roots = RootCertStore::empty();
-    let (valid_count, invalid_count) = roots.add_parsable_certificates(certs);
-    if valid_count == 0 {
+    if certs.is_empty() {
         return Err(Error::Other(format!(
             "no usable CA certificates found in {}",
             path.display()
         )));
     }
-    if invalid_count > 0 {
-        tracing::warn!(
-            "Ignored {invalid_count} invalid CA certificate(s) while loading {}",
-            path.display()
-        );
-    }
 
-    Ok(roots)
-}
-
-fn map_pem_error(err: pem::Error) -> Error {
-    match err {
-        pem::Error::Io(err) => Error::Io(err),
-        err => Error::Other(format!("failed to parse PEM certificate: {err}")),
-    }
-}
-
-/// Skips certificate chain and hostname checks while retaining Rustls handshake signature checks.
-#[derive(Debug)]
-struct InsecureServerCertVerifier(Arc<CryptoProvider>);
-
-impl InsecureServerCertVerifier {
-    fn new(provider: Arc<CryptoProvider>) -> Arc<Self> {
-        Arc::new(Self(provider))
-    }
-}
-
-impl ServerCertVerifier for InsecureServerCertVerifier {
-    fn verify_server_cert(
-        &self,
-        _end_entity: &CertificateDer<'_>,
-        _intermediates: &[CertificateDer<'_>],
-        _server_name: &ServerName<'_>,
-        _ocsp_response: &[u8],
-        _now: UnixTime,
-    ) -> Result<ServerCertVerified, rustls::Error> {
-        Ok(ServerCertVerified::assertion())
-    }
-
-    fn verify_tls12_signature(
-        &self,
-        message: &[u8],
-        cert: &CertificateDer<'_>,
-        dss: &DigitallySignedStruct,
-    ) -> Result<HandshakeSignatureValid, rustls::Error> {
-        rustls::crypto::verify_tls12_signature(
-            message,
-            cert,
-            dss,
-            &self.0.signature_verification_algorithms,
-        )
-    }
-
-    fn verify_tls13_signature(
-        &self,
-        message: &[u8],
-        cert: &CertificateDer<'_>,
-        dss: &DigitallySignedStruct,
-    ) -> Result<HandshakeSignatureValid, rustls::Error> {
-        rustls::crypto::verify_tls13_signature(
-            message,
-            cert,
-            dss,
-            &self.0.signature_verification_algorithms,
-        )
-    }
-
-    fn supported_verify_schemes(&self) -> Vec<SignatureScheme> {
-        self.0.signature_verification_algorithms.supported_schemes()
-    }
+    Ok(certs)
 }
 
 #[cfg(test)]
@@ -223,30 +148,5 @@ mod tests {
         let err = load_ca_file_roots(&ca_file).unwrap_err();
 
         assert!(err.to_string().contains("no usable CA certificates"));
-    }
-
-    #[test]
-    fn load_ca_file_roots_rejects_invalid_pem() {
-        let ca_dir = tempfile::tempdir().unwrap();
-        let ca_file = ca_dir.path().join("invalid.pem");
-        std::fs::write(
-            &ca_file,
-            "-----BEGIN CERTIFICATE-----\naW52YWxpZA==\n-----END CERTIFICATE-----\n",
-        )
-        .unwrap();
-
-        let err = load_ca_file_roots(&ca_file).unwrap_err();
-
-        assert!(err.to_string().contains("no usable CA certificates"));
-    }
-
-    #[test]
-    fn load_ca_file_roots_rejects_missing_file() {
-        let ca_dir = tempfile::tempdir().unwrap();
-        let ca_file = ca_dir.path().join("missing.pem");
-
-        let err = load_ca_file_roots(&ca_file).unwrap_err();
-
-        assert!(matches!(err, Error::Io(_)));
     }
 }

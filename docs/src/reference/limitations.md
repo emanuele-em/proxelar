@@ -4,7 +4,12 @@ Proxelar is usable today for local traffic inspection, scripting, intercept, rep
 
 ## Sessions and export fidelity
 
-Proxelar can save/reload its versioned native session format, import/export HAR, emit curl commands, and write raw HTTP pairs. HAR cannot represent every Proxelar concept: raw TCP chunks, live intercept state, and some WebSocket metadata remain available only in the native session. Exports redact common credentials by default; native session saves preserve captured data exactly.
+Proxelar can save/reload its versioned native session format, import/export
+HAR, emit curl commands, and write raw HTTP pairs. HAR export includes captured
+WebSocket messages through Chromium's extension, but raw TCP chunks, live
+intercept state, and WebSocket connection lifecycle remain available only in
+the native session. Exports redact common credentials by default; native
+session saves preserve captured data exactly.
 
 ## Body decoding and editing
 
@@ -18,9 +23,11 @@ Proxelar supports forward, reverse, WireGuard, SOCKS5, DNS, and fixed-target UDP
 
 Unknown TCP streams can be observed as directional chunks, but there is no protocol-aware binary editor.
 
+TLS and HTTP protocol peeks time out after ten seconds. The default `--peek-timeout-policy fail-open` then records and forwards the stream as raw traffic; use `fail-closed` when inspection must not be bypassed.
+
 ## HTTP versions
 
-HTTP/2 client connections are accepted, but intercepted requests are deliberately normalized and forwarded upstream as HTTP/1.1. HTTP/3/QUIC interception is not supported.
+HTTP/1.1 and HTTP/2 are intercepted and preserved end to end. With `--upstream-http-version auto`, the default, the incoming request version determines the upstream version (h1→h1, h2→h2); for HTTPS, upstream ALPN is constrained to that version. Use `http1` or `http2` to force a version instead. HTTP/3 and QUIC interception are not available today and are planned for later this year.
 
 ## HTTPS and mobile apps
 

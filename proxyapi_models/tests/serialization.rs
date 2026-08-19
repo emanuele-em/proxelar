@@ -1,9 +1,10 @@
-use bytes::Bytes;
-use http::{HeaderMap, Method, StatusCode, Uri, Version};
 use proxyapi_models::{
     BodyMetadata, CapturedDnsExchange, CapturedUdpExchange, ProxiedRequest, ProxiedResponse,
     TrafficSession, WsDirection, WsFrame, WsOpcode, SESSION_FORMAT_VERSION,
 };
+use rama::bytes::Bytes;
+use rama::http::{HeaderMap, Method, StatusCode, Version};
+use rama::net::uri::Uri;
 
 #[test]
 fn test_proxied_request_serialization() {
@@ -93,7 +94,7 @@ fn test_proxied_request_accessors() {
     );
 
     assert_eq!(req.method(), Method::PUT);
-    assert_eq!(req.uri().path(), "/path");
+    assert_eq!(req.uri().path_or_root(), "/path");
     assert_eq!(req.version(), Version::HTTP_11);
     assert_eq!(req.body().as_ref(), b"request body");
     assert_eq!(req.time(), 42);
@@ -122,6 +123,40 @@ fn test_proxied_request_multiple_headers_same_key() {
         deserialized.headers().get_all("set-cookie").iter().count(),
         2
     );
+}
+
+#[test]
+fn headers_serialize_as_ordered_pairs_and_accept_legacy_objects() {
+    let mut headers = HeaderMap::new();
+    headers.append("x-first", "one".parse().unwrap());
+    headers.append("x-second", "middle".parse().unwrap());
+    headers.append("x-first", "two".parse().unwrap());
+    let request = ProxiedRequest::new(
+        Method::GET,
+        "https://example.com/".parse().unwrap(),
+        Version::HTTP_11,
+        headers,
+        Bytes::new(),
+        0,
+    );
+
+    let mut value = serde_json::to_value(&request).unwrap();
+    assert_eq!(
+        value["headers"],
+        serde_json::json!([
+            ["x-first", "one"],
+            ["x-second", "middle"],
+            ["x-first", "two"]
+        ])
+    );
+
+    value["headers"] = serde_json::json!({
+        "content-type": "text/plain",
+        "set-cookie": ["a=1", "b=2"]
+    });
+    let decoded: ProxiedRequest = serde_json::from_value(value).unwrap();
+    assert_eq!(decoded.headers()["content-type"], "text/plain");
+    assert_eq!(decoded.headers().get_all("set-cookie").iter().count(), 2);
 }
 
 #[test]

@@ -1,109 +1,112 @@
-use std::net::SocketAddr;
+use rama::telemetry::tracing;
+use std::convert::Infallible;
 use std::sync::Arc;
 
-use bytes::Bytes;
-use hyper::service::service_fn;
-use hyper::{Request, Uri};
-use hyper_util::rt::TokioIo;
-use tokio::net::TcpStream;
+use rama::bytes::Bytes;
 
-use crate::body::ProxyBody;
-use crate::handler::CapturingHandler;
-use crate::{HttpContext, HttpHandler, RequestOrResponse};
+use rama::http::headers::{HeaderMapExt as _, Host as HostHeader};
+use rama::http::{HeaderMap, Request, Response, StatusCode};
+use rama::net::address::{Authority, HostWithOptPort};
+use rama::net::uri::Uri;
+use rama::net::Protocol;
+use rama::Service;
 
-use super::{
-    is_benign_shutdown_error, prepare_upstream_request, sanitize_response_for_client,
-    serve_auto_connection, Client,
-};
+use crate::handler::{CapturingHandler, RequestOrResponse};
 
-pub async fn handle_connection(
-    stream: TcpStream,
-    remote_addr: SocketAddr,
+use super::{sanitize_forwarded_request_headers, sanitize_response_for_client, UpstreamClient};
+
+/// Reverse-proxy service: rewrites every request to the configured target,
+/// forwards it, and captures the exchange.
+#[derive(Clone)]
+pub(crate) struct ReverseProxyService {
     handler: CapturingHandler,
+    client: Arc<UpstreamClient>,
     target: Uri,
-    client: Arc<Client>,
-) {
-    let io = TokioIo::new(stream);
+}
 
-    let service = service_fn(move |req: Request<hyper::body::Incoming>| {
-        let mut handler = handler.clone();
-        let client = Arc::clone(&client);
-        let target = target.clone();
-
-        async move {
-            let client_version = req.version();
-            let ctx = HttpContext { remote_addr };
-
-            let req = match handler.handle_request(&ctx, req).await {
-                RequestOrResponse::Request(req) => req,
-                RequestOrResponse::Response(mut res) => {
-                    sanitize_response_for_client(&mut res, client_version);
-                    return Ok::<_, hyper::Error>(res);
-                }
-            };
-
-            // Rewrite URI to target, preserving path and query
-            let req = match rewrite_uri(req, &target) {
-                Ok(req) => req,
-                Err(e) => {
-                    tracing::error!("Failed to rewrite URI to target: {e}");
-                    return Ok(handler.synthetic_response(
-                        http::StatusCode::BAD_GATEWAY,
-                        http::HeaderMap::new(),
-                        Bytes::from_static(b"Bad Gateway: URI rewrite failed"),
-                    ));
-                }
-            };
-
-            match client.request(prepare_upstream_request(req)).await {
-                Ok(res) => {
-                    let mut res = handler.handle_upstream_response(res).await;
-                    sanitize_response_for_client(&mut res, client_version);
-                    Ok(res)
-                }
-                Err(e) => {
-                    tracing::error!("Reverse proxy error: {e}");
-                    let mut res = handler.synthetic_response(
-                        http::StatusCode::BAD_GATEWAY,
-                        http::HeaderMap::new(),
-                        Bytes::from_static(b"Bad Gateway"),
-                    );
-                    sanitize_response_for_client(&mut res, client_version);
-                    Ok(res)
-                }
-            }
-        }
-    });
-
-    if let Err(e) = serve_auto_connection(io, service).await {
-        if !is_benign_shutdown_error(e.as_ref()) {
-            tracing::debug!("Reverse proxy connection error: {e}");
+impl ReverseProxyService {
+    pub(crate) fn new(handler: CapturingHandler, client: Arc<UpstreamClient>, target: Uri) -> Self {
+        Self {
+            handler,
+            client,
+            target,
         }
     }
 }
 
-/// Rewrite the request URI to point at the reverse proxy target, preserving
-/// the original path and query. Also updates the `Host` header to match.
-fn rewrite_uri(
-    mut req: Request<ProxyBody>,
-    target: &Uri,
-) -> Result<Request<ProxyBody>, http::Error> {
-    let mut uri_parts = req.uri().clone().into_parts();
-    uri_parts.scheme = target.scheme().cloned();
-    uri_parts.authority = target.authority().cloned();
-    *req.uri_mut() = Uri::from_parts(uri_parts)?;
+impl Service<Request> for ReverseProxyService {
+    type Output = Response;
+    type Error = Infallible;
 
-    // Update Host header to match the target so virtual hosting works correctly
-    if let Some(authority) = target.authority() {
-        match authority.as_str().parse() {
-            Ok(host_value) => {
-                req.headers_mut().insert(hyper::header::HOST, host_value);
+    async fn serve(&self, req: Request) -> Result<Self::Output, Self::Error> {
+        let client_version = req.version();
+        let mut handler = self.handler.clone();
+
+        let req = match handler.handle_request(req).await {
+            RequestOrResponse::Request(req) => req,
+            RequestOrResponse::Response(mut res) => {
+                sanitize_response_for_client(&mut res, client_version);
+                return Ok(res);
             }
-            Err(e) => {
-                tracing::warn!("Invalid target authority for Host header: {e}");
+        };
+
+        let mut req = match rewrite_uri(req, &self.target) {
+            Ok(req) => req,
+            Err(()) => {
+                tracing::error!("Failed to rewrite URI to reverse-proxy target");
+                let mut res = handler.synthetic_response(
+                    StatusCode::BAD_GATEWAY,
+                    HeaderMap::new(),
+                    Bytes::from_static(b"Bad Gateway: URI rewrite failed"),
+                );
+                sanitize_response_for_client(&mut res, client_version);
+                return Ok(res);
+            }
+        };
+        // Strip per-hop / proxy-only headers before forwarding, exactly as the
+        // forward path does — `rewrite_uri` has already set the target `Host`.
+        sanitize_forwarded_request_headers(req.headers_mut());
+
+        match self.client.serve(req).await {
+            Ok(res) => {
+                let mut res = handler.handle_upstream_response(res).await;
+                sanitize_response_for_client(&mut res, client_version);
+                Ok(res)
+            }
+            Err(err) => {
+                tracing::error!("Reverse proxy error: {err}");
+                let mut res = handler.synthetic_response(
+                    StatusCode::BAD_GATEWAY,
+                    HeaderMap::new(),
+                    Bytes::from_static(b"Bad Gateway"),
+                );
+                sanitize_response_for_client(&mut res, client_version);
+                Ok(res)
             }
         }
     }
+}
+
+/// Rewrite the request URI to point at the reverse-proxy target, preserving the
+/// original path and query, and update the `Host` header to match.
+fn rewrite_uri(mut req: Request, target: &Uri) -> Result<Request, ()> {
+    let Some(authority) = target.authority() else {
+        return Err(());
+    };
+
+    // Replace typed URI components in-place so rama retains the request's
+    // exact path/query representation and renders IPv6 authority brackets.
+    // Userinfo is intentionally not copied to either the request target or
+    // Host header; reverse-proxy credentials belong in authorization headers.
+    let host = HostWithOptPort {
+        host: authority.host().into_owned(),
+        port: authority.port(),
+    };
+    let mut uri = req.uri().clone();
+    uri.set_scheme(target.scheme().cloned().unwrap_or(Protocol::HTTP));
+    uri.set_authority(Authority::new(host.clone()));
+    *req.uri_mut() = uri;
+    req.headers_mut().typed_insert(HostHeader(host));
 
     Ok(req)
 }
@@ -111,41 +114,22 @@ fn rewrite_uri(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::body;
+    use rama::http::Body;
 
     #[test]
-    fn rewrite_uri_preserves_path_query_and_sets_target_host() {
-        let req = Request::builder()
-            .uri("/api/items?name=one")
-            .header(hyper::header::HOST, "client.example")
-            .body(body::empty())
+    fn rewrite_uri_uses_typed_ipv6_authority() {
+        let request = Request::builder()
+            .uri("/items?view=full")
+            .body(Body::empty())
             .unwrap();
-        let target: Uri = "https://upstream.example:8443".parse().unwrap();
+        let target: Uri = "http://[::1]:8080".parse().unwrap();
 
-        let req = rewrite_uri(req, &target).unwrap();
+        let request = rewrite_uri(request, &target).unwrap();
 
-        assert_eq!(req.uri().scheme_str(), Some("https"));
         assert_eq!(
-            req.uri().authority().map(|a| a.as_str()),
-            Some("upstream.example:8443")
+            request.uri().to_string(),
+            "http://[::1]:8080/items?view=full"
         );
-        assert_eq!(req.uri().path(), "/api/items");
-        assert_eq!(req.uri().query(), Some("name=one"));
-        assert_eq!(req.headers()[hyper::header::HOST], "upstream.example:8443");
-    }
-
-    #[test]
-    fn rewrite_uri_leaves_host_when_target_has_no_authority() {
-        let req = Request::builder()
-            .uri("/local")
-            .header(hyper::header::HOST, "client.example")
-            .body(body::empty())
-            .unwrap();
-        let target: Uri = "/target-only".parse().unwrap();
-
-        let req = rewrite_uri(req, &target).unwrap();
-
-        assert_eq!(req.uri().path(), "/local");
-        assert_eq!(req.headers()[hyper::header::HOST], "client.example");
+        assert_eq!(request.headers()[rama::http::header::HOST], "[::1]:8080");
     }
 }

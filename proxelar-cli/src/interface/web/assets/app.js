@@ -400,14 +400,8 @@
 
         // Populate headers
         headersBody.innerHTML = '';
-        if (request.headers) {
-            for (const [k, v] of Object.entries(request.headers)) {
-                if (Array.isArray(v)) {
-                    v.forEach(function(value) { addHeaderRow(k, value); });
-                } else {
-                    addHeaderRow(k, v);
-                }
-            }
+        for (const [name, value] of rawHeaderEntries(request.headers)) {
+            addHeaderRow(name, headerValueText(value), value);
         }
 
         // Populate body
@@ -418,8 +412,13 @@
         editUri.focus();
     }
 
-    function addHeaderRow(name, value) {
+    function addHeaderRow(name, value, rawValue) {
         const tr = document.createElement('tr');
+        tr._originalHeader = {
+            name: name,
+            text: value,
+            value: rawValue === undefined ? value : rawValue,
+        };
 
         const tdName = document.createElement('td');
         const inputName = document.createElement('input');
@@ -545,7 +544,13 @@
         headersBody.querySelectorAll('tr').forEach(function(tr) {
             const k = tr.querySelector('.header-name').value.trim();
             const v = tr.querySelector('.header-value').value;
-            if (k) headers.push({ name: k, value: v });
+            if (k) {
+                const original = tr._originalHeader;
+                const value = original && v === original.text
+                    ? original.value
+                    : v;
+                headers.push({ name: k, value: value });
+            }
         });
         const body = editedBody();
         if (body === null) return null;
@@ -838,7 +843,7 @@
                             type: 'Replay',
                             method: row.request.method || 'GET',
                             uri: row.request.uri || '',
-                            headers: row.request.headers || {},
+                            headers: row.request.headers || [],
                             body: encodedWireBody(row.request.body),
                         });
                     };
@@ -872,18 +877,14 @@
         let side = activeTab === 'request' ? 'request' : 'response';
         if (activeTab === 'request') {
             content = (r.request.method || '') + ' ' + (r.request.uri || '') + '\n\n';
-            if (r.request.headers) {
-                for (const [key, val] of Object.entries(r.request.headers)) {
-                    content += key + ': ' + val + '\n';
-                }
+            for (const [name, value] of headerEntries(r.request.headers)) {
+                content += name + ': ' + value + '\n';
             }
             body = r.request.body;
         } else {
             content = (r.response.status || '') + '\n\n';
-            if (r.response.headers) {
-                for (const [key, val] of Object.entries(r.response.headers)) {
-                    content += key + ': ' + val + '\n';
-                }
+            for (const [name, value] of headerEntries(r.response.headers)) {
+                content += name + ': ' + value + '\n';
             }
             body = r.response.body;
         }
@@ -1126,10 +1127,52 @@
     }
 
     function getContentType(headers) {
-        if (!headers) return '[no content]';
-        const ct = headers['content-type'];
-        if (!ct) return '[no content]';
-        return ct.split(';')[0].trim();
+        for (const [name, value] of headerEntries(headers)) {
+            if (name.toLowerCase() === 'content-type') {
+                return value.split(';')[0].trim();
+            }
+        }
+        return '[no content]';
+    }
+
+    // Rama serializes HeaderMap as ordered [name, value] tuples. Keep support
+    // for the legacy object representation at this browser boundary so loaded
+    // v1 sessions still render, but never collapse the ordered representation.
+    function headerEntries(headers) {
+        return rawHeaderEntries(headers).map(function(pair) {
+            return [pair[0], headerValueText(pair[1])];
+        });
+    }
+
+    function rawHeaderEntries(headers) {
+        if (!headers) return [];
+        if (Array.isArray(headers)) {
+            return headers
+                .filter(function(pair) { return Array.isArray(pair) && pair.length === 2; })
+                .map(function(pair) { return [String(pair[0]), pair[1]]; });
+        }
+
+        const entries = [];
+        for (const [name, value] of Object.entries(headers)) {
+            if (Array.isArray(value)) {
+                value.forEach(function(item) {
+                    entries.push([name, item]);
+                });
+            } else {
+                entries.push([name, value]);
+            }
+        }
+        return entries;
+    }
+
+    function headerValueText(value) {
+        if (typeof value === 'string') return value;
+        if (Array.isArray(value)) {
+            return value.map(function(byte) {
+                return '\\x' + Number(byte).toString(16).padStart(2, '0');
+            }).join('');
+        }
+        return String(value == null ? '' : value);
     }
 
     // ── Semantic category helpers ─────────────────────────────────────────

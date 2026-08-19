@@ -1,6 +1,6 @@
 use crossterm::event::{Event, EventStream, KeyEvent};
-use futures::StreamExt;
 use proxyapi::ProxyEvent;
+use rama::futures::StreamExt;
 use tokio::sync::mpsc;
 
 #[derive(Debug)]

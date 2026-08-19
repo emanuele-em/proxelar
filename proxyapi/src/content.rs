@@ -4,8 +4,8 @@ use std::fmt::Write as _;
 use std::io::{self, Read};
 
 use base64::Engine as _;
-use bytes::Bytes;
-use http::header::{HeaderMap, CONTENT_ENCODING, CONTENT_TYPE};
+use rama::bytes::Bytes;
+use rama::http::header::{HeaderMap, CONTENT_ENCODING, CONTENT_TYPE};
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 

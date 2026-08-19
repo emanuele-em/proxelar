@@ -1,16 +1,21 @@
-use async_trait::async_trait;
-use bytes::{Bytes, BytesMut};
-use http_body_util::BodyExt;
-use hyper::body::Body as HttpBody;
-use hyper::{Request, Response};
 use proxyapi_models::{BodyMetadata, ProxiedRequest, ProxiedResponse};
+use rama::bytes::Bytes;
+use rama::http::body::util::{BodyExt, CollectOptions};
+use rama::http::{Body, CaptureHandle, CaptureLimit, Request, Response};
+use rama::net::uri::Uri;
+use rama::telemetry::tracing;
 use std::sync::Arc;
-use tokio::sync::{mpsc, Notify};
+use tokio::sync::mpsc;
 
-use crate::body::{self, BodyCapture, BodySnapshot, ProxyBody};
 use crate::event::{next_id, ProxyEvent};
 use crate::intercept::{InterceptConfig, InterceptDecision};
-use crate::{HttpContext, HttpHandler, RequestOrResponse};
+
+/// Returned by [`CapturingHandler::handle_request`] to either forward or
+/// short-circuit with a synthetic response.
+pub(crate) enum RequestOrResponse {
+    Request(Request<Body>),
+    Response(Response<Body>),
+}
 
 /// Default body capture limit.
 ///
@@ -20,12 +25,12 @@ pub const DEFAULT_BODY_CAPTURE_LIMIT: Option<usize> = None;
 
 enum BodyCollection {
     Complete(Bytes),
-    Exceeded { captured: Bytes, body: ProxyBody },
+    Exceeded { captured: Bytes, body: Body },
 }
 
 enum RequestBody {
     Buffered(Bytes),
-    Streaming { captured: Bytes, body: ProxyBody },
+    Streaming { captured: Bytes, body: Body },
 }
 
 impl RequestBody {
@@ -61,16 +66,22 @@ pub(crate) fn now_millis() -> i64 {
     chrono::Local::now().timestamp_millis()
 }
 
-#[derive(Clone)]
+/// Map proxelar's optional byte cap onto rama's [`CaptureLimit`].
+fn capture_limit(limit: Option<usize>) -> CaptureLimit {
+    match limit {
+        Some(max) => CaptureLimit::max_bytes(max),
+        None => CaptureLimit::unlimited(),
+    }
+}
+
 enum CapturedRequest {
     Buffered(ProxiedRequest),
     Streaming {
-        method: http::Method,
-        uri: http::Uri,
-        version: http::Version,
-        headers: http::HeaderMap,
-        body: BodyCapture,
-        done: Arc<Notify>,
+        method: rama::http::Method,
+        uri: Uri,
+        version: rama::http::Version,
+        headers: rama::http::HeaderMap,
+        handle: CaptureHandle,
         time: i64,
     },
 }
@@ -80,24 +91,20 @@ impl CapturedRequest {
         Self::Buffered(request)
     }
 
-    fn streaming(
-        parts: &http::request::Parts,
-        body: BodyCapture,
-        done: Arc<Notify>,
-        time: i64,
-    ) -> Self {
+    fn streaming(parts: &rama::http::request::Parts, handle: CaptureHandle, time: i64) -> Self {
         Self::Streaming {
             method: parts.method.clone(),
             uri: parts.uri.clone(),
             version: parts.version,
             headers: parts.headers.clone(),
-            body,
-            done,
+            handle,
             time,
         }
     }
 
-    fn into_proxied_request(self) -> ProxiedRequest {
+    /// Resolve into a [`ProxiedRequest`], awaiting the streaming body's capture
+    /// handle so the recorded snapshot reflects the full (capped) body.
+    async fn into_proxied_request(self) -> ProxiedRequest {
         match self {
             Self::Buffered(request) => request,
             Self::Streaming {
@@ -105,52 +112,27 @@ impl CapturedRequest {
                 uri,
                 version,
                 headers,
-                body,
-                done: _,
+                handle,
                 time,
             } => {
-                let snapshot = body.snapshot();
-                log_truncated_capture("request", &snapshot);
+                let (bytes, truncated, total_seen) = match handle.wait().await {
+                    Ok(captured) => (
+                        captured.bytes().clone(),
+                        captured.is_truncated(),
+                        usize::try_from(captured.total_bytes()).unwrap_or(usize::MAX),
+                    ),
+                    Err(_canceled) => (Bytes::new(), false, 0),
+                };
+                log_truncated_capture("request", truncated, bytes.len(), total_seen);
                 ProxiedRequest::new_with_body_metadata(
                     method,
                     uri,
                     version,
                     headers,
-                    snapshot.bytes,
+                    bytes,
                     BodyMetadata {
-                        truncated: snapshot.truncated,
-                        total_seen: snapshot.total_seen,
-                    },
-                    time,
-                )
-            }
-        }
-    }
-
-    async fn into_proxied_request_after_capture(self) -> ProxiedRequest {
-        match self {
-            Self::Buffered(request) => request,
-            Self::Streaming {
-                method,
-                uri,
-                version,
-                headers,
-                body,
-                done,
-                time,
-            } => {
-                done.notified().await;
-                let snapshot = body.snapshot();
-                log_truncated_capture("request", &snapshot);
-                ProxiedRequest::new_with_body_metadata(
-                    method,
-                    uri,
-                    version,
-                    headers,
-                    snapshot.bytes,
-                    BodyMetadata {
-                        truncated: snapshot.truncated,
-                        total_seen: snapshot.total_seen,
+                        truncated,
+                        total_seen,
                     },
                     time,
                 )
@@ -170,22 +152,20 @@ impl CapturedRequest {
     }
 }
 
-fn log_truncated_capture(kind: &str, snapshot: &BodySnapshot) {
-    if snapshot.truncated {
+fn log_truncated_capture(kind: &str, truncated: bool, captured_len: usize, total_seen: usize) {
+    if truncated {
         tracing::warn!(
-            "Captured {kind} body truncated at {} bytes after seeing {} bytes; proxied traffic was streamed through unchanged",
-            snapshot.bytes.len(),
-            snapshot.total_seen
+            "Captured {kind} body truncated at {captured_len} bytes after seeing {total_seen} bytes; proxied traffic was streamed through unchanged"
         );
     }
 }
 
-fn reconcile_edited_body_headers(headers: &mut http::HeaderMap, body: &Bytes) {
-    headers.remove(http::header::TRANSFER_ENCODING);
-    headers.remove(http::header::CONTENT_ENCODING);
-    match http::HeaderValue::try_from(body.len().to_string()) {
+fn reconcile_edited_body_headers(headers: &mut rama::http::HeaderMap, body: &Bytes) {
+    headers.remove(rama::http::header::TRANSFER_ENCODING);
+    headers.remove(rama::http::header::CONTENT_ENCODING);
+    match rama::http::HeaderValue::try_from(body.len().to_string()) {
         Ok(length) => {
-            headers.insert(http::header::CONTENT_LENGTH, length);
+            headers.insert(rama::http::header::CONTENT_LENGTH, length);
         }
         Err(error) => tracing::warn!("Could not update Content-Length after body edit: {error}"),
     }
@@ -220,10 +200,10 @@ fn send_request_complete(
 }
 
 fn synthetic_response_parts(
-    status: http::StatusCode,
-    headers: http::HeaderMap,
+    status: rama::http::StatusCode,
+    headers: rama::http::HeaderMap,
     body: Bytes,
-) -> (http::response::Parts, Bytes) {
+) -> (rama::http::response::Parts, Bytes) {
     let mut builder = Response::builder().status(status);
     if let Some(response_headers) = builder.headers_mut() {
         *response_headers = headers;
@@ -236,7 +216,7 @@ fn synthetic_response_parts(
 }
 
 struct HookedResponse {
-    parts: http::response::Parts,
+    parts: rama::http::response::Parts,
     body: HookedResponseBody,
 }
 
@@ -264,57 +244,42 @@ impl HookedResponseBody {
 ///
 /// When the body exceeds the limit, returns a reconstructed streaming body that
 /// first replays already-read bytes, then continues the original body.
-async fn collect_body<B>(mut body: B, limit: Option<usize>, kind: &'static str) -> BodyCollection
-where
-    B: HttpBody<Data = Bytes, Error = hyper::Error> + Send + Sync + Unpin + 'static,
-{
-    let mut buffer = BytesMut::new();
-
-    while let Some(frame) = body.frame().await {
-        let frame = match frame {
-            Ok(frame) => frame,
-            Err(e) => {
-                tracing::warn!("Failed to collect {kind} body: {e}");
-                return BodyCollection::Complete(Bytes::new());
+async fn collect_body(body: Body, limit: Option<usize>, kind: &'static str) -> BodyCollection {
+    match limit {
+        Some(limit) => match body
+            .collect_with(CollectOptions::new().with_max_size(limit))
+            .await
+        {
+            Ok(collected) => BodyCollection::Complete(collected.to_bytes()),
+            Err(error) if error.is_cap_reached() => {
+                tracing::warn!(
+                    "{kind} body exceeded editable limit of {limit} bytes; streaming through without body editing"
+                );
+                let captured = error.bytes_read();
+                match error.into_full_body() {
+                    Some(body) => BodyCollection::Exceeded { captured, body },
+                    None => BodyCollection::Complete(captured),
+                }
             }
-        };
-
-        let Ok(data) = frame.into_data() else {
-            continue;
-        };
-
-        let Some(limit) = limit else {
-            buffer.extend_from_slice(&data);
-            continue;
-        };
-
-        if buffer.len().saturating_add(data.len()) > limit {
-            tracing::warn!(
-                "{kind} body exceeded editable limit of {limit} bytes; streaming through without body editing"
-            );
-            let keep = limit.saturating_sub(buffer.len()).min(data.len());
-            if keep > 0 {
-                buffer.extend_from_slice(&data[..keep]);
+            Err(error) => {
+                tracing::warn!("Failed to collect {kind} body: {error}");
+                BodyCollection::Complete(error.bytes_read())
             }
-            let captured = buffer.freeze();
-            let overflow = data.slice(keep..);
-            return BodyCollection::Exceeded {
-                body: body::prefix([captured.clone(), overflow], body),
-                captured,
-            };
-        }
-
-        buffer.extend_from_slice(&data);
+        },
+        None => match body.collect().await {
+            Ok(collected) => BodyCollection::Complete(collected.to_bytes()),
+            Err(error) => {
+                tracing::warn!("Failed to collect {kind} body: {error}");
+                BodyCollection::Complete(Bytes::new())
+            }
+        },
     }
-
-    BodyCollection::Complete(buffer.freeze())
 }
 
 /// Default handler that captures request/response pairs and emits [`ProxyEvent`]s.
 ///
 /// When the `scripting` feature is enabled and a script engine is attached,
 /// Lua `on_request` / `on_response` hooks are called for every request/response.
-#[derive(Clone)]
 pub struct CapturingHandler {
     event_tx: mpsc::Sender<ProxyEvent>,
     captured_request: Option<CapturedRequest>,
@@ -326,6 +291,24 @@ pub struct CapturingHandler {
     route_rules: Option<Arc<crate::rules::RouteRules>>,
     #[cfg(feature = "scripting")]
     script_engine: Option<Arc<crate::scripting::ScriptEngine>>,
+}
+
+impl Clone for CapturingHandler {
+    fn clone(&self) -> Self {
+        Self {
+            event_tx: self.event_tx.clone(),
+            // Handlers are cloned as per-connection templates before any request
+            // is captured; the transient capture state (which now holds a
+            // non-cloneable capture handle) never carries across a clone.
+            captured_request: None,
+            pending_id: self.pending_id,
+            intercept: self.intercept.clone(),
+            body_capture_limit: self.body_capture_limit,
+            route_rules: self.route_rules.clone(),
+            #[cfg(feature = "scripting")]
+            script_engine: self.script_engine.clone(),
+        }
+    }
 }
 
 impl std::fmt::Debug for CapturingHandler {
@@ -387,9 +370,11 @@ impl CapturingHandler {
         self
     }
 
-    pub(crate) fn take_captured_request(&mut self) -> Option<ProxiedRequest> {
-        self.take_captured_request_state()
-            .map(CapturedRequest::into_proxied_request)
+    pub(crate) async fn take_captured_request(&mut self) -> Option<ProxiedRequest> {
+        match self.take_captured_request_state() {
+            Some(request) => Some(request.into_proxied_request().await),
+            None => None,
+        }
     }
 
     fn take_captured_request_state(&mut self) -> Option<CapturedRequest> {
@@ -442,7 +427,7 @@ impl CapturingHandler {
     pub(crate) async fn handle_replayed_request(
         &mut self,
         req: ProxiedRequest,
-    ) -> Option<Request<ProxyBody>> {
+    ) -> Option<Request<Body>> {
         let id = next_id();
         self.pending_id = Some(id);
 
@@ -452,22 +437,19 @@ impl CapturingHandler {
         let mut headers = req.headers().clone();
         let mut body_bytes = req.body().clone();
 
-        self.captured_request = Some(CapturedRequest::buffered(ProxiedRequest::new(
+        let proxied = ProxiedRequest::new(
             method.clone(),
             uri.clone(),
             version,
             headers.clone(),
             body_bytes.clone(),
             now_millis(),
-        )));
+        );
+        self.captured_request = Some(CapturedRequest::buffered(proxied.clone()));
 
         if let Some(ref cfg) = self.intercept {
             if cfg.is_enabled() {
-                let snapshot = self
-                    .captured_request
-                    .clone()
-                    .unwrap()
-                    .into_proxied_request();
+                let snapshot = proxied;
                 let rx = cfg.register(id);
                 if self
                     .event_tx
@@ -510,8 +492,8 @@ impl CapturingHandler {
                                 )));
                         }
                         Ok(Ok(InterceptDecision::Block { status, body })) => {
-                            let status_code = http::StatusCode::from_u16(status)
-                                .unwrap_or(http::StatusCode::BAD_GATEWAY);
+                            let status_code = rama::http::StatusCode::from_u16(status)
+                                .unwrap_or(rama::http::StatusCode::BAD_GATEWAY);
                             let (parts, _) = Response::<()>::builder()
                                 .status(status_code)
                                 .body(())
@@ -529,11 +511,12 @@ impl CapturingHandler {
             }
         }
 
-        let mut builder = Request::builder().method(method).uri(uri).version(version);
-        if let Some(h) = builder.headers_mut() {
-            *h = headers;
-        }
-        builder.body(body::full(body_bytes)).ok()
+        let mut request = Request::new(Body::from(body_bytes));
+        *request.method_mut() = method;
+        *request.uri_mut() = uri;
+        *request.version_mut() = version;
+        *request.headers_mut() = headers;
+        Some(request)
     }
 
     pub(crate) fn send_event(&self, event: ProxyEvent) {
@@ -542,32 +525,26 @@ impl CapturingHandler {
 
     pub(crate) fn synthetic_response(
         &mut self,
-        status: http::StatusCode,
-        headers: http::HeaderMap,
+        status: rama::http::StatusCode,
+        headers: rama::http::HeaderMap,
         body: Bytes,
-    ) -> Response<ProxyBody> {
+    ) -> Response<Body> {
         let (parts, body) = synthetic_response_parts(status, headers, body);
         self.emit_response_snapshot(&parts, body.clone());
-        Response::from_parts(parts, body::full(body))
+        Response::from_parts(parts, Body::from(body))
     }
 
     pub(crate) fn emit_synthetic_completion(
         &mut self,
-        status: http::StatusCode,
-        headers: http::HeaderMap,
+        status: rama::http::StatusCode,
+        headers: rama::http::HeaderMap,
         body: Bytes,
     ) {
         let (parts, body) = synthetic_response_parts(status, headers, body);
         self.emit_response_snapshot(&parts, body);
     }
 
-    pub(crate) async fn handle_upstream_response<B>(
-        &mut self,
-        res: Response<B>,
-    ) -> Response<ProxyBody>
-    where
-        B: HttpBody<Data = Bytes, Error = hyper::Error> + Send + Sync + Unpin + 'static,
-    {
+    pub(crate) async fn handle_upstream_response(&mut self, res: Response<Body>) -> Response<Body> {
         let (parts, body) = res.into_parts();
         if !self.should_buffer_response() {
             return self.stream_response(parts, body);
@@ -583,10 +560,7 @@ impl CapturingHandler {
         }
     }
 
-    pub(crate) async fn record_upstream_response<B>(&mut self, res: Response<B>)
-    where
-        B: HttpBody<Data = Bytes, Error = hyper::Error> + Send + Sync + Unpin + 'static,
-    {
+    pub(crate) async fn record_upstream_response(&mut self, res: Response<Body>) {
         let (parts, body) = res.into_parts();
         match collect_body(body, self.body_capture_limit, "response").await {
             BodyCollection::Complete(body_bytes) => self.emit_captured_response(parts, body_bytes),
@@ -598,23 +572,23 @@ impl CapturingHandler {
 
     fn finish_buffered_response(
         &mut self,
-        parts: http::response::Parts,
+        parts: rama::http::response::Parts,
         body_bytes: Bytes,
-    ) -> Response<ProxyBody> {
+    ) -> Response<Body> {
         let hooked = self.apply_response_hook_to_snapshot(parts, body_bytes);
         let HookedResponse { parts, body } = hooked;
         let body_bytes = body.into_bytes();
         self.emit_response_snapshot(&parts, body_bytes.clone());
 
-        Response::from_parts(parts, body::full(body_bytes))
+        Response::from_parts(parts, Body::from(body_bytes))
     }
 
     fn finish_limited_response(
         &mut self,
-        parts: http::response::Parts,
+        parts: rama::http::response::Parts,
         captured: Bytes,
-        body: ProxyBody,
-    ) -> Response<ProxyBody> {
+        body: Body,
+    ) -> Response<Body> {
         let hooked = self.apply_response_hook_to_snapshot(parts, captured);
         if hooked.body.is_original() {
             self.stream_response(hooked.parts, body)
@@ -622,59 +596,53 @@ impl CapturingHandler {
             let HookedResponse { parts, body } = hooked;
             let body_bytes = body.into_bytes();
             self.emit_response_snapshot(&parts, body_bytes.clone());
-            Response::from_parts(parts, body::full(body_bytes))
+            Response::from_parts(parts, Body::from(body_bytes))
         }
     }
 
-    fn emit_captured_response(&mut self, parts: http::response::Parts, body_bytes: Bytes) {
+    fn emit_captured_response(&mut self, parts: rama::http::response::Parts, body_bytes: Bytes) {
         let hooked = self.apply_response_hook_to_snapshot(parts, body_bytes);
         let HookedResponse { parts, body } = hooked;
         self.emit_response_snapshot(&parts, body.into_bytes());
     }
 
-    fn stream_response<B>(&mut self, parts: http::response::Parts, body: B) -> Response<ProxyBody>
-    where
-        B: HttpBody<Data = Bytes, Error = hyper::Error> + Send + Sync + 'static,
-    {
+    fn stream_response(
+        &mut self,
+        parts: rama::http::response::Parts,
+        body: Body,
+    ) -> Response<Body> {
         let status = parts.status;
         let version = parts.version;
         let headers = parts.headers.clone();
         let request = self.take_captured_request_state();
         let id = self.pending_id.take().unwrap_or_else(next_id);
         let event_tx = self.event_tx_clone();
-        let response_capture = BodyCapture::new(self.body_capture_limit);
-        let response_capture_for_body = response_capture.clone();
+        let (body, handle) = body.capture_buffered(capture_limit(self.body_capture_limit));
 
-        let body = body::capture(body, response_capture, move || {
+        tokio::spawn(async move {
             let Some(request) = request else {
                 return;
             };
-
-            let response_snapshot = response_capture_for_body.snapshot();
-            log_truncated_capture("response", &response_snapshot);
+            let Ok(captured) = handle.wait().await else {
+                return;
+            };
+            let truncated = captured.is_truncated();
+            let total_seen = usize::try_from(captured.total_bytes()).unwrap_or(usize::MAX);
+            let bytes = captured.bytes().clone();
+            log_truncated_capture("response", truncated, bytes.len(), total_seen);
             let response = ProxiedResponse::new_with_body_metadata(
                 status,
                 version,
                 headers,
-                response_snapshot.bytes,
+                bytes,
                 BodyMetadata {
-                    truncated: response_snapshot.truncated,
-                    total_seen: response_snapshot.total_seen,
+                    truncated,
+                    total_seen,
                 },
                 now_millis(),
             );
-
-            match request {
-                CapturedRequest::Buffered(request) => {
-                    send_request_complete(&event_tx, id, request, response);
-                }
-                request => {
-                    tokio::spawn(async move {
-                        let request = request.into_proxied_request_after_capture().await;
-                        send_request_complete(&event_tx, id, request, response);
-                    });
-                }
-            }
+            let request = request.into_proxied_request().await;
+            send_request_complete(&event_tx, id, request, response);
         });
 
         Response::from_parts(parts, body)
@@ -683,7 +651,7 @@ impl CapturingHandler {
     #[cfg(feature = "scripting")]
     fn apply_response_hook_to_snapshot(
         &self,
-        mut parts: http::response::Parts,
+        mut parts: rama::http::response::Parts,
         captured_body: Bytes,
     ) -> HookedResponse {
         if let Some(ref engine) = self.script_engine {
@@ -711,7 +679,7 @@ impl CapturingHandler {
                     headers,
                     body,
                 }) => {
-                    if let Ok(s) = http::StatusCode::from_u16(status) {
+                    if let Ok(s) = rama::http::StatusCode::from_u16(status) {
                         parts.status = s;
                     }
                     parts.headers = headers;
@@ -761,7 +729,7 @@ impl CapturingHandler {
     #[cfg(not(feature = "scripting"))]
     fn apply_response_hook_to_snapshot(
         &self,
-        parts: http::response::Parts,
+        parts: rama::http::response::Parts,
         captured_body: Bytes,
     ) -> HookedResponse {
         HookedResponse {
@@ -770,7 +738,11 @@ impl CapturingHandler {
         }
     }
 
-    pub(crate) fn emit_response_snapshot(&mut self, parts: &http::response::Parts, body: Bytes) {
+    pub(crate) fn emit_response_snapshot(
+        &mut self,
+        parts: &rama::http::response::Parts,
+        body: Bytes,
+    ) {
         let proxied_response = ProxiedResponse::new(
             parts.status,
             parts.version,
@@ -779,25 +751,39 @@ impl CapturingHandler {
             now_millis(),
         );
 
-        if let Some(request) = self.take_captured_request() {
-            // Use the ID assigned at the start of handle_request (intercept flow)
-            // so that RequestIntercepted and RequestComplete share the same ID.
-            // Fall back to next_id() for the normal (non-intercept) path.
-            let id = self.pending_id.take().unwrap_or_else(next_id);
-            let event = ProxyEvent::RequestComplete {
-                id,
-                request: Box::new(request),
-                response: Box::new(proxied_response),
-            };
-            self.send_event(event);
+        let Some(request) = self.take_captured_request_state() else {
+            return;
+        };
+        // Use the ID assigned at the start of handle_request (intercept flow)
+        // so that RequestIntercepted and RequestComplete share the same ID.
+        // Fall back to next_id() for the normal (non-intercept) path.
+        let id = self.pending_id.take().unwrap_or_else(next_id);
+        match request {
+            CapturedRequest::Buffered(request) => {
+                self.send_event(ProxyEvent::RequestComplete {
+                    id,
+                    request: Box::new(request),
+                    response: Box::new(proxied_response),
+                });
+            }
+            // The request body is still streaming: defer completion to a task
+            // that awaits its capture handle so the recorded request body is
+            // whole, matching the streamed-response path.
+            streaming => {
+                let event_tx = self.event_tx_clone();
+                tokio::spawn(async move {
+                    let request = streaming.into_proxied_request().await;
+                    send_request_complete(&event_tx, id, request, proxied_response);
+                });
+            }
         }
     }
 
     fn forward_request_from_body(
         &mut self,
-        parts: http::request::Parts,
+        parts: rama::http::request::Parts,
         request_body: RequestBody,
-    ) -> Request<ProxyBody> {
+    ) -> Request<Body> {
         match request_body {
             RequestBody::Buffered(body_bytes) => {
                 self.captured_request = Some(CapturedRequest::buffered(ProxiedRequest::new(
@@ -808,34 +794,21 @@ impl CapturingHandler {
                     body_bytes.clone(),
                     now_millis(),
                 )));
-                Request::from_parts(parts, body::full(body_bytes))
+                Request::from_parts(parts, Body::from(body_bytes))
             }
             RequestBody::Streaming { captured, body } => {
-                let capture = BodyCapture::new(self.body_capture_limit);
-                let done = Arc::new(Notify::new());
-                self.captured_request = Some(CapturedRequest::streaming(
-                    &parts,
-                    capture.clone(),
-                    Arc::clone(&done),
-                    now_millis(),
-                ));
                 debug_assert!(captured.len() <= self.body_capture_limit.unwrap_or(usize::MAX));
-                Request::from_parts(
-                    parts,
-                    body::capture(body, capture, move || done.notify_one()),
-                )
+                let (body, handle) = body.capture_buffered(capture_limit(self.body_capture_limit));
+                self.captured_request =
+                    Some(CapturedRequest::streaming(&parts, handle, now_millis()));
+                Request::from_parts(parts, body)
             }
         }
     }
 }
 
-#[async_trait]
-impl HttpHandler for CapturingHandler {
-    async fn handle_request(
-        &mut self,
-        _ctx: &HttpContext,
-        req: Request<hyper::body::Incoming>,
-    ) -> RequestOrResponse {
+impl CapturingHandler {
+    pub(crate) async fn handle_request(&mut self, req: Request<Body>) -> RequestOrResponse {
         // Assign a stable ID at request start so that RequestIntercepted and
         // RequestComplete events for the same flow share the same ID.
         let id = next_id();
@@ -888,18 +861,9 @@ impl HttpHandler for CapturingHandler {
             }
         }
         if !self.should_buffer_request() {
-            let capture = BodyCapture::new(self.body_capture_limit);
-            let done = Arc::new(Notify::new());
-            self.captured_request = Some(CapturedRequest::streaming(
-                &parts,
-                capture.clone(),
-                Arc::clone(&done),
-                now_millis(),
-            ));
-            let req = Request::from_parts(
-                parts,
-                body::capture(incoming, capture, move || done.notify_one()),
-            );
+            let (body, handle) = incoming.capture_buffered(capture_limit(self.body_capture_limit));
+            self.captured_request = Some(CapturedRequest::streaming(&parts, handle, now_millis()));
+            let req = Request::from_parts(parts, body);
             return RequestOrResponse::Request(req);
         }
 
@@ -976,8 +940,8 @@ impl HttpHandler for CapturingHandler {
                     );
                     self.captured_request = Some(CapturedRequest::buffered(proxied_request));
 
-                    let status_code = http::StatusCode::from_u16(status)
-                        .unwrap_or(http::StatusCode::INTERNAL_SERVER_ERROR);
+                    let status_code = rama::http::StatusCode::from_u16(status)
+                        .unwrap_or(rama::http::StatusCode::INTERNAL_SERVER_ERROR);
                     return RequestOrResponse::Response(self.synthetic_response(
                         status_code,
                         headers,
@@ -1042,11 +1006,11 @@ impl HttpHandler for CapturingHandler {
                         }
                         Ok(Ok(InterceptDecision::Block { status, body })) => {
                             // Short-circuit: captured_request is already set above.
-                            let status_code = http::StatusCode::from_u16(status)
-                                .unwrap_or(http::StatusCode::BAD_GATEWAY);
+                            let status_code = rama::http::StatusCode::from_u16(status)
+                                .unwrap_or(rama::http::StatusCode::BAD_GATEWAY);
                             return RequestOrResponse::Response(self.synthetic_response(
                                 status_code,
-                                http::HeaderMap::new(),
+                                rama::http::HeaderMap::new(),
                                 body,
                             ));
                         }
@@ -1055,8 +1019,8 @@ impl HttpHandler for CapturingHandler {
                             // return 504 so the client gets a clear error.
                             tracing::warn!("Intercept timed out for id={id}, returning 504");
                             return RequestOrResponse::Response(self.synthetic_response(
-                                http::StatusCode::GATEWAY_TIMEOUT,
-                                http::HeaderMap::new(),
+                                rama::http::StatusCode::GATEWAY_TIMEOUT,
+                                rama::http::HeaderMap::new(),
                                 Bytes::new(),
                             ));
                         }
@@ -1071,21 +1035,14 @@ impl HttpHandler for CapturingHandler {
         let req = self.forward_request_from_body(parts, request_body);
         RequestOrResponse::Request(req)
     }
-
-    async fn handle_response(
-        &mut self,
-        _ctx: &HttpContext,
-        res: Response<hyper::body::Incoming>,
-    ) -> Response<ProxyBody> {
-        self.handle_upstream_response(res).await
-    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use http::{HeaderMap, Method, StatusCode, Uri, Version};
-    use http_body_util::BodyExt;
+    use rama::http::body::util::BodyExt;
+    use rama::http::{HeaderMap, Method, StatusCode, Version};
+    use rama::net::uri::Uri;
 
     fn proxied_request() -> ProxiedRequest {
         let mut headers = HeaderMap::new();
@@ -1100,14 +1057,26 @@ mod tests {
         )
     }
 
-    async fn body_bytes(response: Response<ProxyBody>) -> Bytes {
+    async fn body_bytes(response: Response<Body>) -> Bytes {
         response.into_body().collect().await.unwrap().to_bytes()
+    }
+
+    /// Build a request-body capture handle already resolved with `data` (capped
+    /// at `limit`), mirroring how the proxy taps a fully-streamed request body.
+    async fn resolved_capture(data: &'static [u8], limit: Option<usize>) -> CaptureHandle {
+        let (body, handle) =
+            Body::from(Bytes::from_static(data)).capture_buffered(capture_limit(limit));
+        body.collect().await.unwrap();
+        handle
     }
 
     #[cfg(feature = "scripting")]
     fn encode_test_body(encoding: &str, body: &'static [u8]) -> Bytes {
         let mut headers = HeaderMap::new();
-        headers.insert(http::header::CONTENT_ENCODING, encoding.parse().unwrap());
+        headers.insert(
+            rama::http::header::CONTENT_ENCODING,
+            encoding.parse().unwrap(),
+        );
         crate::encoding::encode_from_hook(&mut headers, Bytes::from_static(body))
     }
 
@@ -1131,15 +1100,21 @@ mod tests {
     #[test]
     fn edited_body_headers_drop_wire_encodings_and_refresh_length() {
         let mut headers = HeaderMap::new();
-        headers.insert(http::header::TRANSFER_ENCODING, "chunked".parse().unwrap());
-        headers.insert(http::header::CONTENT_ENCODING, "gzip".parse().unwrap());
-        headers.insert(http::header::CONTENT_LENGTH, "999".parse().unwrap());
+        headers.insert(
+            rama::http::header::TRANSFER_ENCODING,
+            "chunked".parse().unwrap(),
+        );
+        headers.insert(
+            rama::http::header::CONTENT_ENCODING,
+            "gzip".parse().unwrap(),
+        );
+        headers.insert(rama::http::header::CONTENT_LENGTH, "999".parse().unwrap());
 
         reconcile_edited_body_headers(&mut headers, &Bytes::from_static(b"edited"));
 
-        assert!(!headers.contains_key(http::header::TRANSFER_ENCODING));
-        assert!(!headers.contains_key(http::header::CONTENT_ENCODING));
-        assert_eq!(headers[http::header::CONTENT_LENGTH], "6");
+        assert!(!headers.contains_key(rama::http::header::TRANSFER_ENCODING));
+        assert!(!headers.contains_key(rama::http::header::CONTENT_ENCODING));
+        assert_eq!(headers[rama::http::header::CONTENT_LENGTH], "6");
     }
 
     #[tokio::test]
@@ -1167,7 +1142,7 @@ mod tests {
                 response,
             } => {
                 assert_eq!(id, 77);
-                assert_eq!(request.uri().path(), "/path");
+                assert_eq!(request.uri().path().unwrap(), "/path");
                 assert_eq!(response.status(), StatusCode::ACCEPTED);
                 assert_eq!(response.headers()["x-response"], "ok");
                 assert_eq!(response.body().as_ref(), b"accepted");
@@ -1217,7 +1192,7 @@ mod tests {
                 response,
             } => {
                 assert_eq!(id, 78);
-                assert_eq!(request.uri().path(), "/path");
+                assert_eq!(request.uri().path().unwrap(), "/path");
                 assert_eq!(response.status(), StatusCode::BAD_GATEWAY);
                 assert_eq!(response.headers()["x-synthetic"], "yes");
                 assert_eq!(response.body().as_ref(), b"synthetic body");
@@ -1239,23 +1214,15 @@ mod tests {
             .body(())
             .unwrap()
             .into_parts();
-        let request_capture = BodyCapture::new(Some(4));
-        request_capture.append(&Bytes::from_static(b"abcdef"));
-        let request_done = Arc::new(Notify::new());
-        request_done.notify_one();
-        handler.captured_request = Some(CapturedRequest::streaming(
-            &req_parts,
-            request_capture,
-            request_done,
-            10,
-        ));
+        let handle = resolved_capture(b"abcdef", Some(4)).await;
+        handler.captured_request = Some(CapturedRequest::streaming(&req_parts, handle, 10));
 
         let (parts, _) = Response::builder()
             .status(StatusCode::OK)
             .body(())
             .unwrap()
             .into_parts();
-        let response = handler.stream_response(parts, body::full(Bytes::from_static(b"uvwxyz")));
+        let response = handler.stream_response(parts, Body::from(Bytes::from_static(b"uvwxyz")));
 
         assert_eq!(body_bytes(response).await.as_ref(), b"uvwxyz");
         match event_rx.recv().await.unwrap() {
@@ -1285,18 +1252,18 @@ mod tests {
             .unwrap()
             .into_parts();
         let response =
-            handler.stream_response(parts, body::full(Bytes::from_static(b"not consumed")));
+            handler.stream_response(parts, Body::from(Bytes::from_static(b"not consumed")));
 
         drop(response);
 
-        match event_rx.try_recv().unwrap() {
+        match event_rx.recv().await.unwrap() {
             ProxyEvent::RequestComplete {
                 id,
                 request,
                 response,
             } => {
                 assert_eq!(id, 90);
-                assert_eq!(request.uri().path(), "/path");
+                assert_eq!(request.uri().path().unwrap(), "/path");
                 assert_eq!(response.status(), StatusCode::OK);
                 assert!(response.body().is_empty());
             }
@@ -1317,7 +1284,7 @@ mod tests {
             .unwrap()
             .into_parts();
 
-        let response = handler.stream_response(parts, body::empty());
+        let response = handler.stream_response(parts, Body::empty());
 
         assert!(body_bytes(response).await.is_empty());
         match event_rx.recv().await.unwrap() {
@@ -1327,7 +1294,7 @@ mod tests {
                 response,
             } => {
                 assert_eq!(id, 89);
-                assert_eq!(request.uri().path(), "/path");
+                assert_eq!(request.uri().path().unwrap(), "/path");
                 assert_eq!(response.status(), StatusCode::NO_CONTENT);
                 assert!(response.body().is_empty());
             }
@@ -1347,29 +1314,26 @@ mod tests {
             .body(())
             .unwrap()
             .into_parts();
-        let request_capture = BodyCapture::new(Some(10));
-        request_capture.append(&Bytes::from_static(b"abc"));
-        let request_done = Arc::new(Notify::new());
-        handler.captured_request = Some(CapturedRequest::streaming(
-            &req_parts,
-            request_capture.clone(),
-            Arc::clone(&request_done),
-            10,
-        ));
+        // A request-body capture that is still streaming (handle unresolved
+        // until we drive the wrapped body to completion below).
+        let (request_body, request_handle) =
+            Body::from(Bytes::from_static(b"abcdef")).capture_buffered(capture_limit(Some(10)));
+        handler.captured_request = Some(CapturedRequest::streaming(&req_parts, request_handle, 10));
 
         let (parts, _) = Response::builder()
             .status(StatusCode::NO_CONTENT)
             .body(())
             .unwrap()
             .into_parts();
-        let response = handler.stream_response(parts, body::empty());
+        let response = handler.stream_response(parts, Body::empty());
 
         assert!(body_bytes(response).await.is_empty());
         tokio::task::yield_now().await;
         assert!(event_rx.try_recv().is_err());
 
-        request_capture.append(&Bytes::from_static(b"def"));
-        request_done.notify_one();
+        // Completing the request body resolves its capture handle, unblocking
+        // the deferred RequestComplete emission.
+        request_body.collect().await.unwrap();
 
         match event_rx.recv().await.unwrap() {
             ProxyEvent::RequestComplete {
@@ -1388,7 +1352,7 @@ mod tests {
     #[tokio::test]
     async fn collect_body_returns_streaming_body_when_limit_is_exceeded() {
         match collect_body(
-            body::full(Bytes::from_static(b"abcdef")),
+            Body::from(Bytes::from_static(b"abcdef")),
             Some(4),
             "response",
         )
@@ -1404,7 +1368,7 @@ mod tests {
 
     #[tokio::test]
     async fn collect_body_buffers_full_body_when_unlimited() {
-        match collect_body(body::full(Bytes::from_static(b"abcdef")), None, "response").await {
+        match collect_body(Body::from(Bytes::from_static(b"abcdef")), None, "response").await {
             BodyCollection::Complete(body) => assert_eq!(body.as_ref(), b"abcdef"),
             BodyCollection::Exceeded { .. } => panic!("expected complete body"),
         }
@@ -1421,13 +1385,19 @@ mod tests {
             .unwrap();
 
         assert_eq!(request.method(), Method::POST);
-        assert_eq!(request.uri().path(), "/path");
+        assert_eq!(request.uri().path().unwrap(), "/path");
         assert_eq!(request.headers()["x-original"], "yes");
         let body = request.into_body().collect().await.unwrap().to_bytes();
         assert_eq!(body.as_ref(), b"request body");
         assert!(handler.pending_id.is_some());
         assert_eq!(
-            handler.take_captured_request().unwrap().uri().path(),
+            handler
+                .take_captured_request()
+                .await
+                .unwrap()
+                .uri()
+                .path()
+                .unwrap(),
             "/path"
         );
     }
@@ -1465,7 +1435,7 @@ mod tests {
 
         let id = match event_rx.recv().await.unwrap() {
             ProxyEvent::RequestIntercepted { id, request } => {
-                assert_eq!(request.uri().path(), "/path");
+                assert_eq!(request.uri().path().unwrap(), "/path");
                 id
             }
             other => panic!("expected RequestIntercepted, got {other:?}"),
@@ -1485,7 +1455,7 @@ mod tests {
 
         let request = task.await.unwrap().unwrap();
         assert_eq!(request.method(), Method::PUT);
-        assert_eq!(request.uri().path(), "/changed");
+        assert_eq!(request.uri().path().unwrap(), "/changed");
         assert_eq!(request.headers()["x-modified"], "yes");
         let body = request.into_body().collect().await.unwrap().to_bytes();
         assert_eq!(body.as_ref(), b"changed body");
@@ -1504,7 +1474,7 @@ mod tests {
         let id = match event_rx.recv().await.unwrap() {
             ProxyEvent::RequestIntercepted { id, request } => {
                 assert_eq!(request.method(), Method::POST);
-                assert_eq!(request.uri().path(), "/path");
+                assert_eq!(request.uri().path().unwrap(), "/path");
                 id
             }
             other => panic!("expected RequestIntercepted, got {other:?}"),
@@ -1514,7 +1484,7 @@ mod tests {
 
         let request = task.await.unwrap().unwrap();
         assert_eq!(request.method(), Method::POST);
-        assert_eq!(request.uri().path(), "/path");
+        assert_eq!(request.uri().path().unwrap(), "/path");
         assert_eq!(request.headers()["x-original"], "yes");
         let body = request.into_body().collect().await.unwrap().to_bytes();
         assert_eq!(body.as_ref(), b"request body");
@@ -1548,7 +1518,7 @@ mod tests {
             ProxyEvent::RequestComplete {
                 request, response, ..
             } => {
-                assert_eq!(request.uri().path(), "/path");
+                assert_eq!(request.uri().path().unwrap(), "/path");
                 assert_eq!(response.status(), StatusCode::IM_A_TEAPOT);
                 assert_eq!(response.body().as_ref(), b"blocked");
             }
@@ -1666,8 +1636,8 @@ mod tests {
         file.flush().unwrap();
 
         // Brotli-compress the upstream body the handler will receive.
-        let mut enc_headers = http::HeaderMap::new();
-        enc_headers.insert(http::header::CONTENT_ENCODING, "br".parse().unwrap());
+        let mut enc_headers = rama::http::HeaderMap::new();
+        enc_headers.insert(rama::http::header::CONTENT_ENCODING, "br".parse().unwrap());
         let compressed = crate::encoding::encode_from_hook(
             &mut enc_headers,
             Bytes::from_static(b"original plaintext"),
@@ -1695,8 +1665,8 @@ mod tests {
             "body was not re-encoded"
         );
 
-        let mut dec_headers = http::HeaderMap::new();
-        dec_headers.insert(http::header::CONTENT_ENCODING, "br".parse().unwrap());
+        let mut dec_headers = rama::http::HeaderMap::new();
+        dec_headers.insert(rama::http::header::CONTENT_ENCODING, "br".parse().unwrap());
         let decoded = crate::encoding::decode_for_hook(&dec_headers, &wire).unwrap();
         assert_eq!(decoded.as_ref(), b"scripted body");
     }
@@ -1784,7 +1754,10 @@ mod tests {
         assert_eq!(response.headers()["content-encoding"], "gzip");
         let wire = body_bytes(response).await;
         let mut headers = HeaderMap::new();
-        headers.insert(http::header::CONTENT_ENCODING, "gzip".parse().unwrap());
+        headers.insert(
+            rama::http::header::CONTENT_ENCODING,
+            "gzip".parse().unwrap(),
+        );
         let decoded = crate::encoding::decode_for_hook(&headers, &wire).unwrap();
         assert_eq!(decoded.as_ref(), b"original plaintext");
     }

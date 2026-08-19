@@ -21,7 +21,7 @@ The endpoint must be reachable by the device. When binding to a concrete address
 proxelar -m socks5 -p 1080
 ```
 
-The SOCKS5 listener supports unauthenticated CONNECT requests with IPv4, IPv6, and domain targets. HTTP traffic is inspected, TLS traffic uses the normal local-CA MITM flow, and unknown protocols fall back to observed raw TCP tunneling. Bind it to loopback unless exposure is intentional; client authentication is not currently implemented.
+The SOCKS5 listener supports unauthenticated CONNECT requests with IPv4, IPv6, and domain targets. It establishes the requested egress before returning a success reply. HTTP traffic is inspected, TLS traffic uses the normal local-CA MITM flow, and unknown protocols reuse the same egress for observed raw TCP tunneling. Bind it to loopback unless exposure is intentional; client authentication is not currently implemented.
 
 ## Upstream chaining
 

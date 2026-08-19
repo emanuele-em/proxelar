@@ -7,7 +7,6 @@ use clap::Parser;
 #[cfg(feature = "scripting")]
 use cli::{AddonCommand, Command};
 use cli::{Args, Interface, Mode};
-use http::Uri;
 use proxyapi::session::{
     export_curl, export_har, export_raw, import_har, load_session, save_session, session_events,
 };
@@ -15,6 +14,8 @@ use proxyapi::{
     DnsConfig, InterceptConfig, Proxy, ProxyConfig, ProxyMode, RedactionPolicy, RouteRules,
     SessionRecorder, WireGuardConfig,
 };
+use rama::net::uri::Uri;
+use rama::telemetry::tracing;
 use std::net::SocketAddr;
 use std::sync::Arc;
 use tokio::sync::RwLock;
@@ -25,11 +26,9 @@ const EVENT_CHANNEL_CAPACITY: usize = 10_000;
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
-    let _ = rustls::crypto::ring::default_provider().install_default();
-
     let args = Args::parse();
-    tracing_subscriber::fmt()
-        .with_env_filter(tracing_subscriber::EnvFilter::from_default_env())
+    tracing::subscriber::fmt()
+        .with_env_filter(tracing::subscriber::EnvFilter::from_default_env())
         .init();
 
     let ca_dir = args.ca_dir.clone().unwrap_or_else(|| {
@@ -135,6 +134,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         event_tx,
         ca_dir,
         upstream_tls: args.upstream_trust,
+        upstream_http_version: args.upstream_http_version,
         intercept: Some(Arc::clone(&intercept)),
         body_capture_limit: args.body_capture_limit.into_option(),
         #[cfg(feature = "scripting")]
@@ -157,7 +157,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         Proxy::new(proxy_config)
     } else {
         Proxy::new(proxy_config).with_route_rules(Arc::new(route_rules))
-    };
+    }
+    .with_peek_timeout_policy(args.peek_timeout_policy);
     let proxy = if let Some(mut upstream_proxy) = args.upstream_proxy {
         if let Some(credentials) = &args.upstream_proxy_auth {
             let (username, password) = credentials

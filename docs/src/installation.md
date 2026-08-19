@@ -36,7 +36,7 @@ docker build -t proxelar .
 cargo install proxelar
 ```
 
-This builds and installs the `proxelar` binary. Lua 5.4 and OpenSSL are vendored and compiled from source, so no system dependencies are required beyond a Rust toolchain.
+This builds and installs the `proxelar` binary. Lua 5.4 and Rama's BoringSSL backend are compiled from vendored sources, so no system dependencies are required beyond a Rust toolchain.
 
 ## From source
 

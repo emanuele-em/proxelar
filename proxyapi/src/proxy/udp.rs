@@ -1,10 +1,11 @@
+use rama::telemetry::tracing;
 use std::future::Future;
 use std::net::SocketAddr;
 use std::sync::Arc;
 use std::time::Duration;
 
-use bytes::Bytes;
 use proxyapi_models::CapturedUdpExchange;
+use rama::bytes::Bytes;
 use tokio::net::UdpSocket;
 use tokio::sync::mpsc;
 

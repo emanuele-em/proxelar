@@ -44,7 +44,7 @@ Proxelar is intentionally developer-oriented: terminal-first, scriptable, Rust-n
 - **Forward and reverse modes** — inspect configured clients or put Proxelar in front of a local service.
 - **Six capture modes** — forward, reverse, WireGuard, SOCKS5, DNS inspection/rewrite, and fixed-target raw UDP.
 - **WebSocket inspection** — capture connections and browse frames by direction, opcode, and payload preview.
-- **Portable sessions** — save/reload native captures or import/export HAR, curl, and raw HTTP files with secret redaction.
+- **Portable sessions** — save/reload lossless native captures or exchange HAR, curl, and raw HTTP files with secret redaction.
 - **Rules and automation** — map local/remote URLs, mock and redirect requests, hot-reload Lua, or drive the bearer-token REST API.
 
 ---
@@ -224,7 +224,7 @@ See the [full comparison](https://proxelar.micheletti.io/reference/comparison.ht
 
 Proxelar is usable today, but it intentionally has a narrower scope than a full security suite:
 
-- HTTP/2 clients are accepted, but HTTP/2 MITM streams are normalized and forwarded upstream as HTTP/1.1. HTTP/3/QUIC interception is not supported.
+- HTTP/1.1 and HTTP/2 are preserved upstream by default and can be forced with `--upstream-http-version`. HTTP/3 and QUIC interception are planned for later this year but are not available today.
 - Generic TCP streams are captured as directional chunks, and fixed-target or WireGuard UDP traffic records request/response datagrams. Protobuf has a lossless wire-field JSON editor and MessagePack has a JSON editor; descriptor-backed field names and raw-TCP schemas are not yet available.
 - WireGuard mode currently generates one client identity per CA directory. Proxelar does not modify system proxy settings; `--launch-browser` uses a reversible, isolated browser profile instead.
 - HTTPS interception requires trusting Proxelar's local CA. Certificate-pinned apps and many Android apps will not trust user-installed CAs.

@@ -18,16 +18,23 @@ proxelar --import-har input.har \
   --export-raw raw-flows/
 ```
 
-- HAR import/export carries HTTP request and response data.
+- HAR import carries HTTP request and response data.
+- HAR export also carries WebSocket messages in Chromium's
+  `_webSocketMessages` format.
 - curl export writes one reproducible command per HTTP request.
 - raw export writes request/response pairs without collapsing duplicate headers.
 - the native format also preserves WebSocket frames, raw TCP chunks, DNS and UDP exchanges, body truncation metadata, and stable flow IDs.
 
-HAR cannot represent all native session data. Keep the native file when capture fidelity matters.
+HAR cannot represent all native session data, including WebSocket connection
+lifecycle. Keep the native file when capture fidelity matters.
 
 ## Secret handling
 
-HAR, curl, and raw exports redact `Authorization`, `Proxy-Authorization`, `Cookie`, `Set-Cookie`, and common secret query parameters by default. Use `--export-secrets` only when the output will remain in a trusted location.
+HAR, curl, and raw exports redact `Authorization`, `Proxy-Authorization`,
+`Cookie`, `Set-Cookie`, and common secret query parameters by default.
+Application data in HTTP bodies and WebSocket messages is not inspected for
+secrets. Use `--export-secrets` only when the output will remain in a trusted
+location.
 
 Native `--save-session` files are lossless and are **not redacted**. Treat them as credentials-bearing debugging artifacts: restrict permissions, do not commit them, and delete them when no longer needed.
 

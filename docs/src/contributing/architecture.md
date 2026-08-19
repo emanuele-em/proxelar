@@ -12,17 +12,18 @@ interfaces      engine       pure data
 ## Runtime flow
 
 1. A mode-specific listener accepts TCP or UDP traffic.
-2. HTTP/TLS/SOCKS/DNS/UDP routing sends traffic to the relevant handler; unknown TCP can use observed tunneling.
+2. HTTP CONNECT and SOCKS establish egress before acknowledging success. Rama's peek and relay services preserve that pair across TLS, HTTP, WebSocket, or observed raw tunneling. An explicit rules/Lua/intercept destination rewrite is routed through the shared outbound client instead.
 3. Requests pass through rules, Lua hooks, optional interactive intercept, normalization, and the shared outbound client.
 4. Responses pass through Lua/intercept processing and capture.
 5. `ProxyEvent` values fan out once to the selected interface and `SessionRecorder`.
 6. The recorder backs the REST API and clean-shutdown exporters.
 
-The upstream client is shared by forward, reverse, replay, and chaining paths. Preserve its normalization invariants: remove `Host`, join duplicate `Cookie` fields with `; `, strip hop-by-hop metadata, and pin upstream HTTP/1.1.
+Forward, reverse, replay, and chaining use the same outbound connector policy, but direct proxy requests are not pooled across transactions. In the default `auto` mode Rama mirrors TLS ClientHello behavior and the origin certificate while Proxelar supplies the persistent CA, trust policy, and capture middleware. Explicit h1/h2 forcing uses the terminating version adapter because a connection-preserving relay cannot translate protocols. Preserve the normalization invariants: remove `Host`, join duplicate `Cookie` fields with `; `, strip hop-by-hop metadata, and preserve the incoming HTTP version unless the user explicitly forces one.
 
 ## Extension points
 
-- `HttpHandler` provides library-level request/response interception.
+- `ProxyConfig` and `ProxyMode` provide the library-level embedding surface.
+- `InterceptConfig` and `InterceptDecision` provide interactive request interception.
 - `RouteRules` provides deterministic configuration without code.
 - Lua provides hot-reloaded request, response, and WebSocket frame hooks.
 - `ProxyEvent` is the stable internal observation stream used by interfaces and persistence.
