@@ -3,10 +3,6 @@ pub(crate) mod forward;
 mod http1;
 mod http2;
 #[cfg(feature = "http3")]
-#[allow(
-    dead_code,
-    reason = "the feature-gated H3 core is activated by the reverse and WireGuard layers"
-)]
 mod http3;
 mod outbound;
 mod raw;
@@ -20,7 +16,7 @@ use std::{error::Error as StdError, future::Future, net::SocketAddr, path::PathB
 
 use http::Uri;
 use proxyapi_models::ProxiedRequest;
-use tokio::net::TcpListener;
+use tokio::net::{TcpListener, TcpStream};
 use tokio::sync::mpsc;
 
 use crate::ca::Ssl;
@@ -265,14 +261,77 @@ impl Proxy {
             .map_err(Error::Io);
         }
 
-        let listener = TcpListener::bind(self.config.addr).await?;
-        tracing::info!("Proxy listening on {}", self.config.addr);
+        let reverse_scheme = match &self.config.mode {
+            ProxyMode::Reverse { target } => target.scheme_str(),
+            _ => None,
+        };
+        let listener_plan = match reverse_scheme {
+            Some(scheme) => reverse_listener_plan(scheme)?,
+            None => ReverseListenerPlan::tcp_only(),
+        };
+        #[cfg(feature = "http3")]
+        if listener_plan.http3 && self.upstream_proxy.is_some() {
+            return Err(Error::Other(
+                "reverse HTTP/3 cannot use a TCP-only upstream proxy".to_owned(),
+            ));
+        }
+
+        let listener = if listener_plan.tcp {
+            Some(TcpListener::bind(self.config.addr).await?)
+        } else {
+            None
+        };
+        let listen_addr = match listener.as_ref() {
+            Some(listener) => {
+                let address = listener.local_addr()?;
+                tracing::info!("Proxy listening on {address}");
+                address
+            }
+            None => self.config.addr,
+        };
+
+        #[cfg(feature = "http3")]
+        let mut h3_server = if listener_plan.http3 {
+            let ProxyMode::Reverse { target } = &self.config.mode else {
+                unreachable!("HTTP/3 listener is reverse-only")
+            };
+            let mut handler = CapturingHandler::new(self.config.event_tx.clone())
+                .with_body_capture_limit(self.config.body_capture_limit);
+            if let Some(ref intercept) = self.config.intercept {
+                handler = handler.with_intercept(Arc::clone(intercept));
+            }
+            if let Some(ref rules) = self.route_rules {
+                handler = handler.with_route_rules(Arc::clone(rules));
+            }
+            #[cfg(feature = "scripting")]
+            if let Some(ref engine) = script_engine {
+                handler = handler.with_script_engine(Arc::clone(engine));
+            }
+            let address = if listener_plan.tcp {
+                listen_addr
+            } else {
+                self.config.addr
+            };
+            let server = reverse::ReverseH3Server::bind(
+                address,
+                target.clone(),
+                handler,
+                Arc::clone(&ca),
+                &self.config.upstream_tls,
+            )
+            .await?;
+            Some(Box::pin(server.serve()) as H3ServerFuture)
+        } else {
+            None
+        };
+        #[cfg(not(feature = "http3"))]
+        let mut h3_server: Option<()> = None;
 
         tokio::pin!(shutdown);
 
         loop {
             tokio::select! {
-                result = listener.accept() => {
+                result = accept_tcp(listener.as_ref()) => {
                     let (stream, remote_addr) = match result {
                         Ok(conn) => conn,
                         Err(e) => {
@@ -300,7 +359,6 @@ impl Proxy {
 
                     match &self.config.mode {
                         ProxyMode::Forward => {
-                            let listen_addr = self.config.addr;
                             tokio::spawn(forward::handle_connection(
                                 stream,
                                 remote_addr,
@@ -312,14 +370,19 @@ impl Proxy {
                             ));
                         }
                         ProxyMode::Reverse { target } => {
-                            let target = target.clone();
+                            let config = reverse::ReverseConnectionConfig::new(
+                                target.clone(),
+                                ca,
+                                native_pool,
+                                native_route,
+                                outbound,
+                                upstream_tls,
+                            );
                             tokio::spawn(reverse::handle_connection(
                                 stream,
                                 remote_addr,
                                 handler,
-                                target,
-                                native_pool,
-                                native_route,
+                                config,
                             ));
                         }
                         ProxyMode::Socks5 => {
@@ -339,6 +402,9 @@ impl Proxy {
                             unreachable!("WireGuard mode uses its UDP serve loop")
                         }
                     }
+                }
+                result = poll_h3_server(&mut h3_server) => {
+                    return result;
                 }
                 Some(req) = recv_replay(&mut replay_rx) => {
                     let mut handler = CapturingHandler::new(self.config.event_tx.clone())
@@ -369,6 +435,75 @@ impl Proxy {
 
         Ok(())
     }
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+struct ReverseListenerPlan {
+    tcp: bool,
+    #[cfg(feature = "http3")]
+    http3: bool,
+}
+
+impl ReverseListenerPlan {
+    const fn tcp_only() -> Self {
+        Self {
+            tcp: true,
+            #[cfg(feature = "http3")]
+            http3: false,
+        }
+    }
+}
+
+fn reverse_listener_plan(scheme: &str) -> Result<ReverseListenerPlan, Error> {
+    match scheme {
+        "http" => Ok(ReverseListenerPlan::tcp_only()),
+        "https" => Ok(ReverseListenerPlan {
+            tcp: true,
+            #[cfg(feature = "http3")]
+            http3: true,
+        }),
+        "http3" => {
+            #[cfg(feature = "http3")]
+            {
+                Ok(ReverseListenerPlan {
+                    tcp: false,
+                    http3: true,
+                })
+            }
+            #[cfg(not(feature = "http3"))]
+            {
+                Err(Error::Other(
+                    "reverse:http3 requires the proxyapi/http3 feature".to_owned(),
+                ))
+            }
+        }
+        _ => Err(Error::Other(
+            "reverse target scheme must be http, https, or http3".to_owned(),
+        )),
+    }
+}
+
+async fn accept_tcp(listener: Option<&TcpListener>) -> std::io::Result<(TcpStream, SocketAddr)> {
+    match listener {
+        Some(listener) => listener.accept().await,
+        None => std::future::pending().await,
+    }
+}
+
+#[cfg(feature = "http3")]
+type H3ServerFuture = std::pin::Pin<Box<dyn Future<Output = Result<(), Error>> + Send + 'static>>;
+
+#[cfg(feature = "http3")]
+async fn poll_h3_server(server: &mut Option<H3ServerFuture>) -> Result<(), Error> {
+    match server {
+        Some(server) => server.await,
+        None => std::future::pending().await,
+    }
+}
+
+#[cfg(not(feature = "http3"))]
+async fn poll_h3_server(_server: &mut Option<()>) -> Result<(), Error> {
+    std::future::pending().await
 }
 
 /// Receive the next replay request, or wait forever when no channel is present.
@@ -536,5 +671,26 @@ mod tests {
             request.head.headers.get("upgrade"),
             Some(b"websocket".as_slice())
         );
+    }
+
+    #[test]
+    fn reverse_listener_selection_is_scheme_driven() {
+        assert!(reverse_listener_plan("http").unwrap().tcp);
+
+        let https = reverse_listener_plan("https").unwrap();
+        assert!(https.tcp);
+        #[cfg(feature = "http3")]
+        assert!(https.http3);
+
+        #[cfg(feature = "http3")]
+        {
+            let http3 = reverse_listener_plan("http3").unwrap();
+            assert!(!http3.tcp);
+            assert!(http3.http3);
+        }
+        #[cfg(not(feature = "http3"))]
+        assert!(reverse_listener_plan("http3").is_err());
+
+        assert!(reverse_listener_plan("quic").is_err());
     }
 }

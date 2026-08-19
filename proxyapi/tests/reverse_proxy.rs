@@ -286,7 +286,8 @@ async fn reverse_proxy_returns_502_when_target_is_unreachable() {
 #[tokio::test]
 async fn reverse_proxy_default_upstream_tls_rejects_private_ca() {
     let _ = rustls::crypto::ring::default_provider().install_default();
-    let (upstream_addr, upstream_shutdown, _ca_pem) = start_private_ca_https_upstream().await;
+    let (upstream_addr, upstream_shutdown, _ca_pem, _) =
+        start_private_ca_https_upstream(false).await;
 
     let (status, body) =
         request_private_ca_https_upstream(upstream_addr, UpstreamTlsConfig::Default).await;
@@ -300,7 +301,8 @@ async fn reverse_proxy_default_upstream_tls_rejects_private_ca() {
 #[tokio::test]
 async fn reverse_proxy_default_with_ca_file_trusts_private_ca() {
     let _ = rustls::crypto::ring::default_provider().install_default();
-    let (upstream_addr, upstream_shutdown, ca_pem) = start_private_ca_https_upstream().await;
+    let (upstream_addr, upstream_shutdown, ca_pem, _) =
+        start_private_ca_https_upstream(false).await;
     let ca_file = tempfile::NamedTempFile::new().unwrap();
     std::fs::write(ca_file.path(), ca_pem).unwrap();
 
@@ -319,7 +321,8 @@ async fn reverse_proxy_default_with_ca_file_trusts_private_ca() {
 #[tokio::test]
 async fn reverse_proxy_ca_file_only_trusts_private_ca() {
     let _ = rustls::crypto::ring::default_provider().install_default();
-    let (upstream_addr, upstream_shutdown, ca_pem) = start_private_ca_https_upstream().await;
+    let (upstream_addr, upstream_shutdown, ca_pem, _) =
+        start_private_ca_https_upstream(false).await;
     let ca_file = tempfile::NamedTempFile::new().unwrap();
     std::fs::write(ca_file.path(), ca_pem).unwrap();
 
@@ -338,7 +341,8 @@ async fn reverse_proxy_ca_file_only_trusts_private_ca() {
 #[tokio::test]
 async fn reverse_proxy_insecure_upstream_tls_accepts_private_ca() {
     let _ = rustls::crypto::ring::default_provider().install_default();
-    let (upstream_addr, upstream_shutdown, _ca_pem) = start_private_ca_https_upstream().await;
+    let (upstream_addr, upstream_shutdown, _ca_pem, _) =
+        start_private_ca_https_upstream(false).await;
 
     let (status, body) =
         request_private_ca_https_upstream(upstream_addr, UpstreamTlsConfig::Insecure).await;
@@ -347,6 +351,169 @@ async fn reverse_proxy_insecure_upstream_tls_accepts_private_ca() {
     assert_eq!(body, "upstream response");
 
     let _ = upstream_shutdown.send(());
+}
+
+#[tokio::test]
+async fn reverse_https_propagates_client_alpn_offers_upstream_in_order() {
+    use rustls::pki_types::pem::PemObject as _;
+    use rustls::pki_types::{CertificateDer, ServerName};
+    use tokio::io::{AsyncReadExt as _, AsyncWriteExt as _};
+    use tokio_rustls::TlsConnector;
+
+    let _ = rustls::crypto::ring::default_provider().install_default();
+    let (upstream_addr, upstream_shutdown, _ca_pem, upstream_offers) =
+        start_private_ca_https_upstream(false).await;
+    let proxy_addr = reserve_loopback_addr().await;
+    let ca_dir = tempfile::tempdir().unwrap();
+    let (event_tx, _event_rx) = mpsc::channel::<ProxyEvent>(16);
+    let proxy = Proxy::new(ProxyConfig {
+        addr: proxy_addr,
+        mode: ProxyMode::Reverse {
+            target: format!("https://{upstream_addr}").parse().unwrap(),
+        },
+        event_tx,
+        ca_dir: ca_dir.path().to_path_buf(),
+        upstream_tls: UpstreamTlsConfig::Insecure,
+        intercept: None,
+        body_capture_limit: DEFAULT_BODY_CAPTURE_LIMIT,
+        #[cfg(feature = "scripting")]
+        script_path: None,
+        replay_rx: None,
+    });
+    let (shutdown_tx, shutdown_rx) = tokio::sync::oneshot::channel();
+    let proxy_task = tokio::spawn(async move {
+        proxy
+            .start(async {
+                shutdown_rx.await.ok();
+            })
+            .await
+    });
+    wait_for_tcp(proxy_addr).await;
+
+    let proxy_ca = std::fs::read(ca_dir.path().join("proxelar-ca.pem")).unwrap();
+    let mut roots = rustls::RootCertStore::empty();
+    roots
+        .add(CertificateDer::from_pem_slice(&proxy_ca).unwrap())
+        .unwrap();
+    let mut client_config = rustls::ClientConfig::builder()
+        .with_root_certificates(roots)
+        .with_no_client_auth();
+    let expected_offers = vec![b"x-proxelar-test".to_vec(), b"http/1.1".to_vec()];
+    client_config.alpn_protocols = expected_offers.clone();
+    let tcp = tokio::net::TcpStream::connect(proxy_addr).await.unwrap();
+    let mut tls = TlsConnector::from(Arc::new(client_config))
+        .connect(ServerName::try_from("127.0.0.1").unwrap(), tcp)
+        .await
+        .unwrap();
+    tls.write_all(
+        format!("GET /alpn HTTP/1.1\r\nHost: {proxy_addr}\r\nConnection: close\r\n\r\n").as_bytes(),
+    )
+    .await
+    .unwrap();
+    let mut response = Vec::new();
+    let mut buffer = [0_u8; 1024];
+    loop {
+        match tls.read(&mut buffer).await {
+            Ok(0) => break,
+            Ok(length) => response.extend_from_slice(&buffer[..length]),
+            Err(error) if error.kind() == std::io::ErrorKind::UnexpectedEof => break,
+            Err(error) => panic!("failed to read reverse TLS response: {error}"),
+        }
+    }
+
+    assert!(response.starts_with(b"HTTP/1.1 201"));
+    assert_eq!(
+        *upstream_offers
+            .lock()
+            .unwrap_or_else(|error| error.into_inner()),
+        expected_offers
+    );
+
+    let _ = shutdown_tx.send(());
+    let _ = upstream_shutdown.send(());
+    assert!(proxy_task.await.unwrap().is_ok());
+}
+
+#[tokio::test]
+async fn reverse_https_negotiates_h2_with_the_upstream() {
+    use rustls::pki_types::pem::PemObject as _;
+    use rustls::pki_types::{CertificateDer, ServerName};
+    use tokio_rustls::TlsConnector;
+
+    let _ = rustls::crypto::ring::default_provider().install_default();
+    let (upstream_addr, upstream_shutdown, _ca_pem, upstream_offers) =
+        start_private_ca_https_upstream(true).await;
+    let proxy_addr = reserve_loopback_addr().await;
+    let ca_dir = tempfile::tempdir().unwrap();
+    let (event_tx, _event_rx) = mpsc::channel::<ProxyEvent>(16);
+    let proxy = Proxy::new(ProxyConfig {
+        addr: proxy_addr,
+        mode: ProxyMode::Reverse {
+            target: format!("https://{upstream_addr}").parse().unwrap(),
+        },
+        event_tx,
+        ca_dir: ca_dir.path().to_path_buf(),
+        upstream_tls: UpstreamTlsConfig::Insecure,
+        intercept: None,
+        body_capture_limit: DEFAULT_BODY_CAPTURE_LIMIT,
+        #[cfg(feature = "scripting")]
+        script_path: None,
+        replay_rx: None,
+    });
+    let (shutdown_tx, shutdown_rx) = tokio::sync::oneshot::channel();
+    let proxy_task = tokio::spawn(async move {
+        proxy
+            .start(async {
+                shutdown_rx.await.ok();
+            })
+            .await
+    });
+    wait_for_tcp(proxy_addr).await;
+
+    let proxy_ca = std::fs::read(ca_dir.path().join("proxelar-ca.pem")).unwrap();
+    let mut roots = rustls::RootCertStore::empty();
+    roots
+        .add(CertificateDer::from_pem_slice(&proxy_ca).unwrap())
+        .unwrap();
+    let mut client_config = rustls::ClientConfig::builder()
+        .with_root_certificates(roots)
+        .with_no_client_auth();
+    let expected_offers = vec![b"h2".to_vec(), b"http/1.1".to_vec()];
+    client_config.alpn_protocols = expected_offers.clone();
+    let tcp = tokio::net::TcpStream::connect(proxy_addr).await.unwrap();
+    let tls = TlsConnector::from(Arc::new(client_config))
+        .connect(ServerName::try_from("127.0.0.1").unwrap(), tcp)
+        .await
+        .unwrap();
+    assert_eq!(tls.get_ref().1.alpn_protocol(), Some(b"h2".as_slice()));
+
+    let (mut sender, connection) = hyper::client::conn::http2::Builder::new(TokioExecutor::new())
+        .handshake(TokioIo::new(tls))
+        .await
+        .unwrap();
+    let connection_task = tokio::spawn(connection);
+    let request = Request::builder()
+        .uri(format!("https://{proxy_addr}/h2"))
+        .body(Full::new(Bytes::new()))
+        .unwrap();
+    let response = sender.send_request(request).await.unwrap();
+    assert_eq!(response.status(), http::StatusCode::CREATED);
+    assert_eq!(
+        response.into_body().collect().await.unwrap().to_bytes(),
+        "upstream response"
+    );
+    assert_eq!(
+        *upstream_offers
+            .lock()
+            .unwrap_or_else(|error| error.into_inner()),
+        expected_offers
+    );
+
+    drop(sender);
+    let _ = shutdown_tx.send(());
+    let _ = upstream_shutdown.send(());
+    assert!(proxy_task.await.unwrap().is_ok());
+    connection_task.abort();
 }
 
 #[tokio::test]
@@ -756,8 +923,13 @@ async fn request_private_ca_https_upstream(
 
     wait_for_tcp(proxy_addr).await;
 
-    let response = reqwest::Client::new()
-        .get(format!("http://{proxy_addr}/hello"))
+    let proxy_ca = std::fs::read(ca_dir.path().join("proxelar-ca.pem")).unwrap();
+    let client = reqwest::Client::builder()
+        .add_root_certificate(reqwest::Certificate::from_pem(&proxy_ca).unwrap())
+        .build()
+        .unwrap();
+    let response = client
+        .get(format!("https://{proxy_addr}/hello"))
         .send()
         .await
         .unwrap();
@@ -798,8 +970,14 @@ async fn start_upstream_server() -> (SocketAddr, tokio::sync::oneshot::Sender<()
     (addr, shutdown_tx)
 }
 
-async fn start_private_ca_https_upstream() -> (SocketAddr, tokio::sync::oneshot::Sender<()>, Vec<u8>)
-{
+async fn start_private_ca_https_upstream(
+    h2: bool,
+) -> (
+    SocketAddr,
+    tokio::sync::oneshot::Sender<()>,
+    Vec<u8>,
+    Arc<std::sync::Mutex<Vec<Vec<u8>>>>,
+) {
     use rcgen::{
         BasicConstraints, CertificateParams, DnType, ExtendedKeyUsagePurpose, IsCa, Issuer,
         KeyPair, KeyUsagePurpose,
@@ -837,10 +1015,18 @@ async fn start_private_ca_https_upstream() -> (SocketAddr, tokio::sync::oneshot:
     let certs = vec![server_cert.der().clone()];
     let private_key = PrivateKeyDer::Pkcs8(PrivatePkcs8KeyDer::from(server_key.serialize_der()));
 
-    let server_config = tokio_rustls::rustls::ServerConfig::builder()
+    let mut server_config = tokio_rustls::rustls::ServerConfig::builder()
         .with_no_client_auth()
         .with_single_cert(certs, private_key)
         .unwrap();
+    if h2 {
+        server_config.alpn_protocols = vec![b"h2".to_vec()];
+    }
+    let offered_alpn = Arc::new(std::sync::Mutex::new(Vec::new()));
+    server_config.cert_resolver = Arc::new(RecordingCertResolver {
+        inner: Arc::clone(&server_config.cert_resolver),
+        offered: Arc::clone(&offered_alpn),
+    });
     let acceptor = TlsAcceptor::from(Arc::new(server_config));
 
     let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
@@ -861,9 +1047,15 @@ async fn start_private_ca_https_upstream() -> (SocketAddr, tokio::sync::oneshot:
                         };
                         let io = TokioIo::new(stream);
                         let service = service_fn(upstream_response);
-                        let _ = hyper::server::conn::http1::Builder::new()
-                            .serve_connection(io, service)
-                            .await;
+                        if h2 {
+                            let _ = hyper::server::conn::http2::Builder::new(TokioExecutor::new())
+                                .serve_connection(io, service)
+                                .await;
+                        } else {
+                            let _ = hyper::server::conn::http1::Builder::new()
+                                .serve_connection(io, service)
+                                .await;
+                        }
                     });
                 }
                 _ = &mut shutdown_rx => break,
@@ -871,7 +1063,31 @@ async fn start_private_ca_https_upstream() -> (SocketAddr, tokio::sync::oneshot:
         }
     });
 
-    (addr, shutdown_tx, ca_pem)
+    (addr, shutdown_tx, ca_pem, offered_alpn)
+}
+
+#[derive(Debug)]
+struct RecordingCertResolver {
+    inner: Arc<dyn rustls::server::ResolvesServerCert>,
+    offered: Arc<std::sync::Mutex<Vec<Vec<u8>>>>,
+}
+
+impl rustls::server::ResolvesServerCert for RecordingCertResolver {
+    fn resolve(
+        &self,
+        client_hello: rustls::server::ClientHello<'_>,
+    ) -> Option<Arc<rustls::sign::CertifiedKey>> {
+        *self
+            .offered
+            .lock()
+            .unwrap_or_else(|error| error.into_inner()) = client_hello
+            .alpn()
+            .into_iter()
+            .flatten()
+            .map(<[u8]>::to_vec)
+            .collect();
+        self.inner.resolve(client_hello)
+    }
 }
 
 async fn start_echo_request_body_server() -> (SocketAddr, tokio::sync::oneshot::Sender<()>) {
