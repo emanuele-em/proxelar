@@ -1,5 +1,6 @@
 use std::net::SocketAddr;
 use std::sync::Arc;
+use std::time::Duration;
 
 use bytes::Bytes;
 use futures_util::{SinkExt, StreamExt};
@@ -34,6 +35,8 @@ use super::{
 const H2_PREFACE: &[u8] = b"PRI * HTTP/2.0\r\n\r\nSM\r\n\r\n";
 /// Maximum request prefix inspected while deciding whether a stream is HTTP/1.
 const MAX_PROTOCOL_PREFIX: usize = 4096;
+/// Maximum idle time while waiting for enough bytes to classify a stream.
+const PROTOCOL_SNIFF_TIMEOUT: Duration = Duration::from_secs(10);
 /// TLS record content type: Handshake.
 const TLS_RECORD_HANDSHAKE: u8 = 0x16;
 /// TLS major version byte (SSLv3 / TLS 1.x).
@@ -749,11 +752,25 @@ pub(super) async fn sniff_stream_protocol<I>(
 where
     I: AsyncRead + Unpin,
 {
+    sniff_stream_protocol_with_timeout(stream, PROTOCOL_SNIFF_TIMEOUT).await
+}
+
+async fn sniff_stream_protocol_with_timeout<I>(
+    stream: &mut I,
+    idle_timeout: Duration,
+) -> std::io::Result<(StreamProtocol, Bytes)>
+where
+    I: AsyncRead + Unpin,
+{
     let mut buffer = [0u8; MAX_PROTOCOL_PREFIX];
     let mut filled = 0;
 
     loop {
-        let bytes_read = stream.read(&mut buffer[filled..]).await?;
+        let bytes_read = tokio::time::timeout(idle_timeout, stream.read(&mut buffer[filled..]))
+            .await
+            .map_err(|_| {
+                std::io::Error::new(std::io::ErrorKind::TimedOut, "protocol detection timed out")
+            })??;
         if bytes_read == 0 {
             break;
         }
@@ -1107,6 +1124,16 @@ mod tests {
         assert!(could_be_known_protocol(b"PRI * HTTP/2.0\r\n"));
         assert!(could_be_known_protocol(&[TLS_RECORD_HANDSHAKE]));
         assert!(!could_be_known_protocol(b"\x01NOPE"));
+    }
+
+    #[tokio::test]
+    async fn protocol_sniff_times_out_when_the_peer_is_idle() {
+        let (_peer, mut stream) = tokio::io::duplex(1);
+        let error = sniff_stream_protocol_with_timeout(&mut stream, Duration::from_millis(10))
+            .await
+            .unwrap_err();
+
+        assert_eq!(error.kind(), std::io::ErrorKind::TimedOut);
     }
 
     #[tokio::test]
