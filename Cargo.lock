@@ -1447,13 +1447,10 @@ dependencies = [
  "http",
  "hyper",
  "hyper-util",
- "log",
  "rustls",
- "rustls-native-certs",
  "tokio",
  "tokio-rustls",
  "tower-service",
- "webpki-roots",
 ]
 
 [[package]]
@@ -2532,7 +2529,6 @@ dependencies = [
  "http",
  "http-body-util",
  "hyper",
- "hyper-rustls",
  "hyper-util",
  "mlua",
  "moka",

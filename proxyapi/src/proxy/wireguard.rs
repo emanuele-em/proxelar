@@ -23,7 +23,7 @@ use crate::ca::Ssl;
 use crate::event::ProxyEvent;
 use crate::handler::CapturingHandler;
 
-use super::{dns, forward, http1::NativePool, udp, Client, DnsConfig};
+use super::{dns, forward, http1::NativePool, udp, DnsConfig};
 
 const MAX_PACKET_SIZE: usize = 65_535;
 const WIREGUARD_OVERHEAD: usize = 80;
@@ -183,7 +183,6 @@ pub async fn serve(
     config: WireGuardConfig,
     handler: CapturingHandler,
     ca: Arc<Ssl>,
-    client: Arc<Client>,
     native_pool: Arc<NativePool>,
     native_route: Option<String>,
     event_tx: mpsc::Sender<ProxyEvent>,
@@ -228,7 +227,6 @@ pub async fn serve(
         tcp_listener,
         handler.clone(),
         ca,
-        Arc::clone(&client),
         Arc::clone(&native_pool),
         native_route.clone(),
         cancel.clone(),
@@ -441,7 +439,6 @@ async fn tcp_loop(
     mut listener: TcpListener,
     handler: CapturingHandler,
     ca: Arc<Ssl>,
-    client: Arc<Client>,
     native_pool: Arc<NativePool>,
     native_route: Option<String>,
     cancel: CancellationToken,
@@ -460,7 +457,6 @@ async fn tcp_loop(
                     source,
                     handler.clone(),
                     Arc::clone(&ca),
-                    Arc::clone(&client),
                     Arc::clone(&native_pool),
                     native_route.clone(),
                     SocketAddr::new(IpAddr::V4(SERVER_ADDRESS), 80),

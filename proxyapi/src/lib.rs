@@ -17,7 +17,6 @@ pub mod event;
 pub mod filter;
 pub(crate) mod handler;
 pub mod header;
-mod hyper_adapter;
 pub mod intercept;
 pub mod proxy;
 mod rewind;

@@ -1,5 +1,5 @@
 use bytes::Bytes;
-use hyper::{Request, Response};
+use http::{Request, Response};
 
 use crate::body::{self, ProxyBody};
 
