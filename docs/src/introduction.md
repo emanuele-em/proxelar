@@ -28,4 +28,4 @@ Proxelar is built as a four-crate Rust workspace:
 - **`proxelar-proto`** — the internal transport-neutral HTTP core and native H1/H2 adapters
 - **`proxyapi_models`** — shared request/response data types
 
-The proxy data path uses a sans-I/O HTTP/1 codec with `httparse` for lexical parsing, direct `h2`, and feature-gated `tokio-quiche` for HTTP/3. Tokio drives asynchronous I/O, rustls terminates TCP TLS, and rcgen mints per-host certificates; Hyper remains only as a transitive CLI dependency through Axum. Lua scripting is powered by [mlua](https://github.com/khvzak/mlua) with a vendored Lua 5.4.
+The proxy data path uses a sans-I/O HTTP/1 codec with `httparse` for lexical parsing, direct `h2`, and feature-gated `tokio-quiche` for HTTP/3. Tokio drives asynchronous I/O, rustls terminates TCP TLS, and rcgen mints per-host certificates. Production `proxyapi` has no Hyper dependency; Hyper remains transitively in the CLI through Axum and directly in `proxyapi`'s dev dependencies for independent protocol tests and benchmarks. Lua scripting is powered by [mlua](https://github.com/khvzak/mlua) with a vendored Lua 5.4.
