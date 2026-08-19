@@ -1,6 +1,6 @@
 [workspace]
 resolver = "2"
-members = ["proxelar-cli", "proxyapi", "proxyapi_models"]
+members = ["proxelar-cli", "proxelar-proto", "proxyapi", "proxyapi_models"]
 default-members = ["proxelar-cli"]
 
 [workspace.package]

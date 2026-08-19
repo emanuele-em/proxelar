@@ -2511,6 +2511,18 @@ dependencies = [
 ]
 
 [[package]]
+name = "proxelar-proto"
+version = "0.5.1"
+dependencies = [
+ "bytes",
+ "futures-core",
+ "futures-util",
+ "http",
+ "proxyapi_models",
+ "tokio",
+]
+
+[[package]]
 name = "proxyapi"
 version = "0.5.1"
 dependencies = [

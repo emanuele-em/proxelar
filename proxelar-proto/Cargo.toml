@@ -1,0 +1,17 @@
+[package]
+name = "proxelar-proto"
+version = "0.5.1"
+edition = "2021"
+rust-version.workspace = true
+publish = false
+
+[dependencies]
+bytes = "1.9"
+futures-core = "0.3"
+futures-util = { version = "0.3", default-features = false, features = ["alloc"] }
+http = "1.4"
+proxyapi_models = { version = "0.5.1", path = "../proxyapi_models" }
+
+[dev-dependencies]
+futures-util = "0.3"
+tokio = { version = "1.52", features = ["macros", "rt"] }
