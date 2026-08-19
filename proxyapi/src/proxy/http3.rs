@@ -1,4 +1,6 @@
 use std::collections::HashMap;
+use std::net::{IpAddr, Ipv4Addr, Ipv6Addr};
+use std::path::PathBuf;
 use std::pin::Pin;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
@@ -12,20 +14,27 @@ use proxelar_proto::{
     ProxyRequest, ProxyResponse,
 };
 use proxyapi_models::HeaderBlock;
-use tokio::sync::oneshot;
+use rustls::client::danger::ServerCertVerifier;
+use rustls::pki_types::{CertificateDer, ServerName, UnixTime};
+use tokio::net::UdpSocket;
+use tokio::sync::{oneshot, Mutex as AsyncMutex};
 use tokio_quiche::http3::driver::{
     ClientH3Controller, ClientH3Event, H3Event, InboundFrame, InboundFrameStream,
     IncomingH3Headers, NewClientRequest, OutboundFrame, OutboundFrameSender, ServerH3Controller,
     ServerH3Event,
 };
 use tokio_quiche::http3::settings::Http3Settings;
+use tokio_quiche::quic::{connect_with_config, ConnectionHook};
 use tokio_quiche::quiche::h3::{Header, NameValue as _};
-use tokio_quiche::QuicConnection;
+use tokio_quiche::settings::{CertificateKind, Hooks, QuicSettings, TlsCertificatePaths};
+use tokio_quiche::socket::Socket;
+use tokio_quiche::{ClientH3Driver, ConnectionParams, QuicConnection};
 
 const DEFAULT_MAX_HEADER_LIST_SIZE: u64 = 64 * 1024;
 const DEFAULT_QPACK_TABLE_CAPACITY: u64 = 4 * 1024;
 const DEFAULT_QPACK_BLOCKED_STREAMS: u64 = 16;
 const DEFAULT_MAX_REQUESTS_PER_CONNECTION: u64 = 1_000;
+const DEFAULT_HANDSHAKE_TIMEOUT: Duration = Duration::from_secs(10);
 
 pub(super) fn default_http3_settings() -> Http3Settings {
     Http3Settings {
@@ -36,6 +45,188 @@ pub(super) fn default_http3_settings() -> Http3Settings {
         post_accept_timeout: Some(Duration::from_secs(10)),
         enable_extended_connect: false,
     }
+}
+
+#[derive(Clone)]
+pub(super) struct ReverseH3Upstream {
+    inner: Arc<ReverseH3UpstreamInner>,
+}
+
+struct ReverseH3UpstreamInner {
+    target: http::Uri,
+    verifier: Arc<dyn ServerCertVerifier>,
+    tls_cert_path: PathBuf,
+    tls_key_path: PathBuf,
+    client: AsyncMutex<Option<H3Client>>,
+}
+
+impl ReverseH3Upstream {
+    pub(super) fn new(
+        target: http::Uri,
+        verifier: Arc<dyn ServerCertVerifier>,
+        tls_cert_path: PathBuf,
+        tls_key_path: PathBuf,
+    ) -> Self {
+        Self {
+            inner: Arc::new(ReverseH3UpstreamInner {
+                target,
+                verifier,
+                tls_cert_path,
+                tls_key_path,
+                client: AsyncMutex::new(None),
+            }),
+        }
+    }
+
+    pub(super) async fn send(&self, request: ProxyRequest) -> Result<ProxyResponse, ProtocolError> {
+        let client = {
+            let mut state = self.inner.client.lock().await;
+            if let Some(client) = state.as_ref() {
+                client.clone()
+            } else {
+                let client = self.connect().await?;
+                *state = Some(client.clone());
+                client
+            }
+        };
+        match client.request(request).await {
+            Ok(response) => Ok(response),
+            Err(error) => {
+                *self.inner.client.lock().await = None;
+                Err(error)
+            }
+        }
+    }
+
+    async fn connect(&self) -> Result<H3Client, ProtocolError> {
+        let authority = self
+            .inner
+            .target
+            .authority()
+            .ok_or_else(|| malformed("HTTP/3 upstream target has no authority"))?;
+        let host = authority.host();
+        let port = authority.port_u16().unwrap_or(443);
+        let remote_addr = tokio::net::lookup_host((host, port))
+            .await
+            .map_err(|error| protocol(ErrorKind::Io, error))?
+            .next()
+            .ok_or_else(|| malformed("HTTP/3 upstream target resolved to no addresses"))?;
+        let bind_addr = match remote_addr.ip() {
+            IpAddr::V4(_) => (IpAddr::V4(Ipv4Addr::UNSPECIFIED), 0),
+            IpAddr::V6(_) => (IpAddr::V6(Ipv6Addr::UNSPECIFIED), 0),
+        };
+        let socket = UdpSocket::bind(bind_addr)
+            .await
+            .map_err(|error| protocol(ErrorKind::Io, error))?;
+        socket
+            .connect(remote_addr)
+            .await
+            .map_err(|error| protocol(ErrorKind::Io, error))?;
+        let socket = Socket::try_from(socket).map_err(|error| protocol(ErrorKind::Io, error))?;
+
+        let server_name =
+            ServerName::try_from(host.to_owned()).map_err(|error| malformed(error.to_string()))?;
+        let hook = RustlsVerificationHook {
+            verifier: Arc::clone(&self.inner.verifier),
+            server_name,
+        };
+        let mut quic_settings = QuicSettings::default();
+        // QUIC can only carry HTTP/3 here. Keeping this explicit also makes
+        // the propagated client ALPN offer deterministic.
+        quic_settings.alpn = vec![b"h3".to_vec()];
+        quic_settings.enable_dgram = false;
+        quic_settings.handshake_timeout = Some(DEFAULT_HANDSHAKE_TIMEOUT);
+        // The custom callback below applies the same rustls trust policy used
+        // by TCP upstreams, including hostname verification.
+        quic_settings.verify_peer = false;
+        let cert_path = self
+            .inner
+            .tls_cert_path
+            .to_str()
+            .ok_or_else(|| malformed("HTTP/3 TLS certificate path is not UTF-8"))?;
+        let key_path = self
+            .inner
+            .tls_key_path
+            .to_str()
+            .ok_or_else(|| malformed("HTTP/3 TLS key path is not UTF-8"))?;
+        let params = ConnectionParams::new_client(
+            quic_settings,
+            // tokio-quiche invokes a custom TLS hook only when this optional
+            // field is present. The hook supplies the client context and does
+            // not load these server credentials as a client certificate.
+            Some(TlsCertificatePaths {
+                cert: cert_path,
+                private_key: key_path,
+                kind: CertificateKind::X509,
+            }),
+            Hooks {
+                connection_hook: Some(Arc::new(hook)),
+            },
+        );
+        let (driver, controller) = ClientH3Driver::new(default_http3_settings());
+        let connection = connect_with_config(socket, Some(host), &params, driver)
+            .await
+            .map_err(|error| protocol(ErrorKind::Io, error))?;
+        Ok(H3Client::new(connection, controller))
+    }
+}
+
+#[derive(Debug)]
+struct RustlsVerificationHook {
+    verifier: Arc<dyn ServerCertVerifier>,
+    server_name: ServerName<'static>,
+}
+
+impl ConnectionHook for RustlsVerificationHook {
+    fn create_custom_ssl_context_builder(
+        &self,
+        _settings: TlsCertificatePaths<'_>,
+    ) -> Option<boring::ssl::SslContextBuilder> {
+        use boring::ssl::{SslAlert, SslContextBuilder, SslMethod, SslVerifyError, SslVerifyMode};
+
+        let mut builder = SslContextBuilder::new(SslMethod::tls_client()).ok()?;
+        let verifier = Arc::clone(&self.verifier);
+        let server_name = self.server_name.clone();
+        builder.set_custom_verify_callback(SslVerifyMode::PEER, move |ssl| {
+            verify_boring_peer_with_rustls(ssl, verifier.as_ref(), &server_name).map_err(|error| {
+                tracing::debug!("HTTP/3 upstream certificate verification failed: {error}");
+                SslVerifyError::Invalid(SslAlert::BAD_CERTIFICATE)
+            })
+        });
+        Some(builder)
+    }
+}
+
+fn verify_boring_peer_with_rustls(
+    ssl: &mut boring::ssl::SslRef,
+    verifier: &dyn ServerCertVerifier,
+    server_name: &ServerName<'static>,
+) -> Result<(), String> {
+    let chain = ssl
+        .peer_cert_chain()
+        .ok_or_else(|| "server did not provide a certificate chain".to_owned())?;
+    let certificates = chain
+        .iter()
+        .map(|certificate| {
+            certificate
+                .to_der()
+                .map(CertificateDer::from)
+                .map_err(|error| error.to_string())
+        })
+        .collect::<Result<Vec<_>, _>>()?;
+    let (end_entity, intermediates) = certificates
+        .split_first()
+        .ok_or_else(|| "server provided an empty certificate chain".to_owned())?;
+    verifier
+        .verify_server_cert(
+            end_entity,
+            intermediates,
+            server_name,
+            ssl.ocsp_status().unwrap_or_default(),
+            UnixTime::now(),
+        )
+        .map(|_| ())
+        .map_err(|error| error.to_string())
 }
 
 pub(super) fn encode_request_headers(
@@ -442,6 +633,10 @@ fn fail_all(state: &Arc<Mutex<ClientState>>, message: String) {
 
 fn protocol(kind: ErrorKind, error: impl std::fmt::Display) -> ProtocolError {
     ProtocolError::new(kind, error.to_string())
+}
+
+fn malformed(message: impl Into<String>) -> ProtocolError {
+    ProtocolError::new(ErrorKind::MalformedMessage, message)
 }
 
 #[cfg(test)]
