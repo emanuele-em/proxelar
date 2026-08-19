@@ -49,9 +49,12 @@ The presence of the `status` field is what distinguishes a response from a modif
 
 ## Headers
 
-Headers are ordered objects. Names keep their original casing, duplicate fields
-stay distinct, and values are Lua strings so non-UTF-8 bytes round-trip safely.
-Name lookup is ASCII case-insensitive.
+Headers are ordered objects. HTTP/1 names keep their original casing; native
+HTTP/2 and HTTP/3 names arrive lowercase as required by those protocols.
+Duplicate fields stay distinct, values are Lua strings so non-UTF-8 bytes
+round-trip safely, and name lookup is ASCII case-insensitive. A name supplied by
+a script retains that spelling in the Lua object and is lowercased by the H2/H3
+wire adapter when necessary.
 
 Read the first value or every duplicate value with `get` and `get_all`:
 
