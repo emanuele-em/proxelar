@@ -5,26 +5,95 @@ use bytes::Bytes;
 use hyper::service::service_fn;
 use hyper::{Request, Uri};
 use hyper_util::rt::TokioIo;
+use proxelar_proto::http1::{
+    serve_connection_with_upgrades, ConnectionConfig, ServerConnection, UpgradeReceiver,
+};
+use proxelar_proto::{BoxFuture, HttpService, ProtocolError, ProxyRequest, ProxyResponse};
 use tokio::net::TcpStream;
+use tokio::sync::Mutex;
 
 use crate::handler::CapturingHandler;
 use crate::hyper_adapter::{
     from_hyper_request, from_hyper_response, to_hyper_request, to_hyper_response, HyperBody,
 };
+use crate::rewind::Rewind;
 use crate::{HttpContext, HttpHandler, RequestOrResponse};
 
 use super::{
+    forward::{
+        is_h2_preface, is_protocol_websocket_upgrade, pump_native_websocket, sniff_stream_protocol,
+    },
+    http1::{NativePool, NativeUpstream},
     is_benign_shutdown_error, prepare_upstream_request, sanitize_response_for_client,
-    serve_auto_connection, Client,
+    serve_auto_connection, BoxError, Client,
 };
 
-pub async fn handle_connection(
-    stream: TcpStream,
+pub(super) async fn handle_connection(
+    mut stream: TcpStream,
     remote_addr: SocketAddr,
     handler: CapturingHandler,
     target: Uri,
     client: Arc<Client>,
+    native_pool: Arc<NativePool>,
+    route: Option<String>,
 ) {
+    let (_, buffered) = match sniff_stream_protocol(&mut stream).await {
+        Ok(detected) => detected,
+        Err(error) => {
+            tracing::debug!("Reverse proxy protocol detection failed: {error}");
+            return;
+        }
+    };
+    let h2 = is_h2_preface(&buffered);
+    let stream = Rewind::new_buffered(stream, buffered);
+    if !h2 {
+        let upgrade = Arc::new(Mutex::new(None));
+        let service = ReverseHttp1Service {
+            remote_addr,
+            handler,
+            target,
+            upstream: NativeUpstream::shared(native_pool, route),
+            upgrade: Arc::clone(&upgrade),
+        };
+        match serve_connection_with_upgrades(stream, service, ConnectionConfig::default()).await {
+            Ok(ServerConnection::Upgraded(client)) => {
+                if let Some(ReverseUpgrade {
+                    upstream,
+                    handler,
+                    conn_id,
+                }) = upgrade.lock().await.take()
+                {
+                    match upstream.wait().await {
+                        Ok(server) => pump_native_websocket(conn_id, client, server, handler).await,
+                        Err(error) => {
+                            tracing::debug!("Reverse WebSocket upgrade failed: {error}");
+                        }
+                    }
+                }
+            }
+            Ok(ServerConnection::Closed) => {}
+            Err(error) => tracing::debug!("Reverse HTTP/1 connection error: {error}"),
+        }
+        return;
+    }
+
+    if let Err(error) = serve_hyper_connection(stream, remote_addr, handler, target, client).await {
+        if !is_benign_shutdown_error(error.as_ref()) {
+            tracing::debug!("Reverse HTTP/2 connection error: {error}");
+        }
+    }
+}
+
+async fn serve_hyper_connection<I>(
+    stream: I,
+    remote_addr: SocketAddr,
+    handler: CapturingHandler,
+    target: Uri,
+    client: Arc<Client>,
+) -> Result<(), BoxError>
+where
+    I: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin + Send + 'static,
+{
     let io = TokioIo::new(stream);
 
     let service = service_fn(move |req: Request<hyper::body::Incoming>| {
@@ -97,10 +166,99 @@ pub async fn handle_connection(
         }
     });
 
-    if let Err(e) = serve_auto_connection(io, service).await {
-        if !is_benign_shutdown_error(e.as_ref()) {
-            tracing::debug!("Reverse proxy connection error: {e}");
-        }
+    serve_auto_connection(io, service).await
+}
+
+struct ReverseHttp1Service {
+    remote_addr: SocketAddr,
+    handler: CapturingHandler,
+    target: Uri,
+    upstream: NativeUpstream,
+    upgrade: Arc<Mutex<Option<ReverseUpgrade>>>,
+}
+
+struct ReverseUpgrade {
+    upstream: UpgradeReceiver,
+    handler: CapturingHandler,
+    conn_id: u64,
+}
+
+impl HttpService for ReverseHttp1Service {
+    fn call(
+        &mut self,
+        request: ProxyRequest,
+    ) -> BoxFuture<'_, Result<ProxyResponse, ProtocolError>> {
+        let mut handler = self.handler.clone();
+        let target = self.target.clone();
+        let upstream = self.upstream.clone();
+        let upgrade = Arc::clone(&self.upgrade);
+        let remote_addr = self.remote_addr;
+        Box::pin(async move {
+            let ctx = HttpContext { remote_addr };
+            let request = match handler.handle_request(&ctx, request).await {
+                RequestOrResponse::Request(request) => request,
+                RequestOrResponse::Response(response) => return Ok(response),
+            };
+            let websocket = is_protocol_websocket_upgrade(&request);
+            let request = match rewrite_uri(request, &target) {
+                Ok(request) => request,
+                Err(error) => {
+                    tracing::error!("Failed to rewrite native H1 URI: {error}");
+                    return Ok(handler.synthetic_protocol_response(
+                        http::StatusCode::BAD_GATEWAY,
+                        http::HeaderMap::new(),
+                        Bytes::from_static(b"Bad Gateway: URI rewrite failed"),
+                    ));
+                }
+            };
+            match upstream.send(request, websocket).await {
+                Ok(mut response)
+                    if websocket
+                        && response.response.head.status
+                            == http::StatusCode::SWITCHING_PROTOCOLS =>
+                {
+                    let Some(upstream) = response.upgrade.take() else {
+                        return Ok(handler.synthetic_protocol_response(
+                            http::StatusCode::BAD_GATEWAY,
+                            http::HeaderMap::new(),
+                            Bytes::from_static(b"Bad Gateway: missing WebSocket upgrade"),
+                        ));
+                    };
+                    let ws_response = proxyapi_models::ProxiedResponse::new(
+                        response.response.head.status,
+                        response.response.head.version,
+                        response.response.head.headers.clone(),
+                        Bytes::new(),
+                        crate::handler::now_millis(),
+                    );
+                    let conn_id = handler
+                        .take_pending_id()
+                        .unwrap_or_else(crate::event::next_id);
+                    if let Some(captured_req) = handler.take_captured_request() {
+                        handler.send_event(crate::event::ProxyEvent::WebSocketConnected {
+                            id: conn_id,
+                            request: Box::new(captured_req),
+                            response: Box::new(ws_response),
+                        });
+                    }
+                    *upgrade.lock().await = Some(ReverseUpgrade {
+                        upstream,
+                        handler,
+                        conn_id,
+                    });
+                    Ok(response.response)
+                }
+                Ok(response) => Ok(handler.handle_response(&ctx, response.response).await),
+                Err(error) => {
+                    tracing::error!("Native reverse HTTP/1 error: {error}");
+                    Ok(handler.synthetic_protocol_response(
+                        http::StatusCode::BAD_GATEWAY,
+                        http::HeaderMap::new(),
+                        Bytes::from_static(b"Bad Gateway"),
+                    ))
+                }
+            }
+        })
     }
 }
 

@@ -11,8 +11,9 @@ mod serialize;
 mod validation;
 
 pub use connection::{
-    serve_connection, AsyncIo, BoxIo, ConnectionConfig, Http1Client, Http1Connector, Http1Pool,
-    PoolKey,
+    serve_connection, serve_connection_with_upgrades, AsyncIo, BoxIo, ConnectionConfig,
+    Http1Client, Http1ClientResponse, Http1Connector, Http1Pool, PoolKey, ServerConnection,
+    UpgradeReceiver, UpgradedIo,
 };
 pub use framing::{
     BodyDecodeStatus, BodyDecoder, BodyDecoderLimits, BodyFraming, DecodedBodyFrame,

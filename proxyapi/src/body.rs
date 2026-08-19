@@ -121,11 +121,13 @@ where
     F: FnOnce() + Send + Unpin + 'static,
 {
     let exact_length = body.exact_length();
+    let may_have_trailers = body.may_have_trailers();
     let body = ProxyBody::new(CaptureBody {
         inner: body,
         capture,
         on_complete: Some(on_complete),
-    });
+    })
+    .with_trailer_hint(may_have_trailers);
     match exact_length {
         Some(length) => body.with_exact_length(length),
         None => body,

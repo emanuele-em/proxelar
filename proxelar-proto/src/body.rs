@@ -104,6 +104,12 @@ impl ProxyBody {
         self.may_have_trailers
     }
 
+    /// Set the protocol adapter's trailer capability hint.
+    pub fn with_trailer_hint(mut self, may_have_trailers: bool) -> Self {
+        self.may_have_trailers = may_have_trailers;
+        self
+    }
+
     /// Collect a body while retaining ordered trailers.
     ///
     /// Protocols permit at most one trailer block. A second block is rejected

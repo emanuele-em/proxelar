@@ -5,7 +5,7 @@ use std::sync::Arc;
 use std::task::{Context, Poll};
 use std::time::Duration;
 
-use bytes::{Buf as _, BytesMut};
+use bytes::{Buf as _, Bytes, BytesMut};
 use futures_core::Stream;
 use futures_util::StreamExt as _;
 use http::{Method, StatusCode, Version};
@@ -54,15 +54,54 @@ impl Default for ConnectionConfig {
 struct InboundRequest {
     request: ProxyRequest,
     close_after_response: bool,
+    upgrade_requested: bool,
+}
+
+enum ReaderExit<R>
+where
+    R: AsyncRead + AsyncWrite + Unpin,
+{
+    Closed,
+    Upgrade {
+        reader: ReadHalf<R>,
+        read_ahead: BytesMut,
+    },
+}
+
+/// A connection returned after an accepted HTTP upgrade handshake.
+pub struct UpgradedIo<I> {
+    pub io: I,
+    pub read_ahead: Bytes,
+}
+
+/// Final state of an HTTP/1 server connection.
+pub enum ServerConnection<I> {
+    Closed,
+    Upgraded(UpgradedIo<I>),
 }
 
 /// Serve one HTTP/1 connection. Requests may be read ahead into a bounded
 /// pipeline, while responses are always emitted in request order.
 pub async fn serve_connection<I, S>(
     io: I,
-    mut service: S,
+    service: S,
     config: ConnectionConfig,
 ) -> Result<(), ProtocolError>
+where
+    I: AsyncRead + AsyncWrite + Unpin + Send + 'static,
+    S: HttpService,
+{
+    match serve_connection_with_upgrades(io, service, config).await? {
+        ServerConnection::Closed | ServerConnection::Upgraded(_) => Ok(()),
+    }
+}
+
+/// Serve until close or return ownership of an accepted CONNECT/Upgrade stream.
+pub async fn serve_connection_with_upgrades<I, S>(
+    io: I,
+    mut service: S,
+    config: ConnectionConfig,
+) -> Result<ServerConnection<I>, ProtocolError>
 where
     I: AsyncRead + AsyncWrite + Unpin + Send + 'static,
     S: HttpService,
@@ -70,14 +109,29 @@ where
     let (reader, mut writer) = split(io);
     let (request_tx, mut request_rx) = mpsc::channel(config.pipeline_capacity.max(1));
     let reader_task = tokio::spawn(read_server_requests(reader, request_tx, config));
+
+    enum CoordinatorExit {
+        Closed,
+        Stop,
+        Upgrade { accepted: bool },
+    }
+
     let coordinator = async {
         while let Some(inbound) = request_rx.recv().await {
-            let inbound = inbound?;
+            let inbound = match inbound {
+                Ok(inbound) => inbound,
+                Err(error) if error.kind() == ErrorKind::MalformedMessage => {
+                    write_bad_request(&mut writer, &error, config).await?;
+                    return Ok::<_, ProtocolError>(CoordinatorExit::Stop);
+                }
+                Err(error) => return Err(error),
+            };
             let method = inbound.request.head.method.clone();
             let version = inbound.request.head.version;
             let response = timeout(config.service_timeout, service.call(inbound.request))
                 .await
                 .map_err(|_| timeout_error("HTTP/1 service"))??;
+            let status = response.head.status;
             let close = write_response(
                 &mut writer,
                 response,
@@ -87,30 +141,105 @@ where
                 config,
             )
             .await?;
+            if inbound.upgrade_requested {
+                let accepted = (method == Method::CONNECT && status.is_success())
+                    || status == StatusCode::SWITCHING_PROTOCOLS;
+                return Ok::<_, ProtocolError>(CoordinatorExit::Upgrade { accepted });
+            }
             if close {
-                return Ok::<_, ProtocolError>(true);
+                return Ok::<_, ProtocolError>(CoordinatorExit::Stop);
             }
         }
-        Ok(false)
+        Ok(CoordinatorExit::Closed)
     }
     .await;
 
-    if coordinator.as_ref().is_err() || coordinator == Ok(true) {
-        reader_task.abort();
-        let _ = reader_task.await;
-    } else {
-        reader_task.await.map_err(|error| {
-            ProtocolError::new(ErrorKind::Io, format!("HTTP/1 reader task failed: {error}"))
-        })??;
+    match coordinator {
+        Err(error) => {
+            reader_task.abort();
+            let _ = reader_task.await;
+            Err(error)
+        }
+        Ok(CoordinatorExit::Stop) => {
+            reader_task.abort();
+            let _ = reader_task.await;
+            Ok(ServerConnection::Closed)
+        }
+        Ok(CoordinatorExit::Closed) => match reader_task.await.map_err(join_error)?? {
+            ReaderExit::Closed => Ok(ServerConnection::Closed),
+            ReaderExit::Upgrade { .. } => Err(ProtocolError::new(
+                ErrorKind::ProtocolViolation,
+                "HTTP/1 reader stopped for an unmatched upgrade",
+            )),
+        },
+        Ok(CoordinatorExit::Upgrade { accepted }) => {
+            let reader_exit = reader_task.await.map_err(join_error)??;
+            match (accepted, reader_exit) {
+                (true, ReaderExit::Upgrade { reader, read_ahead }) => {
+                    Ok(ServerConnection::Upgraded(UpgradedIo {
+                        io: reader.unsplit(writer),
+                        read_ahead: read_ahead.freeze(),
+                    }))
+                }
+                _ => Ok(ServerConnection::Closed),
+            }
+        }
     }
-    coordinator.map(|_| ())
+}
+
+async fn write_bad_request<W>(
+    writer: &mut WriteHalf<W>,
+    error: &ProtocolError,
+    config: ConnectionConfig,
+) -> Result<(), ProtocolError>
+where
+    W: AsyncRead + AsyncWrite + Unpin,
+{
+    let message = if error.message().contains("missing Host") {
+        "Bad Request: missing Host header"
+    } else {
+        "Bad Request"
+    };
+    let response = ProxyResponse::new(
+        crate::ResponseHead::new(
+            StatusCode::BAD_REQUEST,
+            Version::HTTP_11,
+            proxyapi_models::HeaderBlock::new(),
+        ),
+        ProxyBody::full(Bytes::copy_from_slice(message.as_bytes())),
+    );
+    write_response(
+        writer,
+        response,
+        &Method::GET,
+        Version::HTTP_11,
+        true,
+        config,
+    )
+    .await?;
+    Ok(())
 }
 
 async fn read_server_requests<R>(
+    reader: ReadHalf<R>,
+    request_tx: mpsc::Sender<Result<InboundRequest, ProtocolError>>,
+    config: ConnectionConfig,
+) -> Result<ReaderExit<R>, ProtocolError>
+where
+    R: AsyncRead + AsyncWrite + Unpin,
+{
+    let result = read_server_requests_inner(reader, request_tx.clone(), config).await;
+    if let Err(error) = &result {
+        let _ = request_tx.send(Err(error.clone())).await;
+    }
+    result
+}
+
+async fn read_server_requests_inner<R>(
     mut reader: ReadHalf<R>,
     request_tx: mpsc::Sender<Result<InboundRequest, ProtocolError>>,
     config: ConnectionConfig,
-) -> Result<(), ProtocolError>
+) -> Result<ReaderExit<R>, ProtocolError>
 where
     R: AsyncRead + AsyncWrite + Unpin,
 {
@@ -123,7 +252,7 @@ where
                 ParseStatus::Incomplete => {
                     if !read_more(&mut reader, &mut buffer, config.read_timeout).await? {
                         if buffer.is_empty() {
-                            return Ok(());
+                            return Ok(ReaderExit::Closed);
                         }
                         return Err(ProtocolError::new(
                             ErrorKind::MalformedMessage,
@@ -136,26 +265,31 @@ where
 
         buffer.advance(parsed.consumed);
         let close_after_response = !request_keep_alive(&parsed.head.headers, parsed.head.version);
+        let upgrade_requested = request_wants_upgrade(&parsed.head.method, &parsed.head.headers);
         let framing = BodyFraming::for_request(parsed.semantics);
         let (body_tx, body_rx) = mpsc::channel(config.body_channel_capacity.max(1));
         let mut body = ProxyBody::new(BodyChannel { receiver: body_rx });
         if let BodyFraming::ContentLength(length) = framing {
-            body = body.with_exact_length(length);
+            body = body.with_exact_length(length).with_trailer_hint(false);
         }
         let inbound = InboundRequest {
             request: ProxyRequest::new(parsed.head, body),
             close_after_response,
+            upgrade_requested,
         };
         if request_tx.send(Ok(inbound)).await.is_err() {
-            return Ok(());
+            return Ok(ReaderExit::Closed);
         }
 
-        if let Err(error) = read_body(&mut reader, &mut buffer, framing, body_tx, config).await {
-            let _ = request_tx.send(Err(error.clone())).await;
-            return Err(error);
+        read_body(&mut reader, &mut buffer, framing, body_tx, config).await?;
+        if upgrade_requested {
+            return Ok(ReaderExit::Upgrade {
+                reader,
+                read_ahead: buffer,
+            });
         }
         if close_after_response {
-            return Ok(());
+            return Ok(ReaderExit::Closed);
         }
     }
 }
@@ -328,7 +462,29 @@ impl Stream for BodyChannel {
 
 struct ClientCommand {
     request: ProxyRequest,
-    response_tx: oneshot::Sender<Result<ProxyResponse, ProtocolError>>,
+    response_tx: oneshot::Sender<Result<Http1ClientResponse, ProtocolError>>,
+}
+
+/// Receiver for a raw stream accepted by CONNECT or `101 Switching Protocols`.
+pub struct UpgradeReceiver {
+    receiver: oneshot::Receiver<UpgradedIo<BoxIo>>,
+}
+
+impl UpgradeReceiver {
+    pub async fn wait(self) -> Result<UpgradedIo<BoxIo>, ProtocolError> {
+        self.receiver.await.map_err(|_| {
+            ProtocolError::new(
+                ErrorKind::Io,
+                "HTTP/1 connection closed before completing the upgrade",
+            )
+        })
+    }
+}
+
+/// A client response with optional ownership transfer for protocol upgrades.
+pub struct Http1ClientResponse {
+    pub response: ProxyResponse,
+    pub upgrade: Option<UpgradeReceiver>,
 }
 
 /// Cloneable handle to one ordered HTTP/1 client connection.
@@ -343,7 +499,7 @@ impl Http1Client {
         I: AsyncRead + AsyncWrite + Unpin + Send + 'static,
     {
         let (command_tx, command_rx) = mpsc::channel(1);
-        tokio::spawn(run_client(io, command_rx, config));
+        tokio::spawn(run_client(Box::new(io), command_rx, config));
         Self { command_tx }
     }
 
@@ -351,6 +507,13 @@ impl Http1Client {
         &self,
         request: ProxyRequest,
     ) -> Result<ProxyResponse, ProtocolError> {
+        Ok(self.send_request_with_upgrade(request).await?.response)
+    }
+
+    pub async fn send_request_with_upgrade(
+        &self,
+        request: ProxyRequest,
+    ) -> Result<Http1ClientResponse, ProtocolError> {
         let (response_tx, response_rx) = oneshot::channel();
         self.command_tx
             .send(ClientCommand {
@@ -377,13 +540,11 @@ impl HttpClientTrait for Http1Client {
     }
 }
 
-async fn run_client<I>(
-    mut io: I,
+async fn run_client(
+    mut io: BoxIo,
     mut command_rx: mpsc::Receiver<ClientCommand>,
     config: ConnectionConfig,
-) where
-    I: AsyncRead + AsyncWrite + Unpin,
-{
+) {
     let mut buffer = BytesMut::with_capacity(8 * 1024);
     while let Some(command) = command_rx.recv().await {
         let method = command.request.head.method.clone();
@@ -403,14 +564,34 @@ async fn run_client<I>(
         };
         let response_close = response_requests_close(&head.headers);
         let framing = BodyFraming::for_response(&method, head.status, semantics);
+        let upgraded =
+            framing == BodyFraming::Tunnel || head.status == StatusCode::SWITCHING_PROTOCOLS;
+        if upgraded {
+            let (upgrade_tx, upgrade_rx) = oneshot::channel();
+            let response = ProxyResponse::new(head, ProxyBody::empty());
+            let _ = command.response_tx.send(Ok(Http1ClientResponse {
+                response,
+                upgrade: Some(UpgradeReceiver {
+                    receiver: upgrade_rx,
+                }),
+            }));
+            let _ = upgrade_tx.send(UpgradedIo {
+                io,
+                read_ahead: buffer.split().freeze(),
+            });
+            return;
+        }
         let (body_tx, body_rx) = mpsc::channel(config.body_channel_capacity.max(1));
         let mut body = ProxyBody::new(BodyChannel { receiver: body_rx });
         if let BodyFraming::ContentLength(length) = framing {
-            body = body.with_exact_length(length);
+            body = body.with_exact_length(length).with_trailer_hint(false);
         }
         if command
             .response_tx
-            .send(Ok(ProxyResponse::new(head, body)))
+            .send(Ok(Http1ClientResponse {
+                response: ProxyResponse::new(head, body),
+                upgrade: None,
+            }))
             .is_err()
         {
             // Continue draining the body so a cancelled caller does not poison
@@ -612,6 +793,11 @@ fn response_requests_close(headers: &proxyapi_models::HeaderBlock) -> bool {
     has_connection_token(headers, b"close")
 }
 
+fn request_wants_upgrade(method: &Method, headers: &proxyapi_models::HeaderBlock) -> bool {
+    method == Method::CONNECT
+        || (headers.contains_key("upgrade") && has_connection_token(headers, b"upgrade"))
+}
+
 fn has_connection_token(headers: &proxyapi_models::HeaderBlock, expected: &[u8]) -> bool {
     headers.get_all("connection").any(|value| {
         value
@@ -649,6 +835,10 @@ fn protocol_error(error: Http1Error) -> ProtocolError {
 
 fn io_error(error: std::io::Error) -> ProtocolError {
     ProtocolError::new(ErrorKind::Io, error.to_string())
+}
+
+fn join_error(error: tokio::task::JoinError) -> ProtocolError {
+    ProtocolError::new(ErrorKind::Io, format!("HTTP/1 reader task failed: {error}"))
 }
 
 fn timeout_error(operation: &str) -> ProtocolError {
@@ -706,6 +896,14 @@ where
         key: PoolKey,
         request: ProxyRequest,
     ) -> Result<ProxyResponse, ProtocolError> {
+        Ok(self.send_with_upgrade(key, request).await?.response)
+    }
+
+    pub async fn send_with_upgrade(
+        &self,
+        key: PoolKey,
+        request: ProxyRequest,
+    ) -> Result<Http1ClientResponse, ProtocolError> {
         let client = {
             let mut clients = self.clients.lock().await;
             if let Some(client) = clients.get(&key) {
@@ -717,7 +915,7 @@ where
                 client
             }
         };
-        let result = client.send_request(request).await;
+        let result = client.send_request_with_upgrade(request).await;
         if result.is_err() {
             self.clients.lock().await.remove(&key);
         }
