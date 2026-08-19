@@ -293,6 +293,39 @@ async fn forward_proxy_connect_plain_http_reconstructs_uri_and_emits_request_com
 }
 
 #[tokio::test]
+async fn forward_proxy_forced_http2_adapts_h1_tunnel() {
+    let (upstream_addr, upstream_shutdown) = start_upstream_server().await;
+    let (proxy_addr, shutdown_tx, handle, _event_rx, _ca_dir) =
+        start_forward_proxy_with_options(None, UpstreamHttpVersion::Http2).await;
+
+    let mut stream = TcpStream::connect(proxy_addr).await.unwrap();
+    write_connect(&mut stream, upstream_addr).await;
+    assert!(read_headers(&mut stream)
+        .await
+        .starts_with("HTTP/1.1 200 OK"));
+    stream
+        .write_all(
+            format!(
+                "GET /forced-h2 HTTP/1.1\r\n\
+                 Host: {upstream_addr}\r\n\
+                 Connection: close\r\n\
+                 \r\n"
+            )
+            .as_bytes(),
+        )
+        .await
+        .unwrap();
+
+    let response = read_to_string_until_eof(&mut stream).await;
+    assert!(response.starts_with("HTTP/1.1 200 OK"), "{response}");
+    assert_response_header(&response, "x-upstream-version", "HTTP/2.0");
+
+    let _ = shutdown_tx.send(());
+    let _ = upstream_shutdown.send(());
+    assert!(handle.await.unwrap().is_ok());
+}
+
+#[tokio::test]
 async fn forward_proxy_connect_plain_http_captures_long_method_request() {
     // Regression: a request whose method token is >= 5 bytes (here DELETE) must
     // still be routed to the HTTP MITM, not the raw byte tunnel. The raw
@@ -486,14 +519,14 @@ async fn forward_proxy_returns_502_when_upstream_connection_fails() {
 #[tokio::test]
 async fn forward_proxy_connect_plain_http_requires_host_header() {
     let (proxy_addr, shutdown_tx, handle, _event_rx, _ca_dir) = start_forward_proxy().await;
-    let unused_upstream = reserve_loopback_addr().await;
+    let (upstream_addr, upstream_shutdown) = start_raw_echo_server().await;
 
     let mut stream = TcpStream::connect(proxy_addr).await.unwrap();
     stream
         .write_all(
             format!(
-                "CONNECT {unused_upstream} HTTP/1.1\r\n\
-                 Host: {unused_upstream}\r\n\
+                "CONNECT {upstream_addr} HTTP/1.1\r\n\
+                 Host: {upstream_addr}\r\n\
                  \r\n"
             )
             .as_bytes(),
@@ -518,6 +551,7 @@ async fn forward_proxy_connect_plain_http_requires_host_header() {
     assert!(raw_response.ends_with("Bad Request: missing Host header"));
 
     let _ = shutdown_tx.send(());
+    let _ = upstream_shutdown.send(());
     assert!(handle.await.unwrap().is_ok());
 }
 
@@ -560,11 +594,11 @@ async fn forward_proxy_connect_unknown_protocol_tunnels_raw_bytes() {
 
 #[tokio::test]
 async fn forward_proxy_connect_plain_http_serves_cert_page_inside_tunnel() {
-    let unused_upstream = reserve_loopback_addr().await;
+    let (upstream_addr, upstream_shutdown) = start_raw_echo_server().await;
     let (proxy_addr, shutdown_tx, handle, _event_rx, _ca_dir) = start_forward_proxy().await;
 
     let mut stream = TcpStream::connect(proxy_addr).await.unwrap();
-    write_connect(&mut stream, unused_upstream).await;
+    write_connect(&mut stream, upstream_addr).await;
     assert!(read_headers(&mut stream)
         .await
         .starts_with("HTTP/1.1 200 OK"));
@@ -585,46 +619,20 @@ async fn forward_proxy_connect_plain_http_serves_cert_page_inside_tunnel() {
     assert!(raw_response.contains(&format!("http://{proxy_addr}/cert/pem")));
 
     let _ = shutdown_tx.send(());
+    let _ = upstream_shutdown.send(());
     assert!(handle.await.unwrap().is_ok());
 }
 
 #[tokio::test]
-async fn forward_proxy_connect_plain_http_returns_502_when_upstream_fails() {
+async fn forward_proxy_connect_reports_egress_failure_before_success() {
     let unused_upstream = reserve_loopback_addr().await;
-    let (proxy_addr, shutdown_tx, handle, mut event_rx, _ca_dir) = start_forward_proxy().await;
+    let (proxy_addr, shutdown_tx, handle, _event_rx, _ca_dir) = start_forward_proxy().await;
 
     let mut stream = TcpStream::connect(proxy_addr).await.unwrap();
     write_connect(&mut stream, unused_upstream).await;
     assert!(read_headers(&mut stream)
         .await
-        .starts_with("HTTP/1.1 200 OK"));
-
-    stream
-        .write_all(
-            format!(
-                "GET /fail HTTP/1.1\r\n\
-                 Host: {unused_upstream}\r\n\
-                 Connection: close\r\n\
-                 \r\n"
-            )
-            .as_bytes(),
-        )
-        .await
-        .unwrap();
-
-    let raw_response = read_to_string_until_eof(&mut stream).await;
-    assert!(raw_response.starts_with("HTTP/1.1 502 Bad Gateway"));
-    assert!(raw_response.ends_with("Bad Gateway"));
-    match recv_request_complete(&mut event_rx).await {
-        ProxyEvent::RequestComplete {
-            request, response, ..
-        } => {
-            assert_eq!(request.uri().path().unwrap(), "/fail");
-            assert_eq!(response.status(), StatusCode::BAD_GATEWAY);
-            assert_eq!(response.body().as_ref(), b"Bad Gateway");
-        }
-        other => panic!("expected RequestComplete event, got {other:?}"),
-    }
+        .starts_with("HTTP/1.1 502 Bad Gateway"));
 
     let _ = shutdown_tx.send(());
     assert!(handle.await.unwrap().is_ok());
@@ -790,6 +798,19 @@ async fn start_forward_proxy_with_upstream(
     mpsc::Receiver<ProxyEvent>,
     tempfile::TempDir,
 ) {
+    start_forward_proxy_with_options(upstream_proxy, UpstreamHttpVersion::default()).await
+}
+
+async fn start_forward_proxy_with_options(
+    upstream_proxy: Option<proxyapi::UpstreamProxyConfig>,
+    upstream_http_version: UpstreamHttpVersion,
+) -> (
+    SocketAddr,
+    tokio::sync::oneshot::Sender<()>,
+    tokio::task::JoinHandle<Result<(), proxyapi::Error>>,
+    mpsc::Receiver<ProxyEvent>,
+    tempfile::TempDir,
+) {
     let proxy_addr = reserve_loopback_addr().await;
     let ca_dir = tempfile::tempdir().unwrap();
     let (event_tx, event_rx) = mpsc::channel::<ProxyEvent>(100);
@@ -799,7 +820,7 @@ async fn start_forward_proxy_with_upstream(
         event_tx,
         ca_dir: ca_dir.path().to_path_buf(),
         upstream_tls: UpstreamTlsConfig::Default,
-        upstream_http_version: UpstreamHttpVersion::default(),
+        upstream_http_version,
         intercept: None,
         body_capture_limit: DEFAULT_BODY_CAPTURE_LIMIT,
         #[cfg(feature = "scripting")]

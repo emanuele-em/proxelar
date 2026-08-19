@@ -111,7 +111,7 @@ pub struct Args {
     #[arg(long, value_name = "FILE")]
     pub save_session: Option<PathBuf>,
 
-    /// Export captured HTTP flows as HAR on clean shutdown
+    /// Export captured HTTP and WebSocket traffic as HAR on clean shutdown
     #[arg(long, value_name = "FILE")]
     pub export_har: Option<PathBuf>,
 

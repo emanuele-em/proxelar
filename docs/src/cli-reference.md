@@ -27,7 +27,7 @@ proxelar addon <list|inspect|verify|install> [OPTIONS]
 | `--load-session` | | — | Load a native session before capture |
 | `--import-har` | | — | Import HAR before capture (conflicts with `--load-session`) |
 | `--save-session` | | — | Save a native session on clean shutdown |
-| `--export-har` | | — | Export HTTP flows as HAR on clean shutdown |
+| `--export-har` | | — | Export HTTP and WebSocket traffic as HAR on clean shutdown |
 | `--export-curl` | | — | Export requests as curl commands on clean shutdown |
 | `--export-raw` | | — | Write raw request/response files to a directory on clean shutdown |
 | `--export-secrets` | | off | Disable default credential/query-secret redaction in exports |

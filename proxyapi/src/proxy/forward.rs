@@ -1,15 +1,16 @@
 //! Forward-proxy MITM machinery shared by the CONNECT, SOCKS5, and WireGuard
 //! capture paths.
 //!
-//! The whole pipeline is built on rama primitives: an HTTP/1+2 auto server, a
-//! BoringSSL TLS acceptor fed by the persistent CA, a peek stack (rama's TLS
-//! peeker then its HTTP peeker, the latter skipping known non-HTTP protocol
-//! openers) that routes each tunnel to TLS-MITM, HTTP-MITM, or a raw byte
-//! tunnel, and rama's WebSocket relay-event service so every opcode is tapped
-//! for capture while data frames can be transformed.
+//! The default pipeline is built on rama's eager connector and TLS/HTTP relay
+//! services. Its peek stack routes each established ingress/egress pair to TLS
+//! MITM, HTTP MITM, or observed raw forwarding without redialing. Explicit HTTP
+//! version forcing retains a terminating adapter because a 1:1 relay cannot
+//! translate h1 and h2. Rama's WebSocket relay-event service exposes every
+//! opcode for capture while data frames can be transformed.
 
 use rama::telemetry::tracing;
 use std::convert::Infallible;
+use std::future::Future;
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -20,8 +21,9 @@ use rama::extensions::{Extension, ExtensionsRef};
 use rama::http::io::upgrade::Upgraded;
 use rama::http::layer::remove_header::coalesce_cookie_headers;
 use rama::http::layer::upgrade::mitm::HttpUpgradeMitmRelayLayer;
-use rama::http::layer::upgrade::{DefaultHttpProxyConnectReplyService, UpgradeLayer};
+use rama::http::layer::upgrade::{EagerHttpProxyConnector, UpgradeLayer};
 use rama::http::matcher::MethodMatcher;
+use rama::http::proxy::mitm::HttpMitmRelay;
 use rama::http::server::HttpServer;
 use rama::http::service::web::response::IntoResponse;
 use rama::http::ws::handshake::matcher::{
@@ -34,17 +36,17 @@ use rama::http::ws::handshake::mitm::{
 #[cfg(feature = "scripting")]
 use rama::http::ws::Utf8Bytes;
 use rama::http::{Body, HeaderMap, Request, Response, StatusCode, Version};
-use rama::io::{BridgeIo, Io};
-use rama::layer::{AddInputExtensionLayer, ConsumeErrLayer};
+use rama::io::{peek::PeekTimeoutPolicy, BridgeIo, Io};
+use rama::layer::{AddInputExtensionLayer, ArcLayer, ConsumeErrLayer};
 use rama::net::address::{Host, HostWithPort};
-use rama::net::client::ConnectorTarget;
+use rama::net::client::{ConnectRequest, ConnectorService, ConnectorTarget};
 use rama::net::http::server::HttpPeekRouter;
 use rama::net::AuthorityInputExt;
 use rama::net::Protocol;
 use rama::rt::Executor;
-use rama::service::service_fn;
+use rama::tls::boring::proxy::TlsMitmEgressServerAuth;
 use rama::tls::boring::server::TlsAcceptorLayer;
-use rama::tls::server::TlsPeekRouter;
+use rama::tls::server::{PeekTlsClientHelloService, TlsPeekRouter};
 use rama::{Layer, Service};
 
 use proxyapi_models::{ProxiedResponse, WsDirection, WsFrame, WsOpcode};
@@ -56,7 +58,7 @@ use crate::handler::{now_millis, CapturingHandler, RequestOrResponse};
 
 use super::{
     connector::{RawConnection, RawConnector},
-    sanitize_response_for_client, UpstreamClient,
+    sanitize_response_for_client, UpstreamClient, UpstreamHttpVersion,
 };
 
 /// Maximum payload size captured per WebSocket frame.
@@ -90,6 +92,8 @@ pub(crate) struct MitmConfig {
     handler: CapturingHandler,
     client: Arc<UpstreamClient>,
     ca: Arc<Ssl>,
+    egress_server_auth: TlsMitmEgressServerAuth,
+    upstream_http_version: UpstreamHttpVersion,
     exec: Executor,
     listen_addr: std::net::SocketAddr,
 }
@@ -101,10 +105,14 @@ impl MitmConfig {
         ca: Arc<Ssl>,
         listen_addr: std::net::SocketAddr,
     ) -> Self {
+        let egress_server_auth = client.mitm_egress_server_auth();
+        let upstream_http_version = client.version();
         Self {
             handler,
             client,
             ca,
+            egress_server_auth,
+            upstream_http_version,
             exec: Executor::default(),
             listen_addr,
         }
@@ -119,6 +127,8 @@ impl MitmConfig {
             handler: self.handler.clone(),
             client: Arc::new(self.client.pinned(connection)?),
             ca: Arc::clone(&self.ca),
+            egress_server_auth: self.egress_server_auth.clone(),
+            upstream_http_version: self.upstream_http_version,
             exec: self.exec.clone(),
             listen_addr: self.listen_addr,
         })
@@ -126,7 +136,27 @@ impl MitmConfig {
 
     async fn serve_request(&self, req: Request) -> Response {
         let tunnel = req.extensions().get_ref::<TunnelContext>().cloned();
+        self.serve_request_with(req, tunnel, |req, is_ws| async move {
+            if is_ws {
+                self.client.serve_upgrade(req).await
+            } else {
+                self.client.serve(req).await
+            }
+        })
+        .await
+    }
 
+    async fn serve_request_with<F, Fut, E>(
+        &self,
+        req: Request,
+        tunnel: Option<TunnelContext>,
+        forward: F,
+    ) -> Response
+    where
+        F: FnOnce(Request, bool) -> Fut,
+        Fut: Future<Output = Result<Response, E>>,
+        E: Into<BoxError>,
+    {
         // A request straight to the listener (or via the proxy to `proxel.ar`)
         // is answered with the certificate install page.
         if tunnel.is_none() && is_direct_cert_request(&req, self.listen_addr) {
@@ -163,11 +193,7 @@ impl MitmConfig {
 
         let upstream_req = prepare_upstream_request(req, is_ws, authority.as_ref());
 
-        let result = if is_ws {
-            self.client.serve_upgrade(upstream_req).await
-        } else {
-            self.client.serve(upstream_req).await
-        };
+        let result = forward(upstream_req, is_ws).await.map_err(Into::into);
 
         match result {
             Ok(res) => {
@@ -212,6 +238,66 @@ fn mitm_http_service(cfg: Arc<MitmConfig>) -> MitmHttpService {
     MitmHttpService { cfg }
 }
 
+/// Per-tunnel HTTP middleware applied to rama's pre-established egress client.
+/// Rama owns the HTTP connection state; Proxelar only reconstructs, captures,
+/// transforms, and records requests and responses.
+#[derive(Clone)]
+struct RelayMitmHttpLayer {
+    cfg: Arc<MitmConfig>,
+    tunnel: TunnelContext,
+}
+
+impl<S> Layer<S> for RelayMitmHttpLayer {
+    type Service = RelayMitmHttpService<S>;
+
+    fn layer(&self, inner: S) -> Self::Service {
+        RelayMitmHttpService {
+            cfg: Arc::clone(&self.cfg),
+            tunnel: self.tunnel.clone(),
+            inner,
+        }
+    }
+}
+
+#[derive(Clone)]
+struct RelayMitmHttpService<S> {
+    cfg: Arc<MitmConfig>,
+    tunnel: TunnelContext,
+    inner: S,
+}
+
+impl<S> Service<Request> for RelayMitmHttpService<S>
+where
+    S: Service<Request, Output = Response>,
+    S::Error: Into<BoxError>,
+{
+    type Output = Response;
+    type Error = Infallible;
+
+    async fn serve(&self, req: Request) -> Result<Self::Output, Self::Error> {
+        Ok(self
+            .cfg
+            .serve_request_with(req, Some(self.tunnel.clone()), |req, _| {
+                self.inner.serve(req)
+            })
+            .await)
+    }
+}
+
+fn websocket_mitm_layer(
+    cfg: &MitmConfig,
+) -> HttpUpgradeMitmRelayLayer<HttpWebSocketRelayServiceRequestMatcher<WsRelayService>> {
+    let relay = WsRelayService {
+        event_tx: cfg.handler.event_tx_clone(),
+        #[cfg(feature = "scripting")]
+        script_engine: cfg.handler.script_engine_clone(),
+    };
+    HttpUpgradeMitmRelayLayer::new(
+        cfg.exec.clone(),
+        HttpWebSocketRelayServiceRequestMatcher::new(relay),
+    )
+}
+
 /// The MITM HTTP service wrapped in rama's upgrade-relay layer, which owns the
 /// two-sided WebSocket handshake (both `handle_upgrade`s, the join, the bridge)
 /// and drives our [`WsRelayService`] for the relayed frames. Non-upgrade
@@ -219,14 +305,7 @@ fn mitm_http_service(cfg: Arc<MitmConfig>) -> MitmHttpService {
 fn mitm_http_service_with_ws(
     cfg: Arc<MitmConfig>,
 ) -> impl Service<Request, Output = Response, Error = Infallible> + Clone {
-    let exec = cfg.exec.clone();
-    let relay = WsRelayService {
-        event_tx: cfg.handler.event_tx_clone(),
-        #[cfg(feature = "scripting")]
-        script_engine: cfg.handler.script_engine_clone(),
-    };
-    HttpUpgradeMitmRelayLayer::new(exec, HttpWebSocketRelayServiceRequestMatcher::new(relay))
-        .into_layer(mitm_http_service(cfg))
+    websocket_mitm_layer(&cfg).into_layer(mitm_http_service(cfg))
 }
 
 /// Build the top-level forward-proxy HTTP service: CONNECT tunnels are hijacked
@@ -236,36 +315,143 @@ pub(crate) fn forward_http_service(
     cfg: Arc<MitmConfig>,
 ) -> impl Service<Request, Output = Response, Error = Infallible> + Clone {
     let exec = cfg.exec.clone();
-    let connect_cfg = Arc::clone(&cfg);
+    let connect = EagerHttpProxyConnector::new(
+        super::connector::with_timeout(cfg.raw_connector()),
+        MitmBridgeService {
+            cfg: Arc::clone(&cfg),
+        },
+    );
     (
         ConsumeErrLayer::default(),
-        UpgradeLayer::new(
-            exec,
-            MethodMatcher::CONNECT,
-            DefaultHttpProxyConnectReplyService::new(),
-            service_fn(move |upgraded: Upgraded| {
-                let cfg = Arc::clone(&connect_cfg);
-                async move { on_connect(upgraded, cfg).await }
-            }),
-        ),
+        UpgradeLayer::new(exec, MethodMatcher::CONNECT, connect),
     )
         .into_layer(mitm_http_service_with_ws(cfg))
 }
 
-/// CONNECT handler: after the 200 reply, peek the tunneled stream and dispatch
-/// to the TLS MITM, plain HTTP, or raw byte tunnel path.
-async fn on_connect(upgraded: Upgraded, cfg: Arc<MitmConfig>) -> Result<(), BoxError> {
-    let target = upgraded
-        .extensions()
-        .get_ref::<ConnectorTarget>()
-        .map(|t| t.0.clone())
-        .context("CONNECT tunnel missing connector target")?;
-    serve_mitm_tunnel(upgraded, target, cfg).await
+/// Shared eager CONNECT/SOCKS bridge service. The default `auto` policy uses
+/// rama's connection-preserving TLS/HTTP relay. Explicit version forcing keeps
+/// the terminating adapter because a 1:1 relay cannot translate h1 and h2.
+#[derive(Clone)]
+pub(crate) struct MitmBridgeService {
+    cfg: Arc<MitmConfig>,
 }
 
-/// Inspect an already-established stream whose destination is `target`, peeking
-/// the first bytes to route between TLS MITM, plain HTTP, and a raw byte tunnel.
-pub(crate) async fn serve_mitm_tunnel<IO>(
+impl MitmBridgeService {
+    pub(crate) fn new(cfg: Arc<MitmConfig>) -> Self {
+        Self { cfg }
+    }
+}
+
+impl<Ingress> Service<BridgeIo<Ingress, RawConnection>> for MitmBridgeService
+where
+    Ingress: Io + Unpin + ExtensionsRef,
+{
+    type Output = ();
+    type Error = BoxError;
+
+    async fn serve(&self, bridge: BridgeIo<Ingress, RawConnection>) -> Result<(), BoxError> {
+        let target = bridge
+            .extensions()
+            .get_ref::<ConnectorTarget>()
+            .map(|target| target.0.clone())
+            .context("MITM bridge missing connector target")?;
+
+        if self.cfg.upstream_http_version == UpstreamHttpVersion::Auto {
+            serve_relay_tunnel(bridge, target, Arc::clone(&self.cfg)).await
+        } else {
+            let BridgeIo(ingress, egress) = bridge;
+            let cfg = Arc::new(self.cfg.with_pinned_client(egress)?);
+            serve_terminating_tunnel(ingress, target, cfg).await
+        }
+    }
+}
+
+/// Relay an already-established ingress/egress pair. TLS fingerprints and the
+/// origin certificate are mirrored by rama; HTTP connection state remains 1:1.
+async fn serve_relay_tunnel<Ingress>(
+    bridge: BridgeIo<Ingress, RawConnection>,
+    target: HostWithPort,
+    cfg: Arc<MitmConfig>,
+) -> Result<(), BoxError>
+where
+    Ingress: Io + Unpin + ExtensionsRef,
+{
+    let https_http = HttpMitmRelay::new(cfg.exec.clone()).with_http_middleware((
+        websocket_mitm_layer(&cfg),
+        RelayMitmHttpLayer {
+            cfg: Arc::clone(&cfg),
+            tunnel: TunnelContext {
+                scheme: Protocol::HTTPS,
+                authority: target.clone(),
+            },
+        },
+        ArcLayer::new(),
+    ));
+    let http = HttpMitmRelay::new(cfg.exec.clone()).with_http_middleware((
+        websocket_mitm_layer(&cfg),
+        RelayMitmHttpLayer {
+            cfg: Arc::clone(&cfg),
+            tunnel: TunnelContext {
+                scheme: Protocol::HTTP,
+                authority: target.clone(),
+            },
+        },
+        ArcLayer::new(),
+    ));
+    let raw = RawBridgeService {
+        target,
+        event_tx: cfg.handler.event_tx_clone(),
+    };
+
+    let maybe_http = HttpPeekRouter::new(http)
+        .with_known_non_http_protocol_methods()
+        .with_peek_timeout(PEEK_TIMEOUT)
+        .with_peek_timeout_policy(PeekTimeoutPolicy::FailOpen)
+        .with_fallback(raw);
+    let tls = cfg
+        .ca
+        .tls_mitm_relay(cfg.egress_server_auth.clone())
+        .into_layer(https_http);
+    PeekTlsClientHelloService::new(tls)
+        .with_peek_timeout(PEEK_TIMEOUT)
+        .with_peek_timeout_policy(PeekTimeoutPolicy::FailOpen)
+        .with_fallback(maybe_http)
+        .serve(bridge)
+        .await
+}
+
+/// Raw fallback for a bridge whose egress was already established eagerly.
+#[derive(Clone)]
+struct RawBridgeService {
+    target: HostWithPort,
+    event_tx: mpsc::Sender<ProxyEvent>,
+}
+
+impl<Ingress> Service<BridgeIo<Ingress, RawConnection>> for RawBridgeService
+where
+    Ingress: Io + Unpin,
+{
+    type Output = ();
+    type Error = BoxError;
+
+    async fn serve(
+        &self,
+        BridgeIo(ingress, egress): BridgeIo<Ingress, RawConnection>,
+    ) -> Result<(), BoxError> {
+        super::raw::tunnel(
+            ingress,
+            egress,
+            self.target.to_string(),
+            self.event_tx.clone(),
+        )
+        .await
+        .map_err(Into::into)
+    }
+}
+
+/// Legacy version-adapting path used only when the operator explicitly forces
+/// an upstream HTTP version. The connector is pinned to the eager egress.
+async fn serve_terminating_tunnel<IO>(
     io: IO,
     target: HostWithPort,
     cfg: Arc<MitmConfig>,
@@ -310,10 +496,12 @@ where
     // an HTTP-looking request-line and then stalls.
     let router = TlsPeekRouter::new(https_service)
         .with_peek_timeout(PEEK_TIMEOUT)
+        .with_peek_timeout_policy(PeekTimeoutPolicy::FailOpen)
         .with_fallback(
             HttpPeekRouter::new(http_service)
                 .with_known_non_http_protocol_methods()
                 .with_peek_timeout(PEEK_TIMEOUT)
+                .with_peek_timeout_policy(PeekTimeoutPolicy::FailOpen)
                 .with_fallback(raw_service),
         );
 
@@ -626,7 +814,23 @@ pub(super) async fn handle_captured_stream<IO>(
     IO: Io + Unpin + ExtensionsRef,
 {
     let cfg = Arc::new(MitmConfig::new(handler, client, ca, listen_addr));
-    if let Err(error) = serve_mitm_tunnel(io, authority, cfg).await {
+    io.extensions().insert(ConnectorTarget(authority.clone()));
+    let connector = super::connector::with_timeout(cfg.raw_connector());
+    let established = connector
+        .connect(ConnectRequest::new_with_extensions(
+            authority,
+            io.extensions().fork(),
+        ))
+        .await;
+    let result = match established {
+        Ok(established) => {
+            MitmBridgeService::new(cfg)
+                .serve(BridgeIo(io, established.conn))
+                .await
+        }
+        Err(error) => Err(error.into()),
+    };
+    if let Err(error) = result {
         tracing::debug!("Captured stream failed: {error}");
     }
 }

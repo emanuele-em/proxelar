@@ -10,7 +10,8 @@ use base64::Engine as _;
 use chrono::{TimeZone as _, Utc};
 use proxyapi_models::{
     BodyMetadata, CapturedDnsExchange, CapturedFlow, CapturedTcpStream, CapturedWebSocket,
-    ProxiedRequest, ProxiedResponse, TrafficSession, SESSION_FORMAT_VERSION,
+    ProxiedRequest, ProxiedResponse, TrafficSession, WsDirection, WsFrame, WsOpcode,
+    SESSION_FORMAT_VERSION,
 };
 use rama::bytes::Bytes;
 use rama::http::convert::curl::{
@@ -18,6 +19,7 @@ use rama::http::convert::curl::{
     try_cmd_string_for_request_parts_and_payload_with_options, CurlExportOptions,
     CurlScriptCompatibility, CurlScriptPayloadMode,
 };
+use rama::http::layer::har::spec::{WebSocketMessage, WebSocketMessageType};
 use rama::http::{HeaderMap, HeaderName, HeaderValue, Method, Request, StatusCode, Version};
 use rama::net::uri::Uri;
 use serde_json::{json, Value};
@@ -523,11 +525,23 @@ pub fn export_har(
     session: &TrafficSession,
     redaction: Option<&RedactionPolicy>,
 ) -> Result<(), SessionError> {
-    let entries: Vec<Value> = session
+    let mut entries: Vec<(i64, u64, Value)> = session
         .flows
         .iter()
-        .map(|flow| har_entry(flow, redaction))
+        .map(|flow| (flow.request.time(), flow.id, har_entry(flow, redaction)))
+        .chain(session.websockets.iter().map(|connection| {
+            (
+                connection.request.time(),
+                connection.id,
+                har_websocket_entry(connection, redaction),
+            )
+        }))
         .collect();
+    entries.sort_by_key(|(time, id, _)| (*time, *id));
+    let entries = entries
+        .into_iter()
+        .map(|(_, _, entry)| entry)
+        .collect::<Vec<_>>();
     let har = json!({
         "log": {
             "version": "1.2",
@@ -540,12 +554,69 @@ pub fn export_har(
 }
 
 fn har_entry(flow: &CapturedFlow, redaction: Option<&RedactionPolicy>) -> Value {
+    har_exchange_entry(&flow.request, &flow.response, redaction)
+}
+
+fn har_websocket_entry(
+    connection: &CapturedWebSocket,
+    redaction: Option<&RedactionPolicy>,
+) -> Value {
+    let mut entry = har_exchange_entry(&connection.request, &connection.response, redaction);
+    let object = entry
+        .as_object_mut()
+        .expect("HAR entries are always JSON objects");
+    object.insert("_resourceType".to_owned(), json!("websocket"));
+    object.insert(
+        "_webSocketMessages".to_owned(),
+        Value::Array(
+            connection
+                .frames
+                .iter()
+                .filter_map(har_websocket_message)
+                .collect(),
+        ),
+    );
+    entry
+}
+
+fn har_websocket_message(frame: &WsFrame) -> Option<Value> {
+    let direction = match frame.direction {
+        WsDirection::ClientToServer => WebSocketMessageType::Send,
+        WsDirection::ServerToClient => WebSocketMessageType::Receive,
+    };
+    let time = frame.time as f64 / 1_000.0;
+    let message = match frame.opcode {
+        WsOpcode::Text => WebSocketMessage::text(
+            direction,
+            time,
+            String::from_utf8_lossy(&frame.payload).into_owned(),
+        ),
+        WsOpcode::Binary => WebSocketMessage::binary(direction, time, &frame.payload),
+        // Chromium's HAR extension stores complete data messages, not control
+        // frames or fragmentation details. Keep those in the native session.
+        WsOpcode::Continuation | WsOpcode::Close | WsOpcode::Ping | WsOpcode::Pong => return None,
+    };
+    let mut value = serde_json::to_value(message).expect("WebSocket HAR message serializes");
+    if frame.truncated {
+        value
+            .as_object_mut()
+            .expect("WebSocket HAR messages are JSON objects")
+            .insert("_proxelarTruncated".to_owned(), Value::Bool(true));
+    }
+    Some(value)
+}
+
+fn har_exchange_entry(
+    captured_request: &ProxiedRequest,
+    captured_response: &ProxiedResponse,
+    redaction: Option<&RedactionPolicy>,
+) -> Value {
     let request = redaction
-        .map(|policy| policy.redact_request(&flow.request))
-        .unwrap_or_else(|| flow.request.clone());
+        .map(|policy| policy.redact_request(captured_request))
+        .unwrap_or_else(|| captured_request.clone());
     let response = redaction
-        .map(|policy| policy.redact_response(&flow.response))
-        .unwrap_or_else(|| flow.response.clone());
+        .map(|policy| policy.redact_response(captured_response))
+        .unwrap_or_else(|| captured_response.clone());
     let duration = response.time().saturating_sub(request.time()).max(0);
     let started = Utc
         .timestamp_millis_opt(request.time())
@@ -1042,6 +1113,92 @@ mod tests {
         assert!(fs::read_to_string(curl).unwrap().contains("curl "));
         assert!(raw.join("00000003-request.http").exists());
         assert!(raw.join("00000003-response.http").exists());
+    }
+
+    #[test]
+    fn exports_websockets_in_chromium_har_format() {
+        let dir = tempdir().unwrap();
+        let mut session = TrafficSession::new(1);
+        session.flows.push(flow(3));
+
+        let mut request_headers = HeaderMap::new();
+        request_headers.insert("authorization", "Bearer secret".parse().unwrap());
+        session.websockets.push(CapturedWebSocket {
+            id: 2,
+            request: ProxiedRequest::new(
+                Method::GET,
+                "wss://example.test/socket?token=secret".parse().unwrap(),
+                Version::HTTP_11,
+                request_headers,
+                Bytes::new(),
+                500,
+            ),
+            response: ProxiedResponse::new(
+                StatusCode::SWITCHING_PROTOCOLS,
+                Version::HTTP_11,
+                HeaderMap::new(),
+                Bytes::new(),
+                525,
+            ),
+            frames: vec![
+                WsFrame::new(
+                    WsDirection::ClientToServer,
+                    WsOpcode::Text,
+                    1_500,
+                    Bytes::from_static(b"hello"),
+                    false,
+                ),
+                WsFrame::new(
+                    WsDirection::ServerToClient,
+                    WsOpcode::Binary,
+                    1_600,
+                    Bytes::from_static(&[0, 1, 2, 0xaa]),
+                    true,
+                ),
+                WsFrame::new(
+                    WsDirection::ServerToClient,
+                    WsOpcode::Ping,
+                    1_700,
+                    Bytes::from_static(b"ping"),
+                    false,
+                ),
+            ],
+            closed: true,
+        });
+
+        let path = dir.path().join("websocket.har");
+        export_har(&path, &session, Some(&RedactionPolicy::default())).unwrap();
+        let har: Value = serde_json::from_slice(&fs::read(path).unwrap()).unwrap();
+        let entries = har["log"]["entries"].as_array().unwrap();
+        assert_eq!(entries.len(), 2);
+        let websocket = &entries[0];
+        assert_eq!(websocket["_resourceType"], "websocket");
+        assert_eq!(
+            websocket["request"]["url"],
+            "wss://example.test/socket?token=%5BREDACTED%5D"
+        );
+        assert_eq!(websocket["request"]["headers"][0]["value"], "[REDACTED]");
+
+        let raw_messages = websocket["_webSocketMessages"].clone();
+        assert_eq!(raw_messages[1]["_proxelarTruncated"], true);
+        assert_eq!(raw_messages.as_array().unwrap().len(), 2);
+        let messages: Vec<WebSocketMessage> = serde_json::from_value(raw_messages).unwrap();
+        assert_eq!(messages.len(), 2);
+        assert_eq!(messages[0].r#type, WebSocketMessageType::Send);
+        assert_eq!(
+            messages[0].opcode,
+            rama::http::layer::har::spec::WebSocketMessageOpcode::TEXT
+        );
+        assert_eq!(messages[0].data.as_str(), "hello");
+        assert!((messages[0].time - 1.5).abs() < f64::EPSILON);
+        assert_eq!(messages[1].r#type, WebSocketMessageType::Receive);
+        assert_eq!(
+            messages[1]
+                .binary_data()
+                .expect("binary message")
+                .expect("valid base64"),
+            [0, 1, 2, 0xaa]
+        );
     }
 
     #[test]

@@ -29,6 +29,7 @@ use rama::net::uri::Uri;
 use rama::rt::Executor;
 use rama::service::BoxService;
 use rama::tcp::server::TcpListener;
+use rama::tls::boring::proxy::TlsMitmEgressServerAuth;
 use rama::Service;
 
 use proxyapi_models::ProxiedRequest;
@@ -86,6 +87,7 @@ pub(crate) struct UpstreamClient {
     inner: BoxService<Request, Response, OpaqueError>,
     raw: connector::RawConnector,
     tls_config: rama::tls::client::TlsClientConfig,
+    mitm_egress_server_auth: TlsMitmEgressServerAuth,
     exec: Executor,
     version: UpstreamHttpVersion,
 }
@@ -100,6 +102,7 @@ where
 impl UpstreamClient {
     fn build(
         tls_config: rama::tls::client::TlsClientConfig,
+        mitm_egress_server_auth: TlsMitmEgressServerAuth,
         proxy: Option<ProxyAddress>,
         version: UpstreamHttpVersion,
         exec: Executor,
@@ -111,6 +114,7 @@ impl UpstreamClient {
             inner,
             raw,
             tls_config,
+            mitm_egress_server_auth,
             exec,
             version,
         })
@@ -133,7 +137,7 @@ impl UpstreamClient {
             .with_default_http_connector(exec);
         if pooled {
             Ok(box_client(
-                builder.try_with_default_connection_pool()?.build_client(),
+                builder.with_default_connection_pool().build_client(),
             ))
         } else {
             // Direct proxy traffic intentionally gets a fresh upstream
@@ -167,9 +171,18 @@ impl UpstreamClient {
             inner,
             raw,
             tls_config: self.tls_config.clone(),
+            mitm_egress_server_auth: self.mitm_egress_server_auth.clone(),
             exec: self.exec.clone(),
             version: self.version,
         })
+    }
+
+    pub(crate) fn mitm_egress_server_auth(&self) -> TlsMitmEgressServerAuth {
+        self.mitm_egress_server_auth.clone()
+    }
+
+    pub(crate) fn version(&self) -> UpstreamHttpVersion {
+        self.version
     }
 
     /// Forward a request upstream, applying the configured version policy.
@@ -355,12 +368,15 @@ impl Proxy {
 
         let exec = Executor::default();
         let tls_config = tls::build_client_tls_config(&self.config.upstream_tls)?;
+        let mitm_egress_server_auth =
+            tls::build_mitm_egress_server_auth(&self.config.upstream_tls)?;
         let proxy_address = match &self.upstream_proxy {
             Some(config) => Some(config.proxy_address()?),
             None => None,
         };
         let client = Arc::new(UpstreamClient::build(
             tls_config,
+            mitm_egress_server_auth,
             proxy_address,
             self.config.upstream_http_version,
             exec.clone(),

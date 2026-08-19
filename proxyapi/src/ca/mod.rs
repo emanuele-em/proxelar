@@ -8,6 +8,12 @@ use rama::crypto::pki_types::{CertificateDer, PrivateKeyDer, PrivatePkcs8KeyDer}
 use rama::error::{BoxError, ErrorContext};
 use rama::net::address::Host;
 use rama::telemetry::tracing;
+use rama::tls::boring::proxy::{
+    cert_issuer::{
+        BoringMitmCertIssuerCacheConfig, CachedBoringMitmCertIssuer, InMemoryBoringMitmCertIssuer,
+    },
+    TlsMitmEgressServerAuth, TlsMitmRelay,
+};
 use rama::tls::boring::server::{
     BoringServerConfigExt as _, CacheKind, ServerCertIssuerData, ServerCertIssuerKind,
 };
@@ -26,13 +32,14 @@ const LEAF_CACHE_TTL: Duration = Duration::from_secs(365 * 24 * 60 * 60 / 2);
 /// A persistent local certificate authority that mints per-host leaf
 /// certificates for MITM interception.
 ///
-/// The actual issuance and caching are rama's built-in BoringSSL
-/// [`ServerCertIssuerData`] (a [`ServerCertIssuerKind::ProvidedCa`] issuer over
-/// our persistent CA); this type only owns the CA material and its PEM.
+/// Rama owns issuance and bounded caching. The default relay issuer mirrors the
+/// origin certificate; the provided-CA server issuer supports the explicit
+/// HTTP-version adapter path. This type owns both over the same persistent CA.
 #[derive(Clone)]
 pub struct Ssl {
     ca_cert_pem: Bytes,
     issuer: ServerCertIssuerData,
+    relay_issuer: CachedBoringMitmCertIssuer<InMemoryBoringMitmCertIssuer>,
 }
 
 impl Ssl {
@@ -78,6 +85,7 @@ impl Ssl {
         };
 
         let ca_cert_pem = Bytes::from(ca_to_pem(&ca)?.0);
+        let (ca_cert, ca_key) = ca_to_boring_pair(&ca)?;
 
         // A ProvidedCa issuer mints per-identity leaves from our CA and caches
         // them (bounded, in-memory). Leaves carry a 1-year validity and an IP or
@@ -95,9 +103,15 @@ impl Ssl {
             ttl: Some(LEAF_CACHE_TTL),
         });
 
+        let relay_issuer = CachedBoringMitmCertIssuer::new_with_config(
+            InMemoryBoringMitmCertIssuer::new(ca_cert, ca_key),
+            relay_cache_config(),
+        );
+
         Ok(Self {
             ca_cert_pem,
             issuer,
+            relay_issuer,
         })
     }
 
@@ -121,6 +135,23 @@ impl Ssl {
         TlsServerConfig::new()
             .with_cert_issuer(issuer)
             .with_alpn_http_auto()
+    }
+
+    /// Build rama's TLS relay with the persistent CA and Proxelar's upstream
+    /// authentication policy. The issuer mirrors the origin leaf and shares a
+    /// bounded cache across all intercepted connections.
+    pub(crate) fn tls_mitm_relay(
+        &self,
+        egress_server_auth: TlsMitmEgressServerAuth,
+    ) -> TlsMitmRelay<CachedBoringMitmCertIssuer<InMemoryBoringMitmCertIssuer>> {
+        TlsMitmRelay::new(self.relay_issuer.clone()).with_egress_server_auth(egress_server_auth)
+    }
+}
+
+fn relay_cache_config() -> BoringMitmCertIssuerCacheConfig {
+    BoringMitmCertIssuerCacheConfig {
+        max_size: LEAF_CACHE_MAX_SIZE,
+        ttl: Some(LEAF_CACHE_TTL),
     }
 }
 
@@ -152,6 +183,19 @@ fn ca_to_pem(ca: &CertificateAuthorityData) -> Result<(Vec<u8>, Vec<u8>), BoxErr
         .private_key_to_pem_pkcs8()
         .context("serialize CA private key to PEM")?;
     Ok((cert_pem, key_pem))
+}
+
+fn ca_to_boring_pair(
+    ca: &CertificateAuthorityData,
+) -> Result<(X509, PKey<rama::crypto::dep::boring::pkey::Private>), BoxError> {
+    let cert_der = ca
+        .certificate_chain()
+        .first()
+        .ok_or_else(|| BoxError::from("CA chain is empty".to_owned()))?;
+    let cert = X509::from_der(cert_der.as_ref()).context("parse CA certificate DER")?;
+    let key = PKey::private_key_from_der(ca.private_key().secret_der())
+        .context("parse CA private key DER")?;
+    Ok((cert, key))
 }
 
 #[cfg(test)]
@@ -188,6 +232,10 @@ mod tests {
             }
             CacheKind::Disabled => panic!("leaf certificate cache must be enabled"),
         }
+
+        let relay = relay_cache_config();
+        assert_eq!(relay.max_size, LEAF_CACHE_MAX_SIZE);
+        assert_eq!(relay.ttl, Some(LEAF_CACHE_TTL));
     }
 
     #[test]

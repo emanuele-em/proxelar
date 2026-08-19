@@ -7,6 +7,8 @@ use proxyapi::{
     UpstreamHttpVersion, UpstreamTlsConfig, DEFAULT_BODY_CAPTURE_LIMIT,
 };
 use rama::bytes::Bytes;
+use rama::crypto::pki_types::{pem::PemObject, CertificateDer};
+use rama::extensions::ExtensionsRef;
 use tokio::sync::mpsc;
 
 use rama::http::body::util::BodyExt;
@@ -16,11 +18,15 @@ use rama::http::server::HttpServer;
 use rama::http::service::client::HttpClientExt;
 use rama::http::{Body, BodyExtractExt, Method, Request, Response, StatusCode, Version};
 use rama::layer::ConsumeErrLayer;
+use rama::net::address::ProxyAddress;
+use rama::net::client::ProxyRoute;
+use rama::net::Protocol;
 use rama::rt::Executor;
 use rama::service::service_fn;
 use rama::tcp::server::TcpListener as RamaTcpListener;
-use rama::Layer;
+use rama::tls::client::TlsClientConfig;
 use rama::ServiceInput;
+use rama::{Layer, Service};
 
 const EVENT_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(10);
 
@@ -435,6 +441,38 @@ async fn reverse_proxy_insecure_upstream_tls_accepts_private_ca() {
 }
 
 #[tokio::test]
+async fn forward_mitm_relay_honors_custom_upstream_ca() {
+    let (upstream_addr, upstream_shutdown, ca_pem) = start_private_ca_https_upstream().await;
+    let upstream_ca = tempfile::NamedTempFile::new().unwrap();
+    std::fs::write(upstream_ca.path(), ca_pem).unwrap();
+    let result = request_private_ca_via_forward_mitm(
+        upstream_addr,
+        UpstreamTlsConfig::CaFileOnly(upstream_ca.path().to_path_buf()),
+    )
+    .await;
+
+    let response = result.expect("custom upstream CA should be trusted by the TLS relay");
+    assert_eq!(response.status(), StatusCode::CREATED);
+    assert_eq!(
+        response.try_into_string().await.unwrap(),
+        "upstream response"
+    );
+
+    let _ = upstream_shutdown.send(());
+}
+
+#[tokio::test]
+async fn forward_mitm_relay_rejects_untrusted_upstream_ca() {
+    let (upstream_addr, upstream_shutdown, _ca_pem) = start_private_ca_https_upstream().await;
+    let result =
+        request_private_ca_via_forward_mitm(upstream_addr, UpstreamTlsConfig::Default).await;
+
+    assert!(result.is_err(), "untrusted origin must fail the TLS relay");
+
+    let _ = upstream_shutdown.send(());
+}
+
+#[tokio::test]
 async fn reverse_proxy_intercepts_oversized_request_before_streaming_original() {
     let (upstream_addr, upstream_shutdown) = start_echo_request_body_server().await;
     let proxy_addr = reserve_loopback_addr().await;
@@ -844,6 +882,72 @@ async fn request_private_ca_https_upstream(
     assert!(handle.await.unwrap().is_ok());
 
     (status, body)
+}
+
+async fn request_private_ca_via_forward_mitm(
+    upstream_addr: SocketAddr,
+    upstream_tls: UpstreamTlsConfig,
+) -> Result<Response, String> {
+    let proxy_addr = reserve_loopback_addr().await;
+    let ca_dir = tempfile::tempdir().unwrap();
+    let (event_tx, _event_rx) = mpsc::channel::<ProxyEvent>(100);
+    let proxy = Proxy::new(ProxyConfig {
+        addr: proxy_addr,
+        mode: ProxyMode::Forward,
+        event_tx,
+        ca_dir: ca_dir.path().to_path_buf(),
+        upstream_tls,
+        upstream_http_version: UpstreamHttpVersion::Auto,
+        intercept: None,
+        body_capture_limit: DEFAULT_BODY_CAPTURE_LIMIT,
+        #[cfg(feature = "scripting")]
+        script_path: None,
+        replay_rx: None,
+    });
+    let (shutdown_tx, shutdown_rx) = tokio::sync::oneshot::channel();
+    let handle = tokio::spawn(async move {
+        proxy
+            .start(async {
+                shutdown_rx.await.ok();
+            })
+            .await
+    });
+    wait_for_tcp(proxy_addr).await;
+
+    let proxy_ca = CertificateDer::pem_file_iter(ca_dir.path().join("proxelar-ca.pem"))
+        .unwrap()
+        .next()
+        .unwrap()
+        .unwrap();
+    let tls_config = TlsClientConfig::default_http()
+        .try_with_server_trust_anchors([proxy_ca])
+        .unwrap();
+    let client = EasyHttpWebClient::connector_builder()
+        .with_default_transport_connector()
+        .with_default_dns_connector()
+        .without_tls_proxy_support()
+        .with_proxy_support()
+        .with_tls_support_using_boringssl(tls_config)
+        .with_default_http_connector(Executor::default())
+        .without_connection_pool()
+        .build_client();
+    let request = Request::builder()
+        .uri(format!("https://{upstream_addr}/hello"))
+        .body(Body::empty())
+        .unwrap();
+    request.extensions().insert(ProxyRoute::Proxy(ProxyAddress {
+        protocol: Some(Protocol::HTTP),
+        address: proxy_addr.into(),
+        credential: None,
+    }));
+    let result = client
+        .serve(request)
+        .await
+        .map_err(|error| error.to_string());
+
+    let _ = shutdown_tx.send(());
+    assert!(handle.await.unwrap().is_ok());
+    result
 }
 
 async fn start_upstream_server() -> (SocketAddr, tokio::sync::oneshot::Sender<()>) {

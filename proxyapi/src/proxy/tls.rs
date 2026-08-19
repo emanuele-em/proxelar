@@ -4,6 +4,7 @@ use std::{
 };
 
 use rama::crypto::pki_types::{pem::PemObject, CertificateDer};
+use rama::tls::boring::proxy::TlsMitmEgressServerAuth;
 use rama::tls::client::{ServerVerifyMode, TlsClientConfig};
 
 use crate::error::Error;
@@ -81,6 +82,27 @@ pub(super) fn build_client_tls_config(
         UpstreamTlsConfig::Insecure => {
             Ok(TlsClientConfig::default_http().with_server_verify(ServerVerifyMode::Disable))
         }
+    }
+}
+
+/// Translate the upstream trust policy for rama's TLS MITM relay.
+///
+/// Relay fingerprinting and ALPN remain derived from the intercepted
+/// ClientHello; this policy controls only origin identity and trust.
+pub(super) fn build_mitm_egress_server_auth(
+    config: &UpstreamTlsConfig,
+) -> Result<TlsMitmEgressServerAuth, Error> {
+    let verified = || TlsMitmEgressServerAuth::new().with_server_verify(ServerVerifyMode::Auto);
+    match config {
+        UpstreamTlsConfig::Default => Ok(verified().with_webpki_roots()),
+        UpstreamTlsConfig::DefaultWithCaFile(path) => verified()
+            .with_webpki_roots()
+            .try_with_extra_server_trust_anchors(load_ca_file_roots(path)?)
+            .map_err(|error| Error::Tls(error.to_string())),
+        UpstreamTlsConfig::CaFileOnly(path) => verified()
+            .try_with_server_trust_anchors(load_ca_file_roots(path)?)
+            .map_err(|error| Error::Tls(error.to_string())),
+        UpstreamTlsConfig::Insecure => Ok(TlsMitmEgressServerAuth::new()),
     }
 }
 

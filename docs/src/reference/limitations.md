@@ -4,7 +4,12 @@ Proxelar is usable today for local traffic inspection, scripting, intercept, rep
 
 ## Sessions and export fidelity
 
-Proxelar can save/reload its versioned native session format, import/export HAR, emit curl commands, and write raw HTTP pairs. HAR cannot represent every Proxelar concept: raw TCP chunks, live intercept state, and some WebSocket metadata remain available only in the native session. Exports redact common credentials by default; native session saves preserve captured data exactly.
+Proxelar can save/reload its versioned native session format, import/export
+HAR, emit curl commands, and write raw HTTP pairs. HAR export includes captured
+WebSocket messages through Chromium's extension, but raw TCP chunks, live
+intercept state, and WebSocket connection lifecycle remain available only in
+the native session. Exports redact common credentials by default; native
+session saves preserve captured data exactly.
 
 ## Body decoding and editing
 
