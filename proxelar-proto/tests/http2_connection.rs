@@ -198,13 +198,10 @@ async fn extended_connect_is_advertised_and_streams_bytes() {
     let client = H2Client::handshake(client_io, ConnectionConfig::default())
         .await
         .unwrap();
-    tokio::time::timeout(Duration::from_secs(2), async {
-        while !client.is_extended_connect_enabled() {
-            tokio::task::yield_now().await;
-        }
-    })
-    .await
-    .unwrap();
+    tokio::time::timeout(Duration::from_secs(2), client.ensure_extended_connect())
+        .await
+        .unwrap()
+        .unwrap();
 
     let response = client
         .send_request(ProxyRequest::new(
@@ -225,6 +222,28 @@ async fn extended_connect_is_advertised_and_streams_bytes() {
         response.body.collect().await.unwrap().data,
         Bytes::from_static(b"websocket bytes")
     );
+    drop(client);
+    server.await.unwrap().unwrap();
+}
+
+#[tokio::test]
+async fn extended_connect_requires_the_peer_setting() {
+    let (client_io, server_io) = tokio::io::duplex(1024);
+    let server = tokio::spawn(serve_connection(
+        server_io,
+        EchoService,
+        ConnectionConfig::default(),
+    ));
+    let client = H2Client::handshake(client_io, ConnectionConfig::default())
+        .await
+        .unwrap();
+
+    let error = tokio::time::timeout(Duration::from_secs(2), client.ensure_extended_connect())
+        .await
+        .unwrap()
+        .unwrap_err();
+    assert_eq!(error.kind(), ErrorKind::Unsupported);
+
     drop(client);
     server.await.unwrap().unwrap();
 }

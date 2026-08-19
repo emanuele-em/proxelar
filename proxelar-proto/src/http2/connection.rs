@@ -7,7 +7,7 @@ use std::task::{Context, Poll};
 use bytes::Bytes;
 use futures_core::Stream;
 use futures_util::StreamExt as _;
-use h2::{Reason, RecvStream, SendStream};
+use h2::{Ping, PingPong, Reason, RecvStream, SendStream};
 use tokio::io::{AsyncRead, AsyncReadExt as _, AsyncWrite, AsyncWriteExt as _, DuplexStream};
 use tokio::sync::{mpsc, Mutex};
 
@@ -181,6 +181,7 @@ where
 #[derive(Clone)]
 pub struct H2Client {
     sender: h2::client::SendRequest<Bytes>,
+    ping_pong: Arc<Mutex<PingPong>>,
     identity: Arc<()>,
 }
 
@@ -201,7 +202,10 @@ impl H2Client {
             .max_frame_size(config.max_frame_size)
             .max_header_list_size(config.max_header_list_size)
             .max_concurrent_streams(config.max_concurrent_streams);
-        let (sender, connection) = builder.handshake(io).await.map_err(map_h2_error)?;
+        let (sender, mut connection) = builder.handshake(io).await.map_err(map_h2_error)?;
+        let ping_pong = connection.ping_pong().ok_or_else(|| {
+            ProtocolError::new(ErrorKind::Io, "HTTP/2 ping handle is unavailable")
+        })?;
         tokio::spawn(async move {
             if let Err(error) = connection.await {
                 tracing_error(&map_h2_error(error));
@@ -209,6 +213,7 @@ impl H2Client {
         });
         Ok(Self {
             sender,
+            ping_pong: Arc::new(Mutex::new(ping_pong)),
             identity: Arc::new(()),
         })
     }
@@ -216,6 +221,27 @@ impl H2Client {
     /// Return whether the peer has acknowledged RFC 8441 extended CONNECT.
     pub fn is_extended_connect_enabled(&self) -> bool {
         self.sender.is_extended_connect_protocol_enabled()
+    }
+
+    /// Wait for the peer's initial settings and require RFC 8441 support.
+    pub async fn ensure_extended_connect(&self) -> Result<(), ProtocolError> {
+        if self.is_extended_connect_enabled() {
+            return Ok(());
+        }
+        self.ping_pong
+            .lock()
+            .await
+            .ping(Ping::opaque())
+            .await
+            .map_err(map_h2_error)?;
+        if self.is_extended_connect_enabled() {
+            Ok(())
+        } else {
+            Err(ProtocolError::new(
+                ErrorKind::Unsupported,
+                "HTTP/2 peer did not enable extended CONNECT",
+            ))
+        }
     }
 
     pub async fn send_request(
