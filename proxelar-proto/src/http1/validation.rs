@@ -23,6 +23,13 @@ pub enum Http1ErrorKind {
     InvalidTransferEncoding,
     InvalidConnection,
     AmbiguousFraming,
+    InvalidChunkSize,
+    InvalidChunkExtension,
+    InvalidChunkTerminator,
+    InvalidTrailer,
+    BodyTooLarge,
+    BodyLengthMismatch,
+    UnexpectedBodyFrame,
 }
 
 /// A protocol error rejected before any HTTP/1 message is forwarded.
@@ -62,6 +69,7 @@ impl std::error::Error for Http1Error {}
 pub struct HeaderSemantics {
     pub content_length: Option<u64>,
     pub transfer_encoded: bool,
+    pub chunked: bool,
 }
 
 pub(crate) fn validate_request(
@@ -219,7 +227,7 @@ fn validate_framing(
 ) -> Result<HeaderSemantics, Http1Error> {
     validate_connection(headers)?;
     let content_length = parse_content_length(headers)?;
-    let transfer_encoded = parse_transfer_encoding(version, headers, request)?;
+    let (transfer_encoded, chunked) = parse_transfer_encoding(version, headers, request)?;
     if content_length.is_some() && transfer_encoded {
         return Err(Http1Error::new(
             Http1ErrorKind::AmbiguousFraming,
@@ -229,6 +237,7 @@ fn validate_framing(
     Ok(HeaderSemantics {
         content_length,
         transfer_encoded,
+        chunked,
     })
 }
 
@@ -298,10 +307,10 @@ fn parse_transfer_encoding(
     version: Version,
     headers: &HeaderBlock,
     request: bool,
-) -> Result<bool, Http1Error> {
+) -> Result<(bool, bool), Http1Error> {
     let values = headers.get_all("transfer-encoding").collect::<Vec<_>>();
     if values.is_empty() {
-        return Ok(false);
+        return Ok((false, false));
     }
     if version != Version::HTTP_11 {
         return Err(Http1Error::new(
@@ -348,10 +357,10 @@ fn parse_transfer_encoding(
             "chunked must occur exactly once and as the final request coding",
         ));
     }
-    Ok(true)
+    Ok((true, chunked_is_final))
 }
 
-fn trim_ows(mut bytes: &[u8]) -> &[u8] {
+pub(crate) fn trim_ows(mut bytes: &[u8]) -> &[u8] {
     while matches!(bytes.first(), Some(b' ' | b'\t')) {
         bytes = &bytes[1..];
     }
@@ -361,7 +370,7 @@ fn trim_ows(mut bytes: &[u8]) -> &[u8] {
     bytes
 }
 
-fn is_token_byte(byte: u8) -> bool {
+pub(crate) fn is_token_byte(byte: u8) -> bool {
     byte.is_ascii_alphanumeric()
         || matches!(
             byte,
