@@ -466,7 +466,7 @@ mod tests {
             Method::GET,
             "http://example.test/replay".parse().unwrap(),
             Version::HTTP_11,
-            HeaderMap::new(),
+            proxyapi_models::HeaderBlock::new(),
             Bytes::new(),
             1,
         );

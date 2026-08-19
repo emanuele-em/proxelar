@@ -68,7 +68,7 @@ enum CapturedRequest {
         method: http::Method,
         uri: http::Uri,
         version: http::Version,
-        headers: http::HeaderMap,
+        headers: proxyapi_models::HeaderBlock,
         body: BodyCapture,
         done: Arc<Notify>,
         time: i64,
@@ -90,7 +90,7 @@ impl CapturedRequest {
             method: parts.method.clone(),
             uri: parts.uri.clone(),
             version: parts.version,
-            headers: parts.headers.clone(),
+            headers: crate::header::from_http(&parts.headers),
             body,
             done,
             time,
@@ -449,14 +449,20 @@ impl CapturingHandler {
         let mut method = req.method().clone();
         let mut uri = req.uri().clone();
         let version = req.version();
-        let mut headers = req.headers().clone();
+        let mut headers = match crate::header::to_http(req.headers()) {
+            Ok(headers) => headers,
+            Err(error) => {
+                tracing::warn!("Captured replay has invalid compatibility headers: {error}");
+                return None;
+            }
+        };
         let mut body_bytes = req.body().clone();
 
         self.captured_request = Some(CapturedRequest::buffered(ProxiedRequest::new(
             method.clone(),
             uri.clone(),
             version,
-            headers.clone(),
+            crate::header::from_http(&headers),
             body_bytes.clone(),
             now_millis(),
         )));
@@ -494,7 +500,15 @@ impl CapturingHandler {
                             if let Ok(u) = u.parse() {
                                 uri = u;
                             }
-                            headers = h;
+                            headers = match crate::header::to_http(&h) {
+                                Ok(headers) => headers,
+                                Err(error) => {
+                                    tracing::warn!(
+                                        "Edited replay has invalid compatibility headers: {error}"
+                                    );
+                                    return None;
+                                }
+                            };
                             if b != body_bytes {
                                 reconcile_edited_body_headers(&mut headers, &b);
                             }
@@ -504,7 +518,7 @@ impl CapturingHandler {
                                     method.clone(),
                                     uri.clone(),
                                     version,
-                                    headers.clone(),
+                                    crate::header::from_http(&headers),
                                     body_bytes.clone(),
                                     now_millis(),
                                 )));
@@ -638,7 +652,7 @@ impl CapturingHandler {
     {
         let status = parts.status;
         let version = parts.version;
-        let headers = parts.headers.clone();
+        let headers = crate::header::from_http(&parts.headers);
         let request = self.take_captured_request_state();
         let id = self.pending_id.take().unwrap_or_else(next_id);
         let event_tx = self.event_tx_clone();
@@ -774,7 +788,7 @@ impl CapturingHandler {
         let proxied_response = ProxiedResponse::new(
             parts.status,
             parts.version,
-            parts.headers.clone(),
+            crate::header::from_http(&parts.headers),
             body,
             now_millis(),
         );
@@ -804,7 +818,7 @@ impl CapturingHandler {
                     parts.method.clone(),
                     parts.uri.clone(),
                     parts.version,
-                    parts.headers.clone(),
+                    crate::header::from_http(&parts.headers),
                     body_bytes.clone(),
                     now_millis(),
                 )));
@@ -872,7 +886,7 @@ impl HttpHandler for CapturingHandler {
                             parts.method,
                             parts.uri,
                             parts.version,
-                            parts.headers,
+                            crate::header::from_http(&parts.headers),
                             captured,
                             metadata,
                             now_millis(),
@@ -969,7 +983,7 @@ impl HttpHandler for CapturingHandler {
                         parts.method.clone(),
                         parts.uri.clone(),
                         parts.version,
-                        parts.headers.clone(),
+                        crate::header::from_http(&parts.headers),
                         request_body.hook_bytes().clone(),
                         request_body.metadata(),
                         now_millis(),
@@ -998,7 +1012,7 @@ impl HttpHandler for CapturingHandler {
                     parts.method.clone(),
                     parts.uri.clone(),
                     parts.version,
-                    parts.headers.clone(),
+                    crate::header::from_http(&parts.headers),
                     request_body.hook_bytes().clone(),
                     request_body.metadata(),
                     now_millis(),
@@ -1034,7 +1048,19 @@ impl HttpHandler for CapturingHandler {
                                 parts.uri = u;
                             }
                             let hook_body = request_body.hook_bytes().clone();
-                            parts.headers = headers;
+                            parts.headers = match crate::header::to_http(&headers) {
+                                Ok(headers) => headers,
+                                Err(error) => {
+                                    tracing::warn!(
+                                        "Edited request has invalid compatibility headers: {error}"
+                                    );
+                                    return RequestOrResponse::Response(self.synthetic_response(
+                                        http::StatusCode::BAD_REQUEST,
+                                        http::HeaderMap::new(),
+                                        Bytes::from_static(b"Invalid edited headers"),
+                                    ));
+                                }
+                            };
                             if body != hook_body {
                                 reconcile_edited_body_headers(&mut parts.headers, &body);
                             }
@@ -1094,7 +1120,7 @@ mod tests {
             Method::POST,
             "http://example.test/path?x=1".parse::<Uri>().unwrap(),
             Version::HTTP_11,
-            headers,
+            crate::header::from_http(&headers),
             Bytes::from_static(b"request body"),
             100,
         )
@@ -1169,7 +1195,7 @@ mod tests {
                 assert_eq!(id, 77);
                 assert_eq!(request.uri().path(), "/path");
                 assert_eq!(response.status(), StatusCode::ACCEPTED);
-                assert_eq!(response.headers()["x-response"], "ok");
+                assert_eq!(response.headers().get("x-response"), Some(b"ok".as_slice()));
                 assert_eq!(response.body().as_ref(), b"accepted");
             }
             other => panic!("expected RequestComplete, got {other:?}"),
@@ -1219,7 +1245,10 @@ mod tests {
                 assert_eq!(id, 78);
                 assert_eq!(request.uri().path(), "/path");
                 assert_eq!(response.status(), StatusCode::BAD_GATEWAY);
-                assert_eq!(response.headers()["x-synthetic"], "yes");
+                assert_eq!(
+                    response.headers().get("x-synthetic"),
+                    Some(b"yes".as_slice())
+                );
                 assert_eq!(response.body().as_ref(), b"synthetic body");
             }
             other => panic!("expected RequestComplete, got {other:?}"),
@@ -1478,7 +1507,7 @@ mod tests {
             InterceptDecision::Modified {
                 method: "PUT".to_owned(),
                 uri: "http://example.test/changed".to_owned(),
-                headers,
+                headers: crate::header::from_http(&headers),
                 body: Bytes::from_static(b"changed body"),
             },
         ));
@@ -1637,7 +1666,7 @@ mod tests {
         match event_rx.recv().await.unwrap() {
             ProxyEvent::RequestComplete { response, .. } => {
                 assert_eq!(response.status(), StatusCode::CREATED);
-                assert_eq!(response.headers()["x-script"], "yes");
+                assert_eq!(response.headers().get("x-script"), Some(b"yes".as_slice()));
                 assert_eq!(response.body().as_ref(), b"scripted");
             }
             other => panic!("expected RequestComplete, got {other:?}"),
@@ -1859,7 +1888,10 @@ mod tests {
         match event_rx.recv().await.unwrap() {
             ProxyEvent::RequestComplete { response, .. } => {
                 assert_eq!(response.status(), StatusCode::OK);
-                assert_eq!(response.headers()["x-original-response"], "yes");
+                assert_eq!(
+                    response.headers().get("x-original-response"),
+                    Some(b"yes".as_slice())
+                );
                 assert_eq!(response.body().as_ref(), b"original");
             }
             other => panic!("expected RequestComplete, got {other:?}"),

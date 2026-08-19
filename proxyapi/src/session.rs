@@ -9,10 +9,11 @@ use std::path::Path;
 use base64::Engine as _;
 use bytes::Bytes;
 use chrono::{TimeZone as _, Utc};
-use http::{HeaderMap, HeaderName, HeaderValue, Method, StatusCode, Uri, Version};
+use http::{HeaderName, Method, StatusCode, Uri, Version};
 use proxyapi_models::{
     BodyMetadata, CapturedDnsExchange, CapturedFlow, CapturedTcpStream, CapturedWebSocket,
-    ProxiedRequest, ProxiedResponse, TrafficSession, SESSION_FORMAT_VERSION,
+    HeaderBlock, HeaderField, ProxiedRequest, ProxiedResponse, TrafficSession,
+    SESSION_FORMAT_VERSION,
 };
 use serde_json::{json, Value};
 use thiserror::Error;
@@ -91,18 +92,21 @@ impl RedactionPolicy {
         self
     }
 
-    fn redact_headers(&self, headers: &HeaderMap) -> HeaderMap {
-        let mut redacted = HeaderMap::new();
-        for (name, value) in headers {
-            let value = if self.header_names.contains(name) {
-                HeaderValue::from_str(&self.replacement)
-                    .unwrap_or_else(|_| HeaderValue::from_static("[REDACTED]"))
+    fn redact_headers(&self, headers: &HeaderBlock) -> HeaderBlock {
+        HeaderBlock::from_fields(headers.iter().map(|field| {
+            if self
+                .header_names
+                .iter()
+                .any(|name| field.name_eq(name.as_str()))
+            {
+                HeaderField::new(field.name(), self.replacement.as_bytes()).unwrap_or_else(|_| {
+                    HeaderField::new(field.name(), b"[REDACTED]")
+                        .expect("existing field name and static value are valid")
+                })
             } else {
-                value.clone()
-            };
-            redacted.append(name.clone(), value);
-        }
-        redacted
+                field.clone()
+            }
+        }))
     }
 
     fn redact_uri(&self, uri: &Uri) -> Uri {
@@ -393,6 +397,17 @@ pub(crate) fn write_private(path: &Path, bytes: &[u8]) -> Result<(), std::io::Er
 
 pub fn load_session(path: impl AsRef<Path>) -> Result<TrafficSession, SessionError> {
     let bytes = fs::read(path)?;
+    #[derive(serde::Deserialize)]
+    struct SessionVersion {
+        version: u32,
+    }
+    let version: SessionVersion = serde_json::from_slice(&bytes)?;
+    if version.version != SESSION_FORMAT_VERSION {
+        return Err(SessionError::UnsupportedVersion {
+            found: version.version,
+            supported: SESSION_FORMAT_VERSION,
+        });
+    }
     let session = serde_json::from_slice(&bytes)?;
     validate_version(&session)?;
     Ok(session)
@@ -574,8 +589,8 @@ fn har_entry(flow: &CapturedFlow, redaction: Option<&RedactionPolicy>) -> Value 
             "headers": har_headers(response.headers()),
             "cookies": [],
             "content": response_body,
-            "redirectURL": response.headers().get(http::header::LOCATION)
-                .and_then(|value| value.to_str().ok()).unwrap_or(""),
+            "redirectURL": response.headers().get(http::header::LOCATION.as_str())
+                .and_then(|value| std::str::from_utf8(value).ok()).unwrap_or(""),
             "headersSize": -1,
             "bodySize": response.body_metadata().total_seen,
             "comment": truncation_comment(response.body_metadata())
@@ -585,22 +600,22 @@ fn har_entry(flow: &CapturedFlow, redaction: Option<&RedactionPolicy>) -> Value 
     })
 }
 
-fn har_headers(headers: &HeaderMap) -> Vec<Value> {
+fn har_headers(headers: &HeaderBlock) -> Vec<Value> {
     headers
         .iter()
-        .map(|(name, value)| {
+        .map(|field| {
             json!({
-                "name": name.as_str(),
-                "value": String::from_utf8_lossy(value.as_bytes())
+                "name": String::from_utf8_lossy(field.name()),
+                "value": String::from_utf8_lossy(field.value())
             })
         })
         .collect()
 }
 
-fn har_content(body: &Bytes, headers: &HeaderMap, metadata: BodyMetadata) -> Value {
+fn har_content(body: &Bytes, headers: &HeaderBlock, metadata: BodyMetadata) -> Value {
     let mime = headers
-        .get(http::header::CONTENT_TYPE)
-        .and_then(|value| value.to_str().ok())
+        .get(http::header::CONTENT_TYPE.as_str())
+        .and_then(|value| std::str::from_utf8(value).ok())
         .unwrap_or("application/octet-stream");
     if let Ok(text) = std::str::from_utf8(body) {
         json!({
@@ -647,11 +662,11 @@ pub fn export_curl(
             shell_quote(&request.uri().to_string())
         )
         .expect("writing to String cannot fail");
-        for (name, value) in request.headers() {
+        for field in request.headers() {
             let header = format!(
                 "{}: {}",
-                name.as_str(),
-                String::from_utf8_lossy(value.as_bytes())
+                String::from_utf8_lossy(field.name()),
+                String::from_utf8_lossy(field.value())
             );
             output.push_str(" \\");
             output.push('\n');
@@ -729,11 +744,11 @@ fn raw_response(response: &ProxiedResponse) -> Vec<u8> {
     output
 }
 
-fn append_headers_and_body(output: &mut Vec<u8>, headers: &HeaderMap, body: &Bytes) {
-    for (name, value) in headers {
-        output.extend_from_slice(name.as_str().as_bytes());
+fn append_headers_and_body(output: &mut Vec<u8>, headers: &HeaderBlock, body: &Bytes) {
+    for field in headers {
+        output.extend_from_slice(field.name());
         output.extend_from_slice(b": ");
-        output.extend_from_slice(value.as_bytes());
+        output.extend_from_slice(field.value());
         output.extend_from_slice(b"\r\n");
     }
     output.extend_from_slice(b"\r\n");
@@ -830,8 +845,8 @@ fn import_har_entry(index: usize, entry: &Value) -> Result<CapturedFlow, Session
     })
 }
 
-fn import_har_headers(value: Option<&Value>) -> Result<HeaderMap, SessionError> {
-    let mut headers = HeaderMap::new();
+fn import_har_headers(value: Option<&Value>) -> Result<HeaderBlock, SessionError> {
+    let mut headers = HeaderBlock::new();
     for header in value.and_then(Value::as_array).into_iter().flatten() {
         let Some(name) = header.get("name").and_then(Value::as_str) else {
             continue;
@@ -839,11 +854,9 @@ fn import_har_headers(value: Option<&Value>) -> Result<HeaderMap, SessionError> 
         let Some(value) = header.get("value").and_then(Value::as_str) else {
             continue;
         };
-        let name = HeaderName::from_bytes(name.as_bytes())
+        headers
+            .add(name, value)
             .map_err(|error| SessionError::InvalidHttp(error.to_string()))?;
-        let value = HeaderValue::from_str(value)
-            .map_err(|error| SessionError::InvalidHttp(error.to_string()))?;
-        headers.append(name, value);
     }
     Ok(headers)
 }
@@ -880,12 +893,14 @@ mod tests {
     use tempfile::tempdir;
 
     fn flow(id: u64) -> CapturedFlow {
-        let mut request_headers = HeaderMap::new();
-        request_headers.append("cookie", "secret=one".parse().unwrap());
-        request_headers.append("x-repeat", "one".parse().unwrap());
-        request_headers.append("x-repeat", "two".parse().unwrap());
-        let mut response_headers = HeaderMap::new();
-        response_headers.insert("content-type", "application/json".parse().unwrap());
+        let mut request_headers = HeaderBlock::new();
+        request_headers.add("cookie", "secret=one").unwrap();
+        request_headers.add("x-repeat", "one").unwrap();
+        request_headers.add("x-repeat", "two").unwrap();
+        let mut response_headers = HeaderBlock::new();
+        response_headers
+            .add("content-type", "application/json")
+            .unwrap();
         CapturedFlow {
             id,
             request: ProxiedRequest::new(
@@ -980,7 +995,6 @@ mod tests {
             .request
             .headers()
             .get_all("x-repeat")
-            .iter()
             .count();
         assert_eq!(repeated, 2);
     }
@@ -1188,6 +1202,21 @@ mod tests {
             Err(SessionError::UnsupportedVersion { .. })
         ));
 
+        // Version inspection happens before deserializing v2 headers so a v1
+        // file receives an explicit version error rather than a shape error.
+        std::fs::write(
+            &path,
+            br#"{"version":1,"flows":[{"request":{"headers":{"x-old":"shape"}}}]}"#,
+        )
+        .unwrap();
+        assert!(matches!(
+            load_session(&path),
+            Err(SessionError::UnsupportedVersion {
+                found: 1,
+                supported: SESSION_FORMAT_VERSION
+            })
+        ));
+
         let mut maximum = TrafficSession::new(1);
         maximum.flows.push(flow(u64::MAX));
         assert!(matches!(
@@ -1210,15 +1239,15 @@ mod tests {
                 .parse()
                 .unwrap(),
             Version::HTTP_11,
-            HeaderMap::from_iter([(
-                http::header::AUTHORIZATION,
-                HeaderValue::from_static("Bearer secret"),
-            )]),
+            HeaderBlock::from_fields([HeaderField::new("Authorization", "Bearer secret").unwrap()]),
             Bytes::new(),
             1,
         );
         let redacted = policy.redact_request(&request);
-        assert_eq!(redacted.headers()[http::header::AUTHORIZATION], "hidden");
+        assert_eq!(
+            redacted.headers().get("authorization"),
+            Some(b"hidden".as_slice())
+        );
         assert_eq!(
             redacted.uri().query(),
             Some("secret=hidden&flag&other=visible")
@@ -1233,8 +1262,10 @@ mod tests {
             RedactionPolicy::new(["authorization"], std::iter::empty::<&str>())
                 .with_replacement("bad\nvalue");
         assert_eq!(
-            invalid_replacement.redact_headers(request.headers())[http::header::AUTHORIZATION],
-            "[REDACTED]"
+            invalid_replacement
+                .redact_headers(request.headers())
+                .get("authorization"),
+            Some(b"[REDACTED]".as_slice())
         );
     }
 
@@ -1355,7 +1386,6 @@ mod tests {
                 .request
                 .headers()
                 .get_all("x-repeat")
-                .iter()
                 .count(),
             2
         );
@@ -1368,7 +1398,7 @@ mod tests {
             total_seen: 100,
             truncated: true,
         };
-        let content = har_content(&binary, &HeaderMap::new(), metadata);
+        let content = har_content(&binary, &HeaderBlock::new(), metadata);
         assert_eq!(content["encoding"], "base64");
         assert!(content["comment"]
             .as_str()

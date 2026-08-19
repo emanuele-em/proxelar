@@ -169,7 +169,8 @@ fn render_event(event: &ProxyEvent) -> TerminalOutput {
 mod tests {
     use super::*;
     use bytes::Bytes;
-    use http::{HeaderMap, Method, StatusCode, Version};
+    use http::{Method, StatusCode, Version};
+    use proxyapi_models::HeaderBlock;
     use proxyapi_models::{ProxiedRequest, ProxiedResponse, WsDirection, WsFrame, WsOpcode};
 
     #[test]
@@ -185,14 +186,14 @@ mod tests {
             Method::GET,
             "http://api.test/terminal".parse().unwrap(),
             Version::HTTP_11,
-            HeaderMap::new(),
+            HeaderBlock::new(),
             Bytes::new(),
             1,
         ));
         let response = Box::new(ProxiedResponse::new(
             StatusCode::OK,
             Version::HTTP_11,
-            HeaderMap::new(),
+            HeaderBlock::new(),
             Bytes::from_static(b"ok"),
             2,
         ));
@@ -278,14 +279,14 @@ mod tests {
             Method::GET,
             "http://api.test/terminal".parse().unwrap(),
             Version::HTTP_11,
-            HeaderMap::new(),
+            HeaderBlock::new(),
             Bytes::new(),
             1,
         ));
         let response = Box::new(ProxiedResponse::new(
             StatusCode::OK,
             Version::HTTP_11,
-            HeaderMap::new(),
+            HeaderBlock::new(),
             Bytes::from_static(b"ok"),
             2,
         ));
@@ -309,7 +310,7 @@ mod tests {
             response: Box::new(ProxiedResponse::new(
                 StatusCode::SWITCHING_PROTOCOLS,
                 Version::HTTP_11,
-                HeaderMap::new(),
+                HeaderBlock::new(),
                 Bytes::new(),
                 3,
             )),

@@ -114,9 +114,15 @@ async fn reverse_proxy_forwards_http_and_emits_request_complete() {
         } => {
             assert_eq!(request.uri().path(), "/hello");
             assert_eq!(request.uri().query(), Some("name=proxelar"));
-            assert_eq!(request.headers()["x-client-test"], "roundtrip");
+            assert_eq!(
+                request.headers().get("x-client-test"),
+                Some(b"roundtrip".as_slice())
+            );
             assert_eq!(response.status(), http::StatusCode::CREATED);
-            assert_eq!(response.headers()["x-upstream-path"], "/hello");
+            assert_eq!(
+                response.headers().get("x-upstream-path"),
+                Some(b"/hello".as_slice())
+            );
             assert_eq!(response.body().as_ref(), b"upstream response");
         }
         other => panic!("expected RequestComplete event, got {other:?}"),
@@ -199,7 +205,10 @@ async fn reverse_proxy_forwards_h2c_post_and_emits_http2_capture() {
             assert_eq!(request.method(), http::Method::POST);
             assert_eq!(request.uri().path(), "/echo");
             assert_eq!(request.uri().query(), Some("via=h2c"));
-            assert_eq!(request.headers()["x-client-test"], "reverse-h2c");
+            assert_eq!(
+                request.headers().get("x-client-test"),
+                Some(b"reverse-h2c".as_slice())
+            );
             assert_eq!(request.body().as_ref(), b"reverse h2 body");
             assert_eq!(response.status(), http::StatusCode::CREATED);
             assert_eq!(response.body().as_ref(), b"reverse h2 body");
@@ -404,7 +413,7 @@ async fn reverse_proxy_intercepts_oversized_request_before_streaming_original() 
         }
         other => panic!("expected RequestIntercepted event, got {other:?}"),
     };
-    headers.insert("x-intercept", "yes".parse().unwrap());
+    headers.add("x-intercept", "yes").unwrap();
     assert!(intercept.resolve(
         id,
         InterceptDecision::Modified {
@@ -668,7 +677,10 @@ async fn reverse_proxy_lua_short_circuit_emits_request_complete() {
             assert_eq!(request.uri().path(), "/script-short");
             assert_eq!(request.body().as_ref(), b"request body");
             assert_eq!(response.status(), http::StatusCode::ACCEPTED);
-            assert_eq!(response.headers()["x-script"], "short");
+            assert_eq!(
+                response.headers().get("x-script"),
+                Some(b"short".as_slice())
+            );
             assert_eq!(response.body().as_ref(), b"short-circuited");
         }
         other => panic!("expected RequestComplete event, got {other:?}"),

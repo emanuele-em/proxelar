@@ -13,7 +13,7 @@ use http::{
     HeaderMap, Uri,
 };
 use proxyapi::{FlowFilter, InterceptConfig, InterceptDecision, ProxyEvent, SessionRecorder};
-use proxyapi_models::{CapturedFlow, ProxiedRequest, TrafficSession};
+use proxyapi_models::{CapturedFlow, HeaderBlock, HeaderField, ProxiedRequest, TrafficSession};
 use rand::RngExt;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
@@ -98,7 +98,7 @@ impl ClientBody {
 #[serde(untagged)]
 enum ClientHeaders {
     Map(HashMap<String, HeaderValues>),
-    List(Vec<ClientHeader>),
+    List(Vec<HeaderField>),
 }
 
 #[derive(Deserialize)]
@@ -108,39 +108,29 @@ enum HeaderValues {
     Many(Vec<String>),
 }
 
-#[derive(Deserialize)]
-struct ClientHeader {
-    name: String,
-    value: String,
-}
-
 impl ClientHeaders {
-    fn try_into_header_map(self) -> Result<HeaderMap, String> {
-        let values: Vec<(String, String)> = match self {
-            Self::Map(headers) => headers
-                .into_iter()
-                .flat_map(|(name, values)| match values {
-                    HeaderValues::One(value) => vec![(name, value)],
-                    HeaderValues::Many(values) => values
-                        .into_iter()
-                        .map(|value| (name.clone(), value))
-                        .collect(),
-                })
-                .collect(),
-            Self::List(headers) => headers
-                .into_iter()
-                .map(|header| (header.name, header.value))
-                .collect(),
-        };
-        let mut headers = HeaderMap::new();
-        for (name, value) in values {
-            let name = http::header::HeaderName::from_bytes(name.as_bytes())
-                .map_err(|error| format!("invalid header name: {error}"))?;
-            let value = http::header::HeaderValue::from_str(&value)
-                .map_err(|error| format!("invalid header value: {error}"))?;
-            headers.append(name, value);
+    fn try_into_header_block(self) -> Result<HeaderBlock, String> {
+        match self {
+            Self::List(headers) => Ok(HeaderBlock::from_fields(headers)),
+            Self::Map(headers) => {
+                let mut output = HeaderBlock::new();
+                for (name, values) in headers {
+                    match values {
+                        HeaderValues::One(value) => output
+                            .add(&name, value)
+                            .map_err(|error| format!("invalid header: {error}"))?,
+                        HeaderValues::Many(values) => {
+                            for value in values {
+                                output
+                                    .add(&name, value)
+                                    .map_err(|error| format!("invalid header: {error}"))?;
+                            }
+                        }
+                    }
+                }
+                Ok(output)
+            }
         }
-        Ok(headers)
     }
 }
 
@@ -691,7 +681,7 @@ async fn api_resolve_intercept(
                 )
                     .into_response();
             }
-            let Ok(headers) = headers.try_into_header_map() else {
+            let Ok(headers) = headers.try_into_header_block() else {
                 return (
                     axum::http::StatusCode::UNPROCESSABLE_ENTITY,
                     "Invalid headers",
@@ -855,7 +845,7 @@ async fn handle_client_message(text: &str, state: &WebState) {
                 tracing::warn!("Invalid URI in browser intercept edit");
                 return;
             };
-            let Ok(header_map) = headers.try_into_header_map() else {
+            let Ok(header_block) = headers.try_into_header_block() else {
                 tracing::warn!("Invalid header in browser intercept edit");
                 return;
             };
@@ -876,7 +866,7 @@ async fn handle_client_message(text: &str, state: &WebState) {
                 InterceptDecision::Modified {
                     method: method.to_string(),
                     uri: uri.to_string(),
-                    headers: header_map,
+                    headers: header_block,
                     body,
                 },
             );
@@ -887,7 +877,7 @@ async fn handle_client_message(text: &str, state: &WebState) {
             headers,
             body,
         } => {
-            let Ok(header_map) = headers.try_into_header_map() else {
+            let Ok(header_block) = headers.try_into_header_block() else {
                 tracing::warn!("Invalid header in browser replay");
                 return;
             };
@@ -905,7 +895,7 @@ async fn handle_client_message(text: &str, state: &WebState) {
                 return;
             };
             let req =
-                ProxiedRequest::new(method, uri, http::Version::HTTP_11, header_map, body, now);
+                ProxiedRequest::new(method, uri, http::Version::HTTP_11, header_block, body, now);
             if state.replay_tx.try_send(req).is_err() {
                 tracing::warn!("Replay channel full");
             }
@@ -1155,7 +1145,8 @@ mod tests {
                 "headers":[
                     {"name":"x-good","value":"yes"},
                     {"name":"x-repeat","value":"one"},
-                    {"name":"x-repeat","value":"two"}
+                    {"name":"x-repeat","value":"two"},
+                    {"name":"x-binary","value_base64":"gP8="}
                 ],
                 "body":{"bytes":[255,0,1]}
             }"#,
@@ -1172,8 +1163,9 @@ mod tests {
             } => {
                 assert_eq!(method, "PATCH");
                 assert_eq!(uri, "http://api.test/items");
-                assert_eq!(headers["x-good"], "yes");
-                assert_eq!(headers.get_all("x-repeat").iter().count(), 2);
+                assert_eq!(headers.get("x-good"), Some(b"yes".as_slice()));
+                assert_eq!(headers.get_all("x-repeat").count(), 2);
+                assert_eq!(headers.get("x-binary"), Some([0x80, 0xff].as_slice()));
                 assert_eq!(body.as_ref(), b"\xff\x00\x01");
             }
             _ => panic!("expected modified decision"),
@@ -1182,11 +1174,10 @@ mod tests {
 
     #[test]
     fn intercepted_protobuf_event_includes_structured_editor() {
-        let mut headers = HeaderMap::new();
-        headers.insert(
-            http::header::CONTENT_TYPE,
-            "application/x-protobuf".parse().unwrap(),
-        );
+        let mut headers = HeaderBlock::new();
+        headers
+            .add("content-type", "application/x-protobuf")
+            .unwrap();
         let request = ProxiedRequest::new(
             Method::POST,
             "http://api.test/message".parse().unwrap(),
@@ -1253,7 +1244,10 @@ mod tests {
         assert_eq!(req.method(), Method::POST);
         assert_eq!(req.uri().path(), "/replay");
         assert_eq!(req.version(), Version::HTTP_11);
-        assert_eq!(req.headers()[http::header::CONTENT_TYPE], "text/plain");
+        assert_eq!(
+            req.headers().get("content-type"),
+            Some(b"text/plain".as_slice())
+        );
         assert_eq!(req.body().as_ref(), b"again");
     }
 
@@ -1302,14 +1296,14 @@ mod tests {
                 Method::GET,
                 "http://api.test/".parse().unwrap(),
                 Version::HTTP_11,
-                HeaderMap::new(),
+                HeaderBlock::new(),
                 Bytes::new(),
                 1,
             )),
             response: Box::new(ProxiedResponse::new(
                 http::StatusCode::OK,
                 Version::HTTP_11,
-                HeaderMap::new(),
+                HeaderBlock::new(),
                 Bytes::new(),
                 2,
             )),
