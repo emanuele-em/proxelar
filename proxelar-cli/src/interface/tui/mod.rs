@@ -16,6 +16,7 @@ use std::sync::Arc;
 use tokio::sync::mpsc;
 use tokio_util::sync::CancellationToken;
 
+use crate::theme::Theme;
 use crate::wireguard_setup::WireGuardSetup;
 use handler::handle_key_event;
 use state::AppState;
@@ -37,8 +38,18 @@ pub async fn run(
     replay_tx: mpsc::Sender<ProxiedRequest>,
     wireguard_setup: Option<Arc<WireGuardSetup>>,
     cancel: CancellationToken,
+    theme: Theme,
 ) {
-    if let Err(e) = run_inner(event_rx, intercept, replay_tx, wireguard_setup, cancel).await {
+    if let Err(e) = run_inner(
+        event_rx,
+        intercept,
+        replay_tx,
+        wireguard_setup,
+        cancel,
+        theme,
+    )
+    .await
+    {
         eprintln!("TUI error: {e}");
     }
 }
@@ -49,6 +60,7 @@ async fn run_inner(
     replay_tx: mpsc::Sender<ProxiedRequest>,
     wireguard_setup: Option<Arc<WireGuardSetup>>,
     cancel: CancellationToken,
+    theme: Theme,
 ) -> Result<(), Box<dyn std::error::Error>> {
     enable_raw_mode()?;
     let _guard = RawModeGuard;
@@ -60,6 +72,7 @@ async fn run_inner(
     let mut terminal = Terminal::new(backend)?;
 
     let mut state = AppState::new();
+    state.theme = theme;
     let mut terminal_events = EventStream::new();
     let mut render_interval = tokio::time::interval(tokio::time::Duration::from_millis(50));
     render_interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);

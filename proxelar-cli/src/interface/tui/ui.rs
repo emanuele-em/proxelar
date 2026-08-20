@@ -19,6 +19,7 @@ use super::state::EditSession;
 
 use super::state::{matches_filter, AppState, DetailTab, FlowEntry};
 use crate::interface::format_size;
+use crate::theme::Theme;
 use crate::wireguard_setup::WireGuardSetup;
 
 pub fn draw(f: &mut Frame, state: &mut AppState, wireguard_setup: Option<&WireGuardSetup>) {
@@ -87,10 +88,11 @@ pub fn draw(f: &mut Frame, state: &mut AppState, wireguard_setup: Option<&WireGu
     ])
     .style(
         Style::default()
-            .fg(Color::Yellow)
+            .fg(state.theme.table_header.0)
             .add_modifier(Modifier::BOLD),
     );
 
+    let theme = &state.theme;
     let rows: Vec<Row> = filtered[visible_range.clone()]
         .iter()
         .map(|(_idx, entry)| match entry {
@@ -112,15 +114,15 @@ pub fn draw(f: &mut Frame, state: &mut AppState, wireguard_setup: Option<&WireGu
 
                 Row::new(vec![
                     Cell::from(time_str),
-                    Cell::from(proto).style(Style::default().fg(proto_color(proto))),
-                    Cell::from(method).style(Style::default().fg(method_color(method))),
+                    Cell::from(proto).style(Style::default().fg(theme.proto_color(proto))),
+                    Cell::from(method).style(Style::default().fg(theme.method_color(method))),
                     Cell::from(host),
                     Cell::from(path),
-                    Cell::from(status.to_string()).style(status_style(status)),
+                    Cell::from(status.to_string()).style(theme.status_style(status)),
                     Cell::from(content_type.clone())
-                        .style(Style::default().fg(content_type_color(&content_type))),
-                    Cell::from(size).style(Style::default().fg(size_color(body_len))),
-                    Cell::from(duration).style(Style::default().fg(duration_color(dur_ms))),
+                        .style(Style::default().fg(theme.content_type_color(&content_type))),
+                    Cell::from(size).style(Style::default().fg(theme.size_color(body_len))),
+                    Cell::from(duration).style(Style::default().fg(theme.duration_color(dur_ms))),
                 ])
             }
             FlowEntry::Pending { request, .. } => {
@@ -132,26 +134,26 @@ pub fn draw(f: &mut Frame, state: &mut AppState, wireguard_setup: Option<&WireGu
                 let proto = proto_from_uri(uri, false);
 
                 Row::new(vec![
-                    Cell::from(time_str).style(Style::default().fg(Color::Yellow)),
-                    Cell::from(proto).style(Style::default().fg(Color::Yellow)),
+                    Cell::from(time_str).style(Style::default().fg(theme.row_pending.0)),
+                    Cell::from(proto).style(Style::default().fg(theme.row_pending.0)),
                     Cell::from(method).style(
                         Style::default()
-                            .fg(Color::Yellow)
+                            .fg(theme.row_pending.0)
                             .add_modifier(Modifier::BOLD),
                     ),
-                    Cell::from(host).style(Style::default().fg(Color::Yellow)),
-                    Cell::from(path).style(Style::default().fg(Color::Yellow)),
+                    Cell::from(host).style(Style::default().fg(theme.row_pending.0)),
+                    Cell::from(path).style(Style::default().fg(theme.row_pending.0)),
                     Cell::from("\u{00b7}\u{00b7}\u{00b7}")
-                        .style(Style::default().fg(Color::Yellow)),
-                    Cell::from("-").style(Style::default().fg(Color::Yellow)),
-                    Cell::from("-").style(Style::default().fg(Color::Yellow)),
-                    Cell::from("-").style(Style::default().fg(Color::Yellow)),
+                        .style(Style::default().fg(theme.row_pending.0)),
+                    Cell::from("-").style(Style::default().fg(theme.row_pending.0)),
+                    Cell::from("-").style(Style::default().fg(theme.row_pending.0)),
+                    Cell::from("-").style(Style::default().fg(theme.row_pending.0)),
                 ])
             }
             FlowEntry::Error { message } => Row::new(vec![
                 Cell::from("-"),
                 Cell::from("-"),
-                Cell::from("ERR").style(Style::default().fg(Color::Red)),
+                Cell::from("ERR").style(Style::default().fg(theme.row_error.0)),
                 Cell::from(message.as_str()),
                 Cell::from("-"),
                 Cell::from("-"),
@@ -180,15 +182,15 @@ pub fn draw(f: &mut Frame, state: &mut AppState, wireguard_setup: Option<&WireGu
 
                 Row::new(vec![
                     Cell::from(time_str),
-                    Cell::from(proto).style(Style::default().fg(proto_color(proto))),
-                    Cell::from("GET").style(Style::default().fg(method_color("GET"))),
+                    Cell::from(proto).style(Style::default().fg(theme.proto_color(proto))),
+                    Cell::from("GET").style(Style::default().fg(theme.method_color("GET"))),
                     Cell::from(host),
                     Cell::from(path),
-                    Cell::from(status.to_string()).style(status_style(status)),
+                    Cell::from(status.to_string()).style(theme.status_style(status)),
                     Cell::from(content_type.clone())
-                        .style(Style::default().fg(content_type_color(&content_type))),
-                    Cell::from(frame_str).style(Style::default().fg(Color::LightCyan)),
-                    Cell::from(duration).style(Style::default().fg(duration_color(dur_ms))),
+                        .style(Style::default().fg(theme.content_type_color(&content_type))),
+                    Cell::from(frame_str).style(Style::default().fg(theme.ws_frame_count.0)),
+                    Cell::from(duration).style(Style::default().fg(theme.duration_color(dur_ms))),
                 ])
             }
             FlowEntry::Tcp { stream } => {
@@ -200,17 +202,18 @@ pub fn draw(f: &mut Frame, state: &mut AppState, wireguard_setup: Option<&WireGu
                 let status = if stream.closed { "closed" } else { "live" };
                 Row::new(vec![
                     Cell::from(format_time(stream.opened_at)),
-                    Cell::from("TCP").style(Style::default().fg(proto_color("TCP"))),
-                    Cell::from("STREAM").style(Style::default().fg(Color::LightMagenta)),
+                    Cell::from("TCP").style(Style::default().fg(theme.proto_color("TCP"))),
+                    Cell::from("STREAM").style(Style::default().fg(theme.tcp_stream_label.0)),
                     Cell::from(stream.target.as_str()),
                     Cell::from("-"),
                     Cell::from(status).style(Style::default().fg(if stream.closed {
-                        Color::DarkGray
+                        theme.tcp_state_closed.0
                     } else {
-                        Color::LightGreen
+                        theme.tcp_state_live.0
                     })),
-                    Cell::from("binary").style(Style::default().fg(Color::DarkGray)),
-                    Cell::from(format_size(size)).style(Style::default().fg(size_color(size))),
+                    Cell::from("binary").style(Style::default().fg(theme.binary_type_label.0)),
+                    Cell::from(format_size(size))
+                        .style(Style::default().fg(theme.size_color(size))),
                     Cell::from(format!("{}ch", stream.chunks.len())),
                 ])
             }
@@ -224,15 +227,15 @@ pub fn draw(f: &mut Frame, state: &mut AppState, wireguard_setup: Option<&WireGu
                 };
                 Row::new(vec![
                     Cell::from(format_time(exchange.time)),
-                    Cell::from("DNS").style(Style::default().fg(proto_color("DNS"))),
+                    Cell::from("DNS").style(Style::default().fg(theme.proto_color("DNS"))),
                     Cell::from(dns_query_type(exchange.query_type))
-                        .style(Style::default().fg(Color::LightBlue)),
+                        .style(Style::default().fg(theme.dns_query_type.0)),
                     Cell::from(exchange.name.as_str()),
                     Cell::from("-"),
                     Cell::from(status).style(Style::default().fg(if exchange.overridden {
-                        Color::Yellow
+                        theme.dns_state_override.0
                     } else {
-                        Color::LightGreen
+                        theme.dns_state_upstream.0
                     })),
                     Cell::from("dns"),
                     Cell::from(format!("{}ans", exchange.answers.len())),
@@ -248,17 +251,18 @@ pub fn draw(f: &mut Frame, state: &mut AppState, wireguard_setup: Option<&WireGu
                 };
                 Row::new(vec![
                     Cell::from(format_time(exchange.time)),
-                    Cell::from("UDP").style(Style::default().fg(proto_color("UDP"))),
-                    Cell::from("DGRAM").style(Style::default().fg(Color::LightMagenta)),
+                    Cell::from("UDP").style(Style::default().fg(theme.proto_color("UDP"))),
+                    Cell::from("DGRAM").style(Style::default().fg(theme.udp_dgram_label.0)),
                     Cell::from(exchange.target.as_str()),
                     Cell::from(exchange.client.as_str()),
                     Cell::from(status).style(Style::default().fg(if exchange.response_received {
-                        Color::LightGreen
+                        theme.udp_state_complete.0
                     } else {
-                        Color::Yellow
+                        theme.udp_state_no_response.0
                     })),
-                    Cell::from("binary").style(Style::default().fg(Color::DarkGray)),
-                    Cell::from(format_size(size)).style(Style::default().fg(size_color(size))),
+                    Cell::from("binary").style(Style::default().fg(theme.binary_type_label.0)),
+                    Cell::from(format_size(size))
+                        .style(Style::default().fg(theme.size_color(size))),
                     Cell::from("-"),
                 ])
             }
@@ -283,7 +287,7 @@ pub fn draw(f: &mut Frame, state: &mut AppState, wireguard_setup: Option<&WireGu
     .block(Block::default().borders(Borders::ALL).title(title))
     .row_highlight_style(
         Style::default()
-            .bg(Color::DarkGray)
+            .bg(state.theme.selection_bg.0)
             .add_modifier(Modifier::BOLD),
     );
 
@@ -300,7 +304,7 @@ pub fn draw(f: &mut Frame, state: &mut AppState, wireguard_setup: Option<&WireGu
     // Detail panel
     if state.detail_open && chunks.len() > 2 {
         if let Some(ref mut session) = state.edit_session {
-            draw_editor(f, session, chunks[1]);
+            draw_editor(f, session, chunks[1], &state.theme);
         } else {
             draw_detail(f, state, chunks[1], &filtered);
         }
@@ -316,7 +320,7 @@ pub fn draw(f: &mut Frame, state: &mut AppState, wireguard_setup: Option<&WireGu
     draw_status_bar(f, state, status_chunk, pending_count);
 
     if state.show_help {
-        draw_help_modal(f);
+        draw_help_modal(f, &state.theme);
     }
 }
 
@@ -399,10 +403,14 @@ fn draw_wireguard_setup(f: &mut Frame, area: Rect, setup: &WireGuardSetup) {
 }
 
 fn draw_status_bar(f: &mut Frame, state: &AppState, area: Rect, pending_count: usize) {
+    let theme = &state.theme;
     if state.filter_mode {
         let text = format!(" Filter: {}_ ", state.filter_input);
-        let bar = Paragraph::new(text.as_str())
-            .style(Style::default().bg(Color::DarkGray).fg(Color::White));
+        let bar = Paragraph::new(text.as_str()).style(
+            Style::default()
+                .bg(theme.status_bar_bg.0)
+                .fg(theme.status_bar_fg.0),
+        );
         f.render_widget(bar, area);
         return;
     }
@@ -414,14 +422,14 @@ fn draw_status_bar(f: &mut Frame, state: &AppState, area: Rect, pending_count: u
         spans.push(Span::styled(
             " INTERCEPT ",
             Style::default()
-                .bg(Color::Red)
-                .fg(Color::White)
+                .bg(theme.intercept_badge_bg.0)
+                .fg(theme.intercept_badge_fg.0)
                 .add_modifier(Modifier::BOLD),
         ));
         if pending_count > 0 {
             spans.push(Span::styled(
                 format!(" \u{00b7} {pending_count} pending "),
-                Style::default().fg(Color::Yellow),
+                Style::default().fg(theme.intercept_pending_count.0),
             ));
         }
         spans.push(Span::raw("  "));
@@ -444,15 +452,20 @@ fn draw_status_bar(f: &mut Frame, state: &AppState, area: Rect, pending_count: u
     spans.push(Span::raw(hint));
 
     let line = Line::from(spans);
-    let bar = Paragraph::new(line).style(Style::default().bg(Color::DarkGray).fg(Color::White));
+    let bar = Paragraph::new(line).style(
+        Style::default()
+            .bg(theme.status_bar_bg.0)
+            .fg(theme.status_bar_fg.0),
+    );
     f.render_widget(bar, area);
 }
 
 fn draw_detail(f: &mut Frame, state: &AppState, area: Rect, filtered: &[(usize, &FlowEntry)]) {
     let selected = state.table_state.selected().unwrap_or(0);
     let focused = state.detail_focused;
+    let theme = &state.theme;
     let border_style = if focused {
-        Style::default().fg(Color::Cyan)
+        Style::default().fg(theme.border_focused.0)
     } else {
         Style::default()
     };
@@ -468,8 +481,8 @@ fn draw_detail(f: &mut Frame, state: &AppState, area: Rect, filtered: &[(usize, 
                 };
 
                 let content = match state.detail_tab {
-                    DetailTab::Request => build_request_lines(request),
-                    DetailTab::Response => build_response_lines(response),
+                    DetailTab::Request => build_request_lines(request, theme),
+                    DetailTab::Response => build_response_lines(response, theme),
                 };
 
                 let detail = Paragraph::new(content)
@@ -485,7 +498,7 @@ fn draw_detail(f: &mut Frame, state: &AppState, area: Rect, filtered: &[(usize, 
                 f.render_widget(detail, area);
             }
             FlowEntry::Pending { request, .. } => {
-                draw_intercept_pane(f, area, request);
+                draw_intercept_pane(f, area, request, theme);
             }
             FlowEntry::Error { message } => {
                 let detail = Paragraph::new(message.as_str())
@@ -514,11 +527,18 @@ fn draw_detail(f: &mut Frame, state: &AppState, area: Rect, filtered: &[(usize, 
                 };
 
                 let (content, para_scroll) = match state.detail_tab {
-                    DetailTab::Request => {
-                        (build_request_lines(request), state.detail_scroll as u16)
-                    }
+                    DetailTab::Request => (
+                        build_request_lines(request, theme),
+                        state.detail_scroll as u16,
+                    ),
                     DetailTab::Response => (
-                        build_frames_lines(frames, *closed, effective_scroll, state.frames_follow),
+                        build_frames_lines(
+                            frames,
+                            *closed,
+                            effective_scroll,
+                            state.frames_follow,
+                            theme,
+                        ),
                         0, // frames already skipped inside build_frames_lines
                     ),
                 };
@@ -535,7 +555,7 @@ fn draw_detail(f: &mut Frame, state: &AppState, area: Rect, filtered: &[(usize, 
                 f.render_widget(detail, area);
             }
             FlowEntry::Tcp { stream } => {
-                let detail = Paragraph::new(build_tcp_lines(stream))
+                let detail = Paragraph::new(build_tcp_lines(stream, theme))
                     .block(
                         Block::default()
                             .borders(Borders::ALL)
@@ -547,7 +567,7 @@ fn draw_detail(f: &mut Frame, state: &AppState, area: Rect, filtered: &[(usize, 
                 f.render_widget(detail, area);
             }
             FlowEntry::Dns { exchange } => {
-                let detail = Paragraph::new(build_dns_lines(exchange))
+                let detail = Paragraph::new(build_dns_lines(exchange, theme))
                     .block(
                         Block::default()
                             .borders(Borders::ALL)
@@ -559,7 +579,7 @@ fn draw_detail(f: &mut Frame, state: &AppState, area: Rect, filtered: &[(usize, 
                 f.render_widget(detail, area);
             }
             FlowEntry::Udp { exchange } => {
-                let detail = Paragraph::new(build_udp_lines(exchange))
+                let detail = Paragraph::new(build_udp_lines(exchange, theme))
                     .block(
                         Block::default()
                             .borders(Borders::ALL)
@@ -578,7 +598,7 @@ fn draw_detail(f: &mut Frame, state: &AppState, area: Rect, filtered: &[(usize, 
 ///
 /// Lines are displayed verbatim; the cursor is shown as a reversed-style
 /// block on the character under the cursor (or a space if at end-of-line).
-fn draw_editor(f: &mut Frame, session: &mut EditSession, area: Rect) {
+fn draw_editor(f: &mut Frame, session: &mut EditSession, area: Rect, theme: &Theme) {
     // Reserve 1 line for the action hint at the bottom.
     let chunks = Layout::default()
         .direction(Direction::Vertical)
@@ -617,8 +637,8 @@ fn draw_editor(f: &mut Frame, session: &mut EditSession, area: Rect) {
                 Span::styled(
                     cursor_char,
                     Style::default()
-                        .bg(Color::White)
-                        .fg(Color::Black)
+                        .bg(theme.editor_cursor_bg.0)
+                        .fg(theme.editor_cursor_fg.0)
                         .add_modifier(Modifier::BOLD),
                 ),
                 Span::raw(after),
@@ -632,7 +652,7 @@ fn draw_editor(f: &mut Frame, session: &mut EditSession, area: Rect) {
         (
             " \u{270e} Editing Request — parse error: check request line ",
             "  fix the request line (METHOD URI HTTP/1.x), then Esc  ",
-            Color::Red,
+            theme.editor_border_error.0,
         )
     } else if session.typing {
         let t = if session.binary_body {
@@ -643,13 +663,13 @@ fn draw_editor(f: &mut Frame, session: &mut EditSession, area: Rect) {
         (
             t,
             "  arrows/Home/End: move  Enter: newline  Backspace/Del: delete  Esc: done editing  ",
-            Color::Cyan,
+            theme.editor_border_typing.0,
         )
     } else {
         (
             " \u{270e} Request ready ",
             "  f: forward  e: edit  d: drop  Esc: discard edits  ",
-            Color::Yellow,
+            theme.editor_border_ready.0,
         )
     };
 
@@ -663,19 +683,27 @@ fn draw_editor(f: &mut Frame, session: &mut EditSession, area: Rect) {
         .wrap(Wrap { trim: false });
     f.render_widget(editor, chunks[0]);
 
-    let hint =
-        Paragraph::new(hint_text).style(Style::default().bg(Color::DarkGray).fg(Color::White));
+    let hint = Paragraph::new(hint_text).style(
+        Style::default()
+            .bg(theme.status_bar_bg.0)
+            .fg(theme.status_bar_fg.0),
+    );
     f.render_widget(hint, chunks[1]);
 }
 
-fn draw_intercept_pane(f: &mut Frame, area: Rect, request: &proxyapi_models::ProxiedRequest) {
+fn draw_intercept_pane(
+    f: &mut Frame,
+    area: Rect,
+    request: &proxyapi_models::ProxiedRequest,
+    theme: &Theme,
+) {
     // Split the pane: request content on top, action hint at bottom
     let chunks = Layout::default()
         .direction(Direction::Vertical)
         .constraints([Constraint::Min(3), Constraint::Length(1)])
         .split(area);
 
-    let mut lines = build_request_lines(request);
+    let mut lines = build_request_lines(request, theme);
 
     // Add a blank line before the hint so it doesn't crowd the body
     lines.push(Line::from(""));
@@ -685,27 +713,30 @@ fn draw_intercept_pane(f: &mut Frame, area: Rect, request: &proxyapi_models::Pro
             Block::default()
                 .borders(Borders::ALL)
                 .title(" \u{23f8} Intercepted Request ")
-                .border_style(Style::default().fg(Color::Yellow)),
+                .border_style(Style::default().fg(theme.intercept_border.0)),
         )
         .wrap(Wrap { trim: false });
     f.render_widget(content, chunks[0]);
 
     let action_bar = Paragraph::new("  [f] Forward    [d] Drop (504)    [e] Edit  ").style(
         Style::default()
-            .bg(Color::Yellow)
-            .fg(Color::Black)
+            .bg(theme.intercept_action_bg.0)
+            .fg(theme.intercept_action_fg.0)
             .add_modifier(Modifier::BOLD),
     );
     f.render_widget(action_bar, chunks[1]);
 }
 
-fn build_request_lines(request: &proxyapi_models::ProxiedRequest) -> Vec<Line<'static>> {
+fn build_request_lines(
+    request: &proxyapi_models::ProxiedRequest,
+    theme: &Theme,
+) -> Vec<Line<'static>> {
     let mut lines = vec![
         Line::from(vec![
             Span::styled(
                 request.method().as_str().to_owned(),
                 Style::default()
-                    .fg(Color::Green)
+                    .fg(theme.detail_request_method.0)
                     .add_modifier(Modifier::BOLD),
             ),
             Span::raw(" "),
@@ -720,7 +751,7 @@ fn build_request_lines(request: &proxyapi_models::ProxiedRequest) -> Vec<Line<'s
         lines.push(Line::from(vec![
             Span::styled(
                 String::from_utf8_lossy(field.name()).into_owned(),
-                Style::default().fg(Color::Cyan),
+                Style::default().fg(theme.detail_header_name.0),
             ),
             Span::raw(": "),
             Span::raw(String::from_utf8_lossy(field.value()).into_owned()),
@@ -737,7 +768,7 @@ fn build_request_lines(request: &proxyapi_models::ProxiedRequest) -> Vec<Line<'s
                     request.body().len(),
                     metadata.total_seen
                 ),
-                Style::default().fg(Color::Yellow),
+                Style::default().fg(theme.detail_truncated.0),
             )));
         }
         lines.extend(render_body_lines(request.headers(), request.body()));
@@ -746,14 +777,19 @@ fn build_request_lines(request: &proxyapi_models::ProxiedRequest) -> Vec<Line<'s
     lines
 }
 
-fn build_response_lines(response: &proxyapi_models::ProxiedResponse) -> Vec<Line<'static>> {
+fn build_response_lines(
+    response: &proxyapi_models::ProxiedResponse,
+    theme: &Theme,
+) -> Vec<Line<'static>> {
     let status = response.status();
 
     let mut lines = vec![
         Line::from(vec![
             Span::styled(
                 status.to_string(),
-                status_style(status.as_u16()).add_modifier(Modifier::BOLD),
+                theme
+                    .status_style(status.as_u16())
+                    .add_modifier(Modifier::BOLD),
             ),
             Span::raw(" "),
             Span::raw(format!("{:?}", response.version())),
@@ -765,7 +801,7 @@ fn build_response_lines(response: &proxyapi_models::ProxiedResponse) -> Vec<Line
         lines.push(Line::from(vec![
             Span::styled(
                 String::from_utf8_lossy(field.name()).into_owned(),
-                Style::default().fg(Color::Cyan),
+                Style::default().fg(theme.detail_header_name.0),
             ),
             Span::raw(": "),
             Span::raw(String::from_utf8_lossy(field.value()).into_owned()),
@@ -782,7 +818,7 @@ fn build_response_lines(response: &proxyapi_models::ProxiedResponse) -> Vec<Line
                     response.body().len(),
                     metadata.total_seen
                 ),
-                Style::default().fg(Color::Yellow),
+                Style::default().fg(theme.detail_truncated.0),
             )));
         }
         lines.extend(render_body_lines(response.headers(), response.body()));
@@ -809,6 +845,7 @@ fn build_frames_lines(
     closed: bool,
     scroll: usize,
     follow: bool,
+    theme: &Theme,
 ) -> Vec<Line<'static>> {
     if frames.is_empty() {
         return vec![Line::from(if closed {
@@ -823,8 +860,8 @@ fn build_frames_lines(
         .skip(scroll)
         .map(|f| {
             let (dir_sym, dir_color) = match f.direction {
-                WsDirection::ClientToServer => ("\u{2191}", Color::Yellow), // ↑
-                WsDirection::ServerToClient => ("\u{2193}", Color::Cyan),   // ↓
+                WsDirection::ClientToServer => ("\u{2191}", theme.ws_dir_up.0), // ↑
+                WsDirection::ServerToClient => ("\u{2193}", theme.ws_dir_down.0), // ↓
             };
             let op = match f.opcode {
                 WsOpcode::Text => "txt ",
@@ -852,7 +889,7 @@ fn build_frames_lines(
             Line::from(vec![
                 Span::styled(dir_sym, Style::default().fg(dir_color)),
                 Span::raw(" "),
-                Span::styled(op, Style::default().fg(Color::DarkGray)),
+                Span::styled(op, Style::default().fg(theme.ws_opcode.0)),
                 Span::raw(format!(" {}B{} ", f.payload.len(), truncated)),
                 Span::raw(payload_preview),
             ])
@@ -863,21 +900,21 @@ fn build_frames_lines(
         lines.push(Line::from(""));
         lines.push(Line::from(Span::styled(
             "\u{2500}\u{2500} Connection closed \u{2500}\u{2500}",
-            Style::default().fg(Color::Red),
+            Style::default().fg(theme.ws_closed_banner.0),
         )));
     } else if follow {
         lines.push(Line::from(Span::styled(
             "[FOLLOW]",
-            Style::default().fg(Color::DarkGray),
+            Style::default().fg(theme.ws_follow_indicator.0),
         )));
     }
     lines
 }
 
-fn build_tcp_lines(stream: &CapturedTcpStream) -> Vec<Line<'static>> {
+fn build_tcp_lines(stream: &CapturedTcpStream, theme: &Theme) -> Vec<Line<'static>> {
     let mut lines = vec![
         Line::from(vec![
-            Span::styled("Target: ", Style::default().fg(Color::Cyan)),
+            Span::styled("Target: ", Style::default().fg(theme.detail_field_label.0)),
             Span::raw(stream.target.clone()),
         ]),
         Line::from(format!(
@@ -889,8 +926,8 @@ fn build_tcp_lines(stream: &CapturedTcpStream) -> Vec<Line<'static>> {
     ];
     for chunk in &stream.chunks {
         let (symbol, color) = match chunk.direction {
-            StreamDirection::ClientToServer => ("↑", Color::Yellow),
-            StreamDirection::ServerToClient => ("↓", Color::Cyan),
+            StreamDirection::ClientToServer => ("↑", theme.ws_dir_up.0),
+            StreamDirection::ServerToClient => ("↓", theme.ws_dir_down.0),
         };
         let text_preview = std::str::from_utf8(&chunk.payload)
             .ok()
@@ -923,13 +960,13 @@ fn build_tcp_lines(stream: &CapturedTcpStream) -> Vec<Line<'static>> {
     lines
 }
 
-fn build_dns_lines(exchange: &CapturedDnsExchange) -> Vec<Line<'static>> {
+fn build_dns_lines(exchange: &CapturedDnsExchange, theme: &Theme) -> Vec<Line<'static>> {
     let mut lines = vec![
         Line::from(vec![
             Span::styled(
                 dns_query_type(exchange.query_type),
                 Style::default()
-                    .fg(Color::LightBlue)
+                    .fg(theme.dns_query_type.0)
                     .add_modifier(Modifier::BOLD),
             ),
             Span::raw(" "),
@@ -963,14 +1000,14 @@ fn build_dns_lines(exchange: &CapturedDnsExchange) -> Vec<Line<'static>> {
     lines
 }
 
-fn build_udp_lines(exchange: &CapturedUdpExchange) -> Vec<Line<'static>> {
+fn build_udp_lines(exchange: &CapturedUdpExchange, theme: &Theme) -> Vec<Line<'static>> {
     vec![
         Line::from(vec![
-            Span::styled("Client: ", Style::default().fg(Color::Cyan)),
+            Span::styled("Client: ", Style::default().fg(theme.detail_field_label.0)),
             Span::raw(exchange.client.clone()),
         ]),
         Line::from(vec![
-            Span::styled("Target: ", Style::default().fg(Color::Cyan)),
+            Span::styled("Target: ", Style::default().fg(theme.detail_field_label.0)),
             Span::raw(exchange.target.clone()),
         ]),
         Line::from(format!(
@@ -1067,84 +1104,6 @@ fn format_duration(ms: i64) -> String {
     }
 }
 
-fn proto_color(proto: &str) -> Color {
-    match proto {
-        "HTTPS" => Color::LightGreen,
-        "WSS" => Color::LightCyan,
-        "HTTP" => Color::Yellow,
-        "WS" => Color::LightMagenta,
-        "TCP" => Color::LightBlue,
-        "UDP" => Color::LightCyan,
-        "DNS" => Color::LightMagenta,
-        _ => Color::White,
-    }
-}
-
-fn method_color(method: &str) -> Color {
-    match method {
-        "GET" => Color::LightGreen,
-        "POST" => Color::Yellow,
-        "PUT" => Color::LightBlue,
-        "DELETE" => Color::LightRed,
-        "PATCH" => Color::LightMagenta,
-        "HEAD" | "OPTIONS" => Color::Gray,
-        _ => Color::White,
-    }
-}
-
-fn status_style(status: u16) -> Style {
-    match status {
-        100..=199 => Style::default().fg(Color::Gray),
-        200..=299 => Style::default().fg(Color::LightGreen),
-        300..=399 => Style::default().fg(Color::LightBlue),
-        400..=499 => Style::default().fg(Color::LightRed),
-        500..=599 => Style::default().fg(Color::Red).add_modifier(Modifier::BOLD),
-        _ => Style::default().fg(Color::White),
-    }
-}
-
-fn content_type_color(ct: &str) -> Color {
-    if ct == "[no content]" {
-        return Color::DarkGray;
-    }
-    let base = ct.split(';').next().unwrap_or(ct).trim();
-    match base {
-        t if t.contains("json") => Color::LightCyan,
-        t if t.starts_with("text/html") => Color::LightYellow,
-        t if t.contains("javascript") || t.contains("ecmascript") => Color::LightBlue,
-        t if t.starts_with("text/css") => Color::LightMagenta,
-        t if t.starts_with("text/") => Color::Gray,
-        t if t.starts_with("image/") => Color::Magenta,
-        t if t.starts_with("font/") => Color::Blue,
-        t if t.contains("xml") => Color::Cyan,
-        t if t.starts_with("multipart/") => Color::Yellow,
-        t if t.starts_with("application/octet-stream") => Color::DarkGray,
-        _ => Color::White,
-    }
-}
-
-fn size_color(bytes: usize) -> Color {
-    match bytes {
-        0 => Color::DarkGray,
-        1..=1_023 => Color::Gray,
-        1_024..=10_239 => Color::White,
-        10_240..=102_399 => Color::LightYellow,
-        102_400..=1_048_575 => Color::Yellow,
-        _ => Color::LightRed,
-    }
-}
-
-fn duration_color(ms: i64) -> Color {
-    match ms {
-        ms if ms < 0 => Color::DarkGray,
-        0..=99 => Color::LightGreen,
-        100..=299 => Color::Green,
-        300..=699 => Color::Yellow,
-        700..=1_999 => Color::LightRed,
-        _ => Color::Red,
-    }
-}
-
 fn centered_rect(percent_x: u16, percent_y: u16, r: Rect) -> Rect {
     let vert = Layout::default()
         .direction(Direction::Vertical)
@@ -1164,7 +1123,7 @@ fn centered_rect(percent_x: u16, percent_y: u16, r: Rect) -> Rect {
         .split(vert[1])[1]
 }
 
-fn draw_help_modal(f: &mut Frame) {
+fn draw_help_modal(f: &mut Frame, theme: &Theme) {
     let area = centered_rect(62, 85, f.area());
     f.render_widget(Clear, area);
 
@@ -1224,12 +1183,15 @@ fn draw_help_modal(f: &mut Frame) {
                 Line::from(Span::styled(
                     key.to_string(),
                     Style::default()
-                        .fg(Color::Yellow)
+                        .fg(theme.help_section.0)
                         .add_modifier(Modifier::BOLD),
                 ))
             } else {
                 Line::from(vec![
-                    Span::styled(format!("  {:<22}", key), Style::default().fg(Color::Cyan)),
+                    Span::styled(
+                        format!("  {:<22}", key),
+                        Style::default().fg(theme.help_key.0),
+                    ),
                     Span::raw(desc.to_string()),
                 ])
             }
@@ -1241,7 +1203,7 @@ fn draw_help_modal(f: &mut Frame) {
             Block::default()
                 .borders(Borders::ALL)
                 .title(" Keybindings — ? or Esc to close ")
-                .border_style(Style::default().fg(Color::Cyan)),
+                .border_style(Style::default().fg(theme.help_border.0)),
         )
         .wrap(Wrap { trim: false });
 
@@ -1338,54 +1300,65 @@ mod tests {
         assert_eq!(format_duration(1_250), "1.2s");
         assert_eq!(format_time(i64::MAX), "-");
 
-        assert_eq!(proto_color("HTTPS"), Color::LightGreen);
-        assert_eq!(proto_color("WSS"), Color::LightCyan);
-        assert_eq!(proto_color("HTTP"), Color::Yellow);
-        assert_eq!(proto_color("WS"), Color::LightMagenta);
-        assert_eq!(proto_color("OTHER"), Color::White);
+        let theme = Theme::default();
 
-        assert_eq!(method_color("GET"), Color::LightGreen);
-        assert_eq!(method_color("POST"), Color::Yellow);
-        assert_eq!(method_color("PUT"), Color::LightBlue);
-        assert_eq!(method_color("DELETE"), Color::LightRed);
-        assert_eq!(method_color("PATCH"), Color::LightMagenta);
-        assert_eq!(method_color("HEAD"), Color::Gray);
-        assert_eq!(method_color("CUSTOM"), Color::White);
+        assert_eq!(theme.proto_color("HTTPS"), Color::LightGreen);
+        assert_eq!(theme.proto_color("WSS"), Color::LightCyan);
+        assert_eq!(theme.proto_color("HTTP"), Color::Yellow);
+        assert_eq!(theme.proto_color("WS"), Color::LightMagenta);
+        assert_eq!(theme.proto_color("OTHER"), Color::White);
 
-        assert_eq!(content_type_color("[no content]"), Color::DarkGray);
-        assert_eq!(content_type_color("application/json"), Color::LightCyan);
-        assert_eq!(content_type_color("text/html"), Color::LightYellow);
-        assert_eq!(content_type_color("text/css"), Color::LightMagenta);
-        assert_eq!(content_type_color("image/png"), Color::Magenta);
-        assert_eq!(content_type_color("font/woff2"), Color::Blue);
-        assert_eq!(content_type_color("application/xml"), Color::Cyan);
-        assert_eq!(content_type_color("multipart/form-data"), Color::Yellow);
+        assert_eq!(theme.method_color("GET"), Color::LightGreen);
+        assert_eq!(theme.method_color("POST"), Color::Yellow);
+        assert_eq!(theme.method_color("PUT"), Color::LightBlue);
+        assert_eq!(theme.method_color("DELETE"), Color::LightRed);
+        assert_eq!(theme.method_color("PATCH"), Color::LightMagenta);
+        assert_eq!(theme.method_color("HEAD"), Color::Gray);
+        assert_eq!(theme.method_color("CUSTOM"), Color::White);
+
+        assert_eq!(theme.content_type_color("[no content]"), Color::DarkGray);
         assert_eq!(
-            content_type_color("application/octet-stream"),
+            theme.content_type_color("application/json"),
+            Color::LightCyan
+        );
+        assert_eq!(theme.content_type_color("text/html"), Color::LightYellow);
+        assert_eq!(theme.content_type_color("text/css"), Color::LightMagenta);
+        assert_eq!(theme.content_type_color("image/png"), Color::Magenta);
+        assert_eq!(theme.content_type_color("font/woff2"), Color::Blue);
+        assert_eq!(theme.content_type_color("application/xml"), Color::Cyan);
+        assert_eq!(
+            theme.content_type_color("multipart/form-data"),
+            Color::Yellow
+        );
+        assert_eq!(
+            theme.content_type_color("application/octet-stream"),
             Color::DarkGray
         );
-        assert_eq!(content_type_color("application/x-custom"), Color::White);
+        assert_eq!(
+            theme.content_type_color("application/x-custom"),
+            Color::White
+        );
 
-        assert_eq!(size_color(0), Color::DarkGray);
-        assert_eq!(size_color(512), Color::Gray);
-        assert_eq!(size_color(2_048), Color::White);
-        assert_eq!(size_color(20_000), Color::LightYellow);
-        assert_eq!(size_color(200_000), Color::Yellow);
-        assert_eq!(size_color(2_000_000), Color::LightRed);
+        assert_eq!(theme.size_color(0), Color::DarkGray);
+        assert_eq!(theme.size_color(512), Color::Gray);
+        assert_eq!(theme.size_color(2_048), Color::White);
+        assert_eq!(theme.size_color(20_000), Color::LightYellow);
+        assert_eq!(theme.size_color(200_000), Color::Yellow);
+        assert_eq!(theme.size_color(2_000_000), Color::LightRed);
 
-        assert_eq!(duration_color(-1), Color::DarkGray);
-        assert_eq!(duration_color(50), Color::LightGreen);
-        assert_eq!(duration_color(150), Color::Green);
-        assert_eq!(duration_color(500), Color::Yellow);
-        assert_eq!(duration_color(1_000), Color::LightRed);
-        assert_eq!(duration_color(3_000), Color::Red);
+        assert_eq!(theme.duration_color(-1), Color::DarkGray);
+        assert_eq!(theme.duration_color(50), Color::LightGreen);
+        assert_eq!(theme.duration_color(150), Color::Green);
+        assert_eq!(theme.duration_color(500), Color::Yellow);
+        assert_eq!(theme.duration_color(1_000), Color::LightRed);
+        assert_eq!(theme.duration_color(3_000), Color::Red);
 
-        assert_eq!(status_style(100).fg, Some(Color::Gray));
-        assert_eq!(status_style(204).fg, Some(Color::LightGreen));
-        assert_eq!(status_style(302).fg, Some(Color::LightBlue));
-        assert_eq!(status_style(404).fg, Some(Color::LightRed));
-        assert_eq!(status_style(503).fg, Some(Color::Red));
-        assert_eq!(status_style(700).fg, Some(Color::White));
+        assert_eq!(theme.status_style(100).fg, Some(Color::Gray));
+        assert_eq!(theme.status_style(204).fg, Some(Color::LightGreen));
+        assert_eq!(theme.status_style(302).fg, Some(Color::LightBlue));
+        assert_eq!(theme.status_style(404).fg, Some(Color::LightRed));
+        assert_eq!(theme.status_style(503).fg, Some(Color::Red));
+        assert_eq!(theme.status_style(700).fg, Some(Color::White));
     }
 
     #[test]
@@ -1425,23 +1398,25 @@ mod tests {
             false,
         ));
 
-        assert!(build_request_lines(&req)
+        let theme = Theme::default();
+
+        assert!(build_request_lines(&req, &theme)
             .iter()
             .any(|line| line.to_string().contains("PATCH")));
-        assert!(build_response_lines(&res)
+        assert!(build_response_lines(&res, &theme)
             .iter()
             .any(|line| line.to_string().contains("201")));
         assert!(abbrev_content_type(res.headers()).contains("application/json"));
 
-        let open_empty = build_frames_lines(&VecDeque::new(), false, 0, false);
+        let open_empty = build_frames_lines(&VecDeque::new(), false, 0, false, &theme);
         assert_eq!(open_empty[0].to_string(), "Waiting for frames...");
-        let closed_empty = build_frames_lines(&VecDeque::new(), true, 0, false);
+        let closed_empty = build_frames_lines(&VecDeque::new(), true, 0, false, &theme);
         assert_eq!(
             closed_empty[0].to_string(),
             "No frames captured (connection closed)"
         );
 
-        let followed = build_frames_lines(&frames, false, 0, true);
+        let followed = build_frames_lines(&frames, false, 0, true, &theme);
         let followed_text = followed
             .iter()
             .map(ToString::to_string)
@@ -1451,7 +1426,7 @@ mod tests {
         assert!(followed_text.contains("[trunc]"));
         assert!(followed_text.contains("[FOLLOW]"));
 
-        let closed = build_frames_lines(&frames, true, 1, false);
+        let closed = build_frames_lines(&frames, true, 1, false, &theme);
         let closed_text = closed
             .iter()
             .map(ToString::to_string)

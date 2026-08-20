@@ -202,10 +202,46 @@ proxelar -m wireguard -b 0.0.0.0 -p 51820 \
 | `--api-token` | Fixed bearer token for the GUI/headless API; random when omitted | random |
 | `--launch-browser` | Launch an isolated Chromium-family profile using the proxy | off |
 | `--wireguard-endpoint` | Public/LAN `HOST:PORT` written to the generated client config | derived from bind route |
+| `--theme` | TUI color theme: `default`/`dark`/`light`, `system`, a bundled name (`cyberdream`, `cyberdream-light`), or `~/.proxelar/themes/<name>.toml` | `default` |
 
 </details>
 
 `--upstream-trust insecure` disables upstream certificate and hostname verification. Use it only for controlled debugging.
+
+---
+
+## Theming
+
+The TUI's colors are configurable via `~/.proxelar/config.toml`:
+
+```toml
+theme = "cyberdream"
+```
+
+`theme` accepts:
+
+- `default` / `dark` / `light` — the built-in palette (plain ANSI colors, so it already adapts to whichever light/dark scheme your terminal itself uses)
+- `system` — auto-detects the terminal/OS appearance and picks `theme_dark` or `theme_light` below (both default to `default` if unset)
+- a bundled name: `cyberdream`, `cyberdream-light`
+- a custom name resolved from `~/.proxelar/themes/<name>.toml`
+
+For light/dark auto-switching:
+
+```toml
+theme = "system"
+theme_dark = "cyberdream"
+theme_light = "cyberdream-light"
+```
+
+To tweak a handful of colors without creating a theme file:
+
+```toml
+[colors]
+status_bar_bg = "#222222"
+status_bar_fg = "#eeeeee"
+```
+
+A custom theme file only needs to specify the colors it changes — everything else falls back to the default palette. Colors are `"#rrggbb"` hex or a named ANSI color (`"red"`, `"light_green"`, `"dark_gray"`, ...). Unknown keys or invalid colors print a warning and fall back rather than failing to start. `--theme <name>` on the command line overrides `config.toml`.
 
 ---
 
