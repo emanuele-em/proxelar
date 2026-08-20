@@ -19,7 +19,7 @@ proxelar addon <list|inspect|verify|install> [OPTIONS]
 | `--addons-dir` | | `CA_DIR/addons` | Local addon catalog used by runtime and addon commands |
 | `--quiet` | `-q` | | Suppress per-request output (only used with `-i terminal`) |
 | `--gui-port` | | `8081` | Web GUI port (only used with `-i gui`) |
-| `--ca-dir` | | `~/.proxelar` | Directory for CA certificate and key files |
+| `--ca-dir` | | `$XDG_CONFIG_HOME/proxelar` if set, else `~/.proxelar` | Directory for CA certificate/key, addons, and other proxelar state |
 | `--body-capture-limit` | | `free` | Maximum body bytes buffered for capture/editing; use `free`, `unlimited`, or `none` for unlimited |
 | `--upstream-trust` | | `default` | Upstream TLS trust policy: `default`, `default+ca:/path/ca.pem`, `ca-only:/path/ca.pem`, or `insecure` |
 | `--upstream-proxy` | | — | Chain traffic through `http://HOST:PORT` or `socks5://HOST:PORT` |
@@ -47,6 +47,17 @@ proxelar addon <list|inspect|verify|install> [OPTIONS]
 | Variable | Description |
 |----------|-------------|
 | `RUST_LOG` | Controls log verbosity. Examples: `debug`, `proxyapi=trace`, `warn` |
+| `XDG_CONFIG_HOME` | When set to a non-empty absolute path, proxelar keeps its state in `$XDG_CONFIG_HOME/proxelar` |
+
+### State directory precedence
+
+Proxelar keeps its CA certificate/key, addons, and other local state in one directory, resolved in this order:
+
+1. `--ca-dir <DIR>` — explicit override, always wins
+2. `$XDG_CONFIG_HOME/proxelar` — used when that env var is set to a non-empty absolute path (relative values are ignored, per the XDG base directory spec)
+3. `~/.proxelar` — default when neither of the above applies
+
+State is never migrated between these locations. If `XDG_CONFIG_HOME` points somewhere new while an old `~/.proxelar` still exists, proxelar logs a warning and generates a fresh CA; pass `--ca-dir ~/.proxelar` to keep using the existing one.
 
 ## Examples
 

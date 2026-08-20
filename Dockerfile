@@ -22,6 +22,8 @@ RUN apt-get update && apt-get install -y \
 
 COPY --from=builder /app/target/release/proxelar /usr/local/bin/proxelar
 
+# The container stores state at /root/.proxelar. Setting XDG_CONFIG_HOME or
+# passing --ca-dir moves it elsewhere, in which case mount that path instead.
 VOLUME /root/.proxelar
 
 EXPOSE 8080 8081

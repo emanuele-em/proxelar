@@ -12,7 +12,7 @@ This starts Proxelar in forward proxy mode with the interactive TUI on `127.0.0.
 
 Configure your system or browser proxy to `127.0.0.1:8080`, then visit [http://proxel.ar](http://proxel.ar) through the proxy. The page provides direct certificate downloads and platform-specific installation instructions.
 
-Alternatively, manually install `~/.proxelar/proxelar-ca.pem`. See [CA Certificate](./ca-certificate.md) for all platforms.
+Alternatively, manually install `proxelar-ca.pem` from the state directory (`~/.proxelar` by default). See [CA Certificate](./ca-certificate.md) for all platforms.
 
 ## 3. Browse through the proxy
 

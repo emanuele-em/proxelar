@@ -1,4 +1,5 @@
 mod browser;
+mod ca_dir;
 mod cli;
 mod interface;
 mod wireguard_setup;
@@ -32,14 +33,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .with_env_filter(tracing_subscriber::EnvFilter::from_default_env())
         .init();
 
-    let ca_dir = args.ca_dir.clone().unwrap_or_else(|| {
-        dirs::home_dir()
-            .unwrap_or_else(|| {
-                tracing::warn!("Could not determine home directory, using current directory");
-                std::path::PathBuf::from(".")
-            })
-            .join(".proxelar")
-    });
+    let ca_dir = ca_dir::resolve_ca_dir(args.ca_dir.clone());
     #[cfg(feature = "scripting")]
     let addons_dir = args
         .addons_dir

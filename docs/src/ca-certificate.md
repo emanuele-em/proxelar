@@ -4,12 +4,14 @@ Proxelar intercepts HTTPS traffic by generating a local Certificate Authority (C
 
 ## Automatic generation
 
-On first run, Proxelar generates a 4096-bit RSA CA certificate and private key in `~/.proxelar/`:
+On first run, Proxelar generates a 4096-bit RSA CA certificate and private key in its state directory:
 
-- `~/.proxelar/proxelar-ca.pem` — CA certificate
-- `~/.proxelar/proxelar-ca.key` — CA private key (mode 0600)
+- `proxelar-ca.pem` — CA certificate
+- `proxelar-ca.key` — CA private key (mode 0600)
 
 If these files already exist, they are reused.
+
+> The paths on this page assume the default state directory. If `XDG_CONFIG_HOME` is set, or you pass `--ca-dir`, substitute that directory for `~/.proxelar` throughout. See [state directory precedence](./cli-reference.md#state-directory-precedence).
 
 ## Certificate download server
 
@@ -68,7 +70,7 @@ proxelar --ca-dir /path/to/certs
 
 ## Removing the CA
 
-When you are done, remove the Proxelar CA from every trust store where you installed it. The generated files live in `~/.proxelar/` by default, but deleting those files does not remove trust from your OS, browser, or mobile device.
+When you are done, remove the Proxelar CA from every trust store where you installed it. The generated files live in the state directory (`~/.proxelar/` by default), but deleting those files does not remove trust from your OS, browser, or mobile device.
 
 See [CA trust and uninstall](./guides/ca-trust.md) for platform-specific uninstall notes and limitations such as certificate pinning.
 
