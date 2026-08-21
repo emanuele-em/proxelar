@@ -60,6 +60,53 @@ impl HttpService for EchoService {
     }
 }
 
+struct BodyHintsService {
+    hints: Option<tokio::sync::oneshot::Sender<(Option<u64>, bool)>>,
+}
+
+impl HttpService for BodyHintsService {
+    fn call(
+        &mut self,
+        request: ProxyRequest,
+    ) -> BoxFuture<'_, Result<ProxyResponse, ProtocolError>> {
+        if let Some(hints) = self.hints.take() {
+            let _ = hints.send((
+                request.body.exact_length(),
+                request.body.may_have_trailers(),
+            ));
+        }
+        Box::pin(async {
+            Ok(ProxyResponse::new(
+                ResponseHead::new(StatusCode::OK, Version::HTTP_11, HeaderBlock::new()),
+                ProxyBody::empty(),
+            ))
+        })
+    }
+}
+
+#[tokio::test]
+async fn bodyless_request_has_zero_length_without_trailers() {
+    let (mut peer, server_io) = tokio::io::duplex(1024);
+    let (hints_tx, hints_rx) = tokio::sync::oneshot::channel();
+    let server = tokio::spawn(serve_connection(
+        server_io,
+        BodyHintsService {
+            hints: Some(hints_tx),
+        },
+        ConnectionConfig::default(),
+    ));
+
+    peer.write_all(b"GET / HTTP/1.1\r\nHost: example.test\r\nConnection: close\r\n\r\n")
+        .await
+        .unwrap();
+    assert_eq!(hints_rx.await.unwrap(), (Some(0), false));
+
+    let mut response = Vec::new();
+    peer.read_to_end(&mut response).await.unwrap();
+    assert!(response.starts_with(b"HTTP/1.1 200 OK\r\n"));
+    server.await.unwrap().unwrap();
+}
+
 #[tokio::test]
 async fn client_and_server_stream_bodies_trailers_and_keep_alive() {
     let (client_io, server_io) = tokio::io::duplex(256);
