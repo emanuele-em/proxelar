@@ -158,26 +158,13 @@ impl ReverseH3Upstream {
             .ok_or_else(|| malformed("HTTP/3 upstream target has no authority"))?;
         let host = authority.host();
         let port = authority.port_u16().unwrap_or(443);
-        let remote_addr = match self.inner.remote_addr {
-            Some(remote_addr) => remote_addr,
+        let remote_addrs = match self.inner.remote_addr {
+            Some(remote_addr) => vec![remote_addr],
             None => tokio::net::lookup_host((host, port))
                 .await
                 .map_err(|error| protocol(ErrorKind::Io, error))?
-                .next()
-                .ok_or_else(|| malformed("HTTP/3 upstream target resolved to no addresses"))?,
+                .collect(),
         };
-        let bind_addr = match remote_addr.ip() {
-            IpAddr::V4(_) => (IpAddr::V4(Ipv4Addr::UNSPECIFIED), 0),
-            IpAddr::V6(_) => (IpAddr::V6(Ipv6Addr::UNSPECIFIED), 0),
-        };
-        let socket = UdpSocket::bind(bind_addr)
-            .await
-            .map_err(|error| protocol(ErrorKind::Io, error))?;
-        socket
-            .connect(remote_addr)
-            .await
-            .map_err(|error| protocol(ErrorKind::Io, error))?;
-        let socket = Socket::try_from(socket).map_err(|error| protocol(ErrorKind::Io, error))?;
 
         let server_name =
             ServerName::try_from(host.to_owned()).map_err(|error| malformed(error.to_string()))?;
@@ -218,12 +205,61 @@ impl ReverseH3Upstream {
                 connection_hook: Some(Arc::new(hook)),
             },
         );
-        let (driver, controller) = ClientH3Driver::new(default_http3_settings());
-        let connection = connect_with_config(socket, Some(host), &params, driver)
-            .await
-            .map_err(|error| protocol(ErrorKind::Io, error))?;
-        Ok(H3Client::new(connection, controller))
+        connect_h3_candidates(remote_addrs, |remote_addr| {
+            connect_h3_candidate(remote_addr, host, &params)
+        })
+        .await
     }
+}
+
+async fn connect_h3_candidates<T, I, F, Fut>(
+    candidates: I,
+    mut connect: F,
+) -> Result<T, ProtocolError>
+where
+    I: IntoIterator<Item = SocketAddr>,
+    F: FnMut(SocketAddr) -> Fut,
+    Fut: Future<Output = Result<T, ProtocolError>>,
+{
+    let mut last_error = None;
+    for remote_addr in candidates {
+        match connect(remote_addr).await {
+            Ok(connection) => return Ok(connection),
+            Err(error) => last_error = Some(error),
+        }
+    }
+    Err(last_error.unwrap_or_else(|| malformed("HTTP/3 upstream target resolved to no addresses")))
+}
+
+async fn connect_h3_candidate(
+    remote_addr: SocketAddr,
+    host: &str,
+    params: &ConnectionParams<'_>,
+) -> Result<H3Client, ProtocolError> {
+    let bind_addr = match remote_addr.ip() {
+        IpAddr::V4(_) => (IpAddr::V4(Ipv4Addr::UNSPECIFIED), 0),
+        IpAddr::V6(_) => (IpAddr::V6(Ipv6Addr::UNSPECIFIED), 0),
+    };
+    let socket = UdpSocket::bind(bind_addr)
+        .await
+        .map_err(|error| h3_connect_error(remote_addr, error))?;
+    socket
+        .connect(remote_addr)
+        .await
+        .map_err(|error| h3_connect_error(remote_addr, error))?;
+    let socket = Socket::try_from(socket).map_err(|error| h3_connect_error(remote_addr, error))?;
+    let (driver, controller) = ClientH3Driver::new(default_http3_settings());
+    let connection = connect_with_config(socket, Some(host), params, driver)
+        .await
+        .map_err(|error| h3_connect_error(remote_addr, error))?;
+    Ok(H3Client::new(connection, controller))
+}
+
+fn h3_connect_error(remote_addr: SocketAddr, error: impl std::fmt::Display) -> ProtocolError {
+    ProtocolError::new(
+        ErrorKind::Io,
+        format!("HTTP/3 connection to {remote_addr} failed: {error}"),
+    )
 }
 
 pub(super) struct DynamicH3CertificateHook {
@@ -930,6 +966,39 @@ mod tests {
 
         clear_if_current(&mut cached, &current);
         assert!(cached.is_none());
+    }
+
+    #[tokio::test]
+    async fn h3_connect_tries_candidates_in_resolver_order() {
+        let first: SocketAddr = "127.0.0.1:443".parse().unwrap();
+        let second: SocketAddr = "[::1]:443".parse().unwrap();
+        let attempts = Arc::new(Mutex::new(Vec::new()));
+
+        let connected = connect_h3_candidates([first, second], {
+            let attempts = Arc::clone(&attempts);
+            move |candidate| {
+                let attempts = Arc::clone(&attempts);
+                async move {
+                    attempts
+                        .lock()
+                        .unwrap_or_else(|error| error.into_inner())
+                        .push(candidate);
+                    if candidate == first {
+                        Err(protocol(ErrorKind::Io, "first handshake failed"))
+                    } else {
+                        Ok(candidate)
+                    }
+                }
+            }
+        })
+        .await
+        .unwrap();
+
+        assert_eq!(connected, second);
+        assert_eq!(
+            *attempts.lock().unwrap_or_else(|error| error.into_inner()),
+            vec![first, second]
+        );
     }
 
     #[test]
