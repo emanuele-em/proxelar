@@ -302,8 +302,14 @@ where
         let framing = BodyFraming::for_request(parsed.semantics);
         let (body_tx, body_rx) = mpsc::channel(config.body_channel_capacity.max(1));
         let mut body = ProxyBody::new(BodyChannel { receiver: body_rx });
-        if let BodyFraming::ContentLength(length) = framing {
-            body = body.with_exact_length(length).with_trailer_hint(false);
+        match framing {
+            BodyFraming::None => {
+                body = body.with_exact_length(0).with_trailer_hint(false);
+            }
+            BodyFraming::ContentLength(length) => {
+                body = body.with_exact_length(length).with_trailer_hint(false);
+            }
+            _ => {}
         }
         let inbound = InboundRequest {
             request: ProxyRequest::new(head, body),
