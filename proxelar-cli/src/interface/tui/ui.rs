@@ -694,7 +694,7 @@ fn build_request_lines(request: &proxyapi_models::ProxiedRequest) -> Vec<Line<'s
                 Style::default().fg(Color::Yellow),
             )));
         }
-        lines.push(Line::from(render_body(request.headers(), request.body())));
+        lines.extend(render_body_lines(request.headers(), request.body()));
     }
 
     lines
@@ -736,20 +736,25 @@ fn build_response_lines(response: &proxyapi_models::ProxiedResponse) -> Vec<Line
                 Style::default().fg(Color::Yellow),
             )));
         }
-        lines.push(Line::from(render_body(response.headers(), response.body())));
+        lines.extend(render_body_lines(response.headers(), response.body()));
     }
 
     lines
 }
 
-fn render_body(headers: &http::HeaderMap, body: &[u8]) -> String {
-    match proxyapi::content::content_view(headers, body) {
+/// One `Line` per source line: a `Line` is a single terminal row, so embedded
+/// newlines in the rendered body would otherwise collapse into one wrapped row.
+fn render_body_lines(headers: &http::HeaderMap, body: &[u8]) -> Vec<Line<'static>> {
+    let text = match proxyapi::content::content_view(headers, body) {
         Ok(view) => view.text,
         Err(error) => format!(
             "[content decoding failed: {error}]\n{}",
             String::from_utf8_lossy(body)
         ),
-    }
+    };
+    text.lines()
+        .map(|line| Line::from(Span::raw(line.to_owned())))
+        .collect()
 }
 
 fn build_frames_lines(
@@ -1397,6 +1402,71 @@ mod tests {
             .join("\n");
         assert!(closed_text.contains("00 01 02 03"));
         assert!(closed_text.contains("Connection closed"));
+    }
+
+    #[test]
+    fn pretty_printed_json_body_spans_multiple_lines() {
+        let res = response(
+            StatusCode::OK,
+            Some("application/json"),
+            Bytes::from_static(b"{\"a\":1,\"b\":[true,null]}"),
+            0,
+        );
+        let lines = build_response_lines(&res);
+
+        // A `Line` is one terminal row, so no row may carry an embedded newline.
+        assert!(lines.iter().all(|line| !line.to_string().contains('\n')));
+
+        let body_rows = lines
+            .iter()
+            .filter(|line| {
+                let text = line.to_string();
+                text.contains("\"a\"") || text.contains("\"b\"")
+            })
+            .count();
+        assert!(body_rows > 1, "pretty-printed body collapsed into one row");
+    }
+
+    #[test]
+    fn plain_text_body_newlines_become_separate_lines() {
+        let res = response(
+            StatusCode::OK,
+            Some("text/plain"),
+            Bytes::from_static(b"first\nsecond\nthird"),
+            0,
+        );
+        let rendered: Vec<String> = build_response_lines(&res)
+            .iter()
+            .map(ToString::to_string)
+            .collect();
+
+        assert!(rendered.iter().any(|line| line == "first"));
+        assert!(rendered.iter().any(|line| line == "second"));
+        assert!(rendered.iter().any(|line| line == "third"));
+    }
+
+    #[test]
+    fn trailing_newline_does_not_add_a_blank_line() {
+        let with_newline = response(
+            StatusCode::OK,
+            Some("text/plain"),
+            Bytes::from_static(b"only\n"),
+            0,
+        );
+        let without_newline = response(
+            StatusCode::OK,
+            Some("text/plain"),
+            Bytes::from_static(b"only"),
+            0,
+        );
+
+        let rendered = build_response_lines(&with_newline);
+        assert_eq!(rendered.len(), build_response_lines(&without_newline).len());
+        assert_eq!(
+            rendered.last().expect("body row").to_string(),
+            "only",
+            "trailing newline produced a blank row"
+        );
     }
 
     #[test]

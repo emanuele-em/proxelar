@@ -7,6 +7,10 @@
 
 ## [Unreleased]
 
+### Fixed
+
+- Render multi-line request and response bodies in the TUI as separate rows instead of collapsing them into a single wrapped row.
+
 ## [0.5.1] - 2026-07-31
 
 ### Added
