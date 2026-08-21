@@ -537,7 +537,10 @@ impl Stream for H3BodyStream {
             }
             Poll::Ready(None) => {
                 self.finished = true;
-                Poll::Ready(None)
+                Poll::Ready(Some(Err(ProtocolError::new(
+                    ErrorKind::Reset,
+                    "HTTP/3 body stream closed before FIN",
+                ))))
             }
             Poll::Pending => Poll::Pending,
         }
@@ -977,6 +980,26 @@ mod tests {
             body.next().await,
             Some(Ok(BodyFrame::Data(data))) if data == b"two".as_slice()
         ));
+        assert!(body.next().await.is_none());
+    }
+
+    #[tokio::test]
+    async fn inbound_body_rejects_channel_close_before_fin() {
+        let (sender, receiver) = mpsc::channel(1);
+        let mut body = inbound_body(receiver);
+
+        sender
+            .send(InboundFrame::Body(b"partial".as_slice().into(), false))
+            .await
+            .unwrap();
+        assert!(matches!(
+            body.next().await,
+            Some(Ok(BodyFrame::Data(data))) if data == b"partial".as_slice()
+        ));
+
+        drop(sender);
+        let error = body.next().await.unwrap().unwrap_err();
+        assert_eq!(error.kind(), ErrorKind::Reset);
         assert!(body.next().await.is_none());
     }
 }
