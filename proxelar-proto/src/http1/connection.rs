@@ -665,42 +665,84 @@ async fn run_client(
 ) {
     let mut buffer = BytesMut::with_capacity(8 * 1024);
     while let Some(command) = command_rx.recv().await {
-        let method = command.request.head.method.clone();
-        let request_close =
-            !request_keep_alive(&command.request.head.headers, command.request.head.version);
-        if let Err(error) = write_request(&mut io, command.request, config).await {
-            let _ = command
-                .response_tx
-                .send(ClientOutcome::Response(Err(error)));
+        let ClientCommand {
+            mut request,
+            response_tx,
+            permit,
+        } = command;
+        let method = request.head.method.clone();
+        let request_close = !request_keep_alive(&request.head.headers, request.head.version);
+        let request_framing = match prepare_request_framing(&mut request) {
+            Ok(framing) => framing,
+            Err(error) => {
+                let _ = response_tx.send(ClientOutcome::Response(Err(error)));
+                break;
+            }
+        };
+        let request_head = match encode_request_head(&request.head).map_err(protocol_error) {
+            Ok(head) => head,
+            Err(error) => {
+                let _ = response_tx.send(ClientOutcome::Response(Err(error)));
+                break;
+            }
+        };
+        if let Err(error) = write_bytes(&mut io, &request_head, config.write_timeout).await {
+            let _ = response_tx.send(ClientOutcome::Response(Err(error)));
+            break;
+        }
+        if let Err(error) = flush(&mut io, config.write_timeout).await {
+            let _ = response_tx.send(ClientOutcome::Response(Err(error)));
             break;
         }
 
-        let (informational, head, semantics) =
-            match read_final_response_head(&mut io, &mut buffer, config).await {
-                Ok(parsed) => parsed,
-                Err(error) => {
-                    let _ = command
-                        .response_tx
-                        .send(ClientOutcome::Response(Err(error)));
-                    break;
+        let (mut reader, mut writer) = split(&mut io);
+        let mut write_request = Box::pin(write_request_body(
+            &mut writer,
+            request.body,
+            request_framing,
+            config,
+        ));
+        let mut write_result = None;
+
+        let parsed = {
+            let mut read_head =
+                Box::pin(read_final_response_head(&mut reader, &mut buffer, config));
+            tokio::select! {
+                result = read_head.as_mut() => result,
+                result = write_request.as_mut() => {
+                    write_result = Some(result);
+                    read_head.await
                 }
-            };
+            }
+        };
+        let (informational, head, semantics) = match parsed {
+            Ok(parsed) => parsed,
+            Err(read_error) => {
+                let error = write_result.and_then(Result::err).unwrap_or(read_error);
+                drop(write_request);
+                drop(reader);
+                drop(writer);
+                let _ = response_tx.send(ClientOutcome::Response(Err(error)));
+                break;
+            }
+        };
         let response_close = response_requests_close(&head.headers);
         let framing = BodyFraming::for_response(&method, head.status, semantics);
         let upgraded =
             framing == BodyFraming::Tunnel || head.status == StatusCode::SWITCHING_PROTOCOLS;
         if upgraded {
+            drop(write_request);
+            drop(reader);
+            drop(writer);
             let (upgrade_tx, upgrade_rx) = oneshot::channel();
             let response =
                 ProxyResponse::new(head, ProxyBody::empty()).with_informational(informational);
-            let _ = command
-                .response_tx
-                .send(ClientOutcome::Response(Ok(Http1ClientResponse {
-                    response,
-                    upgrade: Some(UpgradeReceiver {
-                        receiver: upgrade_rx,
-                    }),
-                })));
+            let _ = response_tx.send(ClientOutcome::Response(Ok(Http1ClientResponse {
+                response,
+                upgrade: Some(UpgradeReceiver {
+                    receiver: upgrade_rx,
+                }),
+            })));
             let _ = upgrade_tx.send(UpgradedIo {
                 io,
                 read_ahead: buffer.split().freeze(),
@@ -712,8 +754,7 @@ async fn run_client(
         if let BodyFraming::ContentLength(length) = framing {
             body = body.with_exact_length(length).with_trailer_hint(false);
         }
-        if command
-            .response_tx
+        if response_tx
             .send(ClientOutcome::Response(Ok(Http1ClientResponse {
                 response: ProxyResponse::new(head, body).with_informational(informational),
                 upgrade: None,
@@ -723,14 +764,49 @@ async fn run_client(
             // Continue draining the body so a cancelled caller does not poison
             // an otherwise reusable connection.
         }
-        if let Err(error) = read_client_body(&mut io, &mut buffer, framing, &body_tx, config).await
-        {
+
+        let mut read_body = Box::pin(read_client_body(
+            &mut reader,
+            &mut buffer,
+            framing,
+            &body_tx,
+            config,
+        ));
+        let mut finish_request_after_response = false;
+        let read_result = if response_close || write_result.is_some() {
+            read_body.as_mut().await
+        } else {
+            tokio::select! {
+                result = read_body.as_mut() => {
+                    finish_request_after_response = result.is_ok();
+                    result
+                }
+                result = write_request.as_mut() => {
+                    write_result = Some(result);
+                    read_body.as_mut().await
+                }
+            }
+        };
+        drop(read_body);
+        drop(body_tx);
+        if finish_request_after_response {
+            write_result = Some(write_request.as_mut().await);
+        }
+        drop(write_request);
+        drop(reader);
+        drop(writer);
+
+        if let Err(error) = read_result {
             tracing_error(&error);
             break;
         }
-        drop(command.permit);
-        drop(body_tx);
-        if request_close
+        let request_complete = matches!(write_result, Some(Ok(())));
+        if let Some(Err(error)) = &write_result {
+            tracing_error(error);
+        }
+        drop(permit);
+        if !request_complete
+            || request_close
             || response_close
             || framing == BodyFraming::UntilEof
             || framing == BodyFraming::Tunnel
@@ -751,18 +827,16 @@ async fn run_client(
     }
 }
 
-async fn write_request<I>(
+async fn write_request_body<I>(
     io: &mut I,
-    mut request: ProxyRequest,
+    body: ProxyBody,
+    framing: BodyFraming,
     config: ConnectionConfig,
 ) -> Result<(), ProtocolError>
 where
     I: AsyncWrite + Unpin,
 {
-    let framing = prepare_request_framing(&mut request)?;
-    let head = encode_request_head(&request.head).map_err(protocol_error)?;
-    write_bytes(io, &head, config.write_timeout).await?;
-    write_body(io, request.body, framing, config.write_timeout).await?;
+    write_body(io, body, framing, config.write_timeout).await?;
     flush(io, config.write_timeout).await
 }
 
