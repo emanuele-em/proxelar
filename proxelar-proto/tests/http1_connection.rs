@@ -274,6 +274,93 @@ async fn client_preserves_informational_responses_before_the_final_head() {
 }
 
 #[tokio::test]
+async fn client_delivers_an_early_response_while_the_upload_continues() {
+    let (client_io, mut peer) = tokio::io::duplex(256);
+    let release_upload = Arc::new(tokio::sync::Notify::new());
+    let body = ProxyBody::new(futures_util::stream::once({
+        let release_upload = Arc::clone(&release_upload);
+        async move {
+            release_upload.notified().await;
+            Ok(BodyFrame::Data(Bytes::from_static(b"body")))
+        }
+    }))
+    .with_exact_length(4)
+    .with_trailer_hint(false);
+
+    let peer_task = tokio::spawn(async move {
+        let mut request_head = Vec::new();
+        let mut byte = [0_u8; 1];
+        while !request_head.ends_with(b"\r\n\r\n") {
+            peer.read_exact(&mut byte).await.unwrap();
+            request_head.push(byte[0]);
+        }
+        peer.write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 0\r\n\r\n")
+            .await
+            .unwrap();
+        let mut body = [0_u8; 4];
+        peer.read_exact(&mut body).await.unwrap();
+        body
+    });
+
+    let client = Http1Client::new(client_io, ConnectionConfig::default());
+    let response = tokio::time::timeout(
+        Duration::from_secs(1),
+        client.send_request(request(Method::POST, "/", body)),
+    )
+    .await
+    .expect("response head was blocked on the request body")
+    .unwrap();
+    assert_eq!(response.head.status, StatusCode::OK);
+    let collected = tokio::time::timeout(Duration::from_secs(1), response.body.collect())
+        .await
+        .expect("response completion was blocked on the request body")
+        .unwrap();
+    assert!(collected.data.is_empty());
+
+    release_upload.notify_one();
+    assert_eq!(peer_task.await.unwrap(), *b"body");
+}
+
+#[tokio::test]
+async fn client_stops_an_upload_after_an_early_closing_response() {
+    const BODY_LEN: usize = 64 * 1024;
+    let (client_io, mut peer) = tokio::io::duplex(128);
+    let peer_task = tokio::spawn(async move {
+        let mut request_head = Vec::new();
+        let mut byte = [0_u8; 1];
+        while !request_head.ends_with(b"\r\n\r\n") {
+            peer.read_exact(&mut byte).await.unwrap();
+            request_head.push(byte[0]);
+        }
+        peer.write_all(
+            b"HTTP/1.1 413 Payload Too Large\r\nContent-Length: 0\r\nConnection: close\r\n\r\n",
+        )
+        .await
+        .unwrap();
+
+        let mut received = Vec::new();
+        peer.read_to_end(&mut received).await.unwrap();
+        received.len()
+    });
+
+    let client = Http1Client::new(client_io, ConnectionConfig::default());
+    let response = tokio::time::timeout(
+        Duration::from_secs(1),
+        client.send_request(request(
+            Method::POST,
+            "/",
+            ProxyBody::full(vec![b'x'; BODY_LEN]),
+        )),
+    )
+    .await
+    .expect("early response was blocked on the request upload")
+    .unwrap();
+    assert_eq!(response.head.status, StatusCode::PAYLOAD_TOO_LARGE);
+    assert!(response.body.collect().await.unwrap().data.is_empty());
+    assert!(peer_task.await.unwrap() < BODY_LEN);
+}
+
+#[tokio::test]
 async fn idle_read_timeout_is_reported() {
     let (_peer, server_io) = tokio::io::duplex(64);
     let config = ConnectionConfig {
