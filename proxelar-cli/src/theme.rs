@@ -401,6 +401,7 @@ impl Theme {
 /// the same load path).
 const BUILTIN_CYBERDREAM: &str = include_str!("themes/cyberdream.toml");
 const BUILTIN_CYBERDREAM_LIGHT: &str = include_str!("themes/cyberdream-light.toml");
+const BUILTIN_CYBERDREAM_MUTED: &str = include_str!("themes/cyberdream-muted.toml");
 const BUILTIN_ROSE_PINE: &str = include_str!("themes/rose-pine.toml");
 const BUILTIN_ROSE_PINE_DAWN: &str = include_str!("themes/rose-pine-dawn.toml");
 const BUILTIN_TOKYONIGHT: &str = include_str!("themes/tokyonight.toml");
@@ -417,6 +418,7 @@ pub fn built_in_theme_names() -> &'static [&'static str] {
         "light",
         "cyberdream",
         "cyberdream-light",
+        "cyberdream-muted",
         "rose-pine",
         "rose-pine-dawn",
         "tokyonight",
@@ -432,6 +434,7 @@ fn built_in_theme_toml(name: &str) -> Option<&'static str> {
     match name {
         "cyberdream" => Some(BUILTIN_CYBERDREAM),
         "cyberdream-light" => Some(BUILTIN_CYBERDREAM_LIGHT),
+        "cyberdream-muted" => Some(BUILTIN_CYBERDREAM_MUTED),
         "rose-pine" => Some(BUILTIN_ROSE_PINE),
         "rose-pine-dawn" => Some(BUILTIN_ROSE_PINE_DAWN),
         "tokyonight" => Some(BUILTIN_TOKYONIGHT),

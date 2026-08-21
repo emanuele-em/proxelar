@@ -222,7 +222,7 @@ theme = "cyberdream"
 
 - `default` / `dark` / `light` — the built-in palette (plain ANSI colors, so it already adapts to whichever light/dark scheme your terminal itself uses)
 - `system` — auto-detects the terminal/OS appearance and picks `theme_dark` or `theme_light` below (both default to `default` if unset)
-- a bundled name: `cyberdream`, `cyberdream-light`, `rose-pine`, `rose-pine-dawn`, `tokyonight`, `tokyonight-day`, `dracula`, `alucard`, `catppuccin-mocha`, `catppuccin-latte`
+- a bundled name: `cyberdream`, `cyberdream-light`, `cyberdream-muted`, `rose-pine`, `rose-pine-dawn`, `tokyonight`, `tokyonight-day`, `dracula`, `alucard`, `catppuccin-mocha`, `catppuccin-latte`
 - a custom name resolved from `~/.proxelar/themes/<name>.toml`
 
 For light/dark auto-switching:
@@ -247,7 +247,7 @@ A custom theme file only needs to specify the colors it changes — everything e
 
 The bundled themes are palette ports of these projects — full credit to their authors:
 
-- `cyberdream` / `cyberdream-light` — [cyberdream.nvim](https://github.com/scottmckendry/cyberdream.nvim)
+- `cyberdream` / `cyberdream-light` / `cyberdream-muted` — [cyberdream.nvim](https://github.com/scottmckendry/cyberdream.nvim)
 - `rose-pine` / `rose-pine-dawn` — [Rosé Pine](https://rosepinetheme.com/)
 - `tokyonight` / `tokyonight-day` — [Tokyo Night](https://github.com/tokyo-night/tokyo-night-vscode-theme)
 - `dracula` / `alucard` — [Dracula](https://draculatheme.com/)
