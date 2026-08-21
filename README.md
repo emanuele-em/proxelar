@@ -243,6 +243,53 @@ status_bar_fg = "#eeeeee"
 
 A custom theme file only needs to specify the colors it changes — everything else falls back to the default palette. Colors are `"#rrggbb"` hex or a named ANSI color (`"red"`, `"light_green"`, `"dark_gray"`, ...). Unknown keys or invalid colors print a warning and fall back rather than failing to start. `--theme <name>` on the command line overrides `config.toml`.
 
+### Writing a custom theme
+
+Create a file per theme under the `themes/` folder inside your config directory (`~/.proxelar/themes/` or `$XDG_CONFIG_HOME/proxelar/themes/` — see Configuration above). The filename (minus `.toml`) is the theme name:
+
+```
+~/.proxelar/
+├── config.toml
+└── themes/
+    ├── my-dark-theme.toml
+    └── my-light-theme.toml
+```
+
+Each file only needs to specify the colors it changes — everything else falls back to the default palette:
+
+```toml
+# ~/.proxelar/themes/my-dark-theme.toml
+status_bar_bg = "#222222"
+status_bar_fg = "#eeeeee"
+method_get = "#8fbc8f"
+row_error = "#ff6b6b"
+```
+
+Use just the dark theme:
+
+```toml
+# config.toml
+theme = "my-dark-theme"
+```
+
+Or just the light one:
+
+```toml
+# config.toml
+theme = "my-light-theme"
+```
+
+Or both together, auto-switching with your terminal/OS appearance:
+
+```toml
+# config.toml
+theme = "system"
+theme_dark = "my-dark-theme"
+theme_light = "my-light-theme"
+```
+
+For the authoritative list of every colorable key, see `known_theme_keys()` in `proxelar-cli/src/theme.rs`, or look at one of the bundled theme presets under `proxelar-cli/src/themes/` for a real, fully filled-in example.
+
 ### Bundled theme credits
 
 The bundled themes are palette ports of these projects — full credit to their authors:
