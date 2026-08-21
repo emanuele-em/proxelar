@@ -64,7 +64,23 @@ struct ReverseH3UpstreamInner {
     verifier: Arc<dyn ServerCertVerifier>,
     tls_cert_path: PathBuf,
     tls_key_path: PathBuf,
-    client: AsyncMutex<Option<H3Client>>,
+    client: AsyncMutex<Option<Arc<H3Client>>>,
+}
+
+fn h3_error_closes_connection(kind: ErrorKind) -> bool {
+    matches!(
+        kind,
+        ErrorKind::Io | ErrorKind::Timeout | ErrorKind::ProtocolViolation
+    )
+}
+
+fn clear_if_current<T>(cached: &mut Option<Arc<T>>, failed: &Arc<T>) {
+    if cached
+        .as_ref()
+        .is_some_and(|current| Arc::ptr_eq(current, failed))
+    {
+        *cached = None;
+    }
 }
 
 impl ReverseH3Upstream {
@@ -118,18 +134,20 @@ impl ReverseH3Upstream {
             if let Some(client) = state.as_ref() {
                 client.clone()
             } else {
-                let client = self.connect().await?;
+                let client = Arc::new(self.connect().await?);
                 *state = Some(client.clone());
                 client
             }
         };
-        match client.request(request).await {
-            Ok(response) => Ok(response),
-            Err(error) => {
-                *self.inner.client.lock().await = None;
-                Err(error)
-            }
+        let result = client.request(request).await;
+        if result
+            .as_ref()
+            .is_err_and(|error| h3_error_closes_connection(error.kind()))
+        {
+            let mut state = self.inner.client.lock().await;
+            clear_if_current(&mut state, &client);
         }
+        result
     }
 
     async fn connect(&self) -> Result<H3Client, ProtocolError> {
@@ -888,6 +906,31 @@ mod tests {
     use proxelar_proto::{RequestHead, ResponseHead};
     use tokio::sync::mpsc;
     use tokio_util::sync::PollSender;
+
+    #[test]
+    fn h3_stream_errors_do_not_evict_the_connection() {
+        assert!(!h3_error_closes_connection(ErrorKind::Reset));
+        assert!(!h3_error_closes_connection(ErrorKind::MalformedMessage));
+        assert!(!h3_error_closes_connection(ErrorKind::Unsupported));
+        assert!(h3_error_closes_connection(ErrorKind::Io));
+        assert!(h3_error_closes_connection(ErrorKind::Timeout));
+        assert!(h3_error_closes_connection(ErrorKind::ProtocolViolation));
+    }
+
+    #[test]
+    fn stale_h3_failure_does_not_remove_a_newer_connection() {
+        let current = Arc::new(());
+        let stale = Arc::new(());
+        let mut cached = Some(Arc::clone(&current));
+
+        clear_if_current(&mut cached, &stale);
+        assert!(cached
+            .as_ref()
+            .is_some_and(|cached| Arc::ptr_eq(cached, &current)));
+
+        clear_if_current(&mut cached, &current);
+        assert!(cached.is_none());
+    }
 
     #[test]
     fn request_headers_roundtrip_h3_pseudo_fields_and_ordered_duplicates() {
