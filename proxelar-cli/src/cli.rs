@@ -45,7 +45,8 @@ pub struct Args {
     #[arg(long, default_value_t = 8081)]
     pub gui_port: u16,
 
-    /// Directory for CA certificate and key (default: ~/.proxelar)
+    /// Directory for CA certificate, key, addons, and other proxelar state
+    /// (default: $XDG_CONFIG_HOME/proxelar if set, else ~/.proxelar)
     #[arg(long, value_name = "DIR")]
     pub ca_dir: Option<PathBuf>,
 

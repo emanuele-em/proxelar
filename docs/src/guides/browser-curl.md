@@ -44,7 +44,7 @@ http://proxel.ar
 
 Download and trust the Proxelar CA using the instructions shown on that page. After the CA is trusted, HTTPS pages should appear in Proxelar.
 
-Firefox uses its own certificate store unless configured to use the system store. Import `~/.proxelar/proxelar-ca.pem` in Firefox settings if HTTPS traffic still shows certificate warnings.
+Firefox uses its own certificate store unless configured to use the system store. Import `proxelar-ca.pem` from the state directory (`~/.proxelar` by default) in Firefox settings if HTTPS traffic still shows certificate warnings.
 
 ## Troubleshooting
 

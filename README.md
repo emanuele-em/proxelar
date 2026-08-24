@@ -79,7 +79,7 @@ docker run --rm -it -v ~/.proxelar:/root/.proxelar -p 8080:8080 -p 127.0.0.1:808
 docker run --rm -it -v ~/.proxelar:/root/.proxelar -p 8080:8080 ghcr.io/emanuele-em/proxelar --interface terminal --addr 0.0.0.0
 ```
 
-The `-v ~/.proxelar:/root/.proxelar` mount reuses your existing trusted CA certificate so you do not get browser warnings after trusting the CA once.
+The `-v ~/.proxelar:/root/.proxelar` mount reuses your existing trusted CA certificate so you do not get browser warnings after trusting the CA once. The container always keeps its state at `/root/.proxelar`; if your host state directory differs (because `XDG_CONFIG_HOME` is set), mount that path instead of `~/.proxelar`.
 
 ---
 
@@ -187,7 +187,7 @@ proxelar -m wireguard -b 0.0.0.0 -p 51820 \
 | `-b, --addr` | Bind address | `127.0.0.1` |
 | `-t, --target` | Upstream URI for reverse or `HOST:PORT` for UDP | — |
 | `--gui-port` | Web GUI port | `8081` |
-| `--ca-dir` | CA certificate directory | `~/.proxelar` |
+| `--ca-dir` | Directory for CA cert/key, addons, and other proxelar state | `$XDG_CONFIG_HOME/proxelar` if set, else `~/.proxelar` |
 | `-s, --script` | Lua script file or addon directory (`init.lua`) | — |
 | `--addon` | Load a validated installed addon by name | — |
 | `--addons-dir` | Local addon catalog used by runtime and `addon` commands | `CA_DIR/addons` |
@@ -204,6 +204,29 @@ proxelar -m wireguard -b 0.0.0.0 -p 51820 \
 </details>
 
 `--upstream-trust insecure` disables upstream certificate and hostname verification. Use it only for controlled debugging.
+
+---
+
+## Configuration
+
+Proxelar keeps its CA certificate/key, addons, and other local state in one directory, resolved in this order:
+
+1. `--ca-dir <DIR>` — explicit override, always wins
+2. `$XDG_CONFIG_HOME/proxelar` — used when that env var is set to a non-empty absolute path
+3. `~/.proxelar` — default when neither of the above applies
+
+```bash
+# Uses ~/.proxelar (no XDG_CONFIG_HOME set)
+proxelar
+
+# Uses $XDG_CONFIG_HOME/proxelar, e.g. ~/.config/proxelar
+XDG_CONFIG_HOME=~/.config proxelar
+
+# Always uses the given path, regardless of XDG_CONFIG_HOME
+proxelar --ca-dir /path/to/proxelar-state
+```
+
+This directory isn't just for the CA certificate — addons and other local proxelar state live there too, so pointing `--ca-dir` (or `XDG_CONFIG_HOME`) somewhere else moves everything at once, not just certs.
 
 ---
 
