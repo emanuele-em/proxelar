@@ -13,7 +13,7 @@ proxelar addon <list|inspect|verify|install> [OPTIONS]
 | `--mode` | `-m` | `forward` | Mode: `forward`, `reverse`, `wireguard`, `socks5`, `dns`, or `udp` |
 | `--port` | `-p` | `8080` | Port to listen on |
 | `--addr` | `-b` | `127.0.0.1` | Bind address |
-| `--target` | `-t` | — | Upstream URI for reverse or `HOST:PORT` for UDP |
+| `--target` | `-t` | — | `http://`, `https://`, or `http3://` upstream URI for reverse; `HOST:PORT` for UDP |
 | `--script` | `-s` | — | Lua script file or addon directory containing `init.lua` |
 | `--addon` | | — | Load a validated installed addon by name (conflicts with `--script`) |
 | `--addons-dir` | | `CA_DIR/addons` | Local addon catalog used by runtime and addon commands |
@@ -46,7 +46,7 @@ proxelar addon <list|inspect|verify|install> [OPTIONS]
 
 | Variable | Description |
 |----------|-------------|
-| `RUST_LOG` | Controls log verbosity. Examples: `debug`, `proxyapi=trace`, `warn` |
+| `RUST_LOG` | Controls log verbosity. Examples: `debug`, `proxyapi=trace`, `warn`. TUI logs go to `CA_DIR/proxelar.log`; other interfaces log to stderr. |
 
 ## Examples
 
@@ -62,6 +62,9 @@ proxelar -i gui -b 0.0.0.0
 
 # Reverse proxy with script
 proxelar -m reverse --target http://localhost:3000 --script auth.lua
+
+# UDP-only HTTP/3 reverse proxy
+proxelar -m reverse --target http3://localhost:4433
 
 # Forward proxy with logging script
 proxelar --script log_traffic.lua

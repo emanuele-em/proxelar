@@ -101,12 +101,63 @@ async fn forward_proxy_forwards_absolute_http_and_emits_request_complete() {
             );
             assert_eq!(request.uri().path(), "/absolute");
             assert_eq!(request.uri().query(), Some("via=proxy"));
-            assert_eq!(request.headers()["x-client-test"], "absolute-roundtrip");
+            assert_eq!(
+                request.headers().get("x-client-test"),
+                Some(b"absolute-roundtrip".as_slice())
+            );
             assert_eq!(response.status(), http::StatusCode::OK);
             assert_eq!(response.body().as_ref(), b"forward response");
         }
         other => panic!("expected RequestComplete event, got {other:?}"),
     }
+
+    let _ = shutdown_tx.send(());
+    let _ = upstream_shutdown.send(());
+    assert!(handle.await.unwrap().is_ok());
+}
+
+#[tokio::test]
+async fn forward_proxy_capture_preserves_interleaved_duplicate_header_order() {
+    let _ = rustls::crypto::ring::default_provider().install_default();
+    let (upstream_addr, upstream_shutdown) = start_upstream_server().await;
+    let (proxy_addr, shutdown_tx, handle, mut event_rx, _ca_dir) = start_forward_proxy().await;
+
+    let raw_response = send_raw_request(
+        proxy_addr,
+        format!(
+            "GET http://{upstream_addr}/ordered HTTP/1.1\r\n\
+             Host: {upstream_addr}\r\n\
+             X-Order: first\r\n\
+             X-Middle: second\r\n\
+             X-Order: third\r\n\
+             Connection: close\r\n\
+             \r\n"
+        ),
+    )
+    .await;
+
+    assert!(
+        raw_response.starts_with("HTTP/1.1 200 OK"),
+        "unexpected response:\n{raw_response}"
+    );
+    let ProxyEvent::RequestComplete { request, .. } = recv_request_complete(&mut event_rx).await
+    else {
+        panic!("expected RequestComplete event");
+    };
+    let observed = request
+        .headers()
+        .iter()
+        .filter(|field| field.name_eq("x-order") || field.name_eq("x-middle"))
+        .map(|field| (field.name().to_vec(), field.value().to_vec()))
+        .collect::<Vec<_>>();
+    assert_eq!(
+        observed,
+        vec![
+            (b"X-Order".to_vec(), b"first".to_vec()),
+            (b"X-Middle".to_vec(), b"second".to_vec()),
+            (b"X-Order".to_vec(), b"third".to_vec()),
+        ]
+    );
 
     let _ = shutdown_tx.send(());
     let _ = upstream_shutdown.send(());
@@ -162,7 +213,10 @@ async fn forward_proxy_forwards_h2c_absolute_http_and_emits_http2_capture() {
                 upstream_addr.to_string()
             );
             assert_eq!(request.uri().path(), "/h2c");
-            assert_eq!(request.headers()["x-client-test"], "h2c-absolute-roundtrip");
+            assert_eq!(
+                request.headers().get("x-client-test"),
+                Some(b"h2c-absolute-roundtrip".as_slice())
+            );
             assert_eq!(response.status(), http::StatusCode::OK);
             assert_eq!(response.body().as_ref(), b"forward response");
         }
@@ -234,7 +288,10 @@ async fn forward_proxy_connect_plain_http_reconstructs_uri_and_emits_request_com
             );
             assert_eq!(request.uri().path(), "/tunneled");
             assert_eq!(request.uri().query(), Some("via=connect"));
-            assert_eq!(request.headers()["x-client-test"], "connect-roundtrip");
+            assert_eq!(
+                request.headers().get("x-client-test"),
+                Some(b"connect-roundtrip".as_slice())
+            );
             assert_eq!(response.status(), http::StatusCode::OK);
             assert_eq!(response.body().as_ref(), b"forward response");
         }
@@ -299,7 +356,10 @@ async fn forward_proxy_h2_connect_tunnels_h2c_requests() {
             assert_eq!(request.method(), http::Method::POST);
             assert_eq!(request.uri().path(), "/h2-tunnel");
             assert_eq!(request.uri().query(), Some("via=connect"));
-            assert_eq!(request.headers()["x-client-test"], "h2-connect-roundtrip");
+            assert_eq!(
+                request.headers().get("x-client-test"),
+                Some(b"h2-connect-roundtrip".as_slice())
+            );
             assert_eq!(request.body().as_ref(), b"body through h2 connect");
             assert_eq!(response.status(), http::StatusCode::OK);
         }
@@ -546,7 +606,7 @@ async fn forward_proxy_replays_captured_request_through_proxy_loop() {
             .parse()
             .unwrap(),
         http::Version::HTTP_11,
-        headers,
+        proxyapi::header::from_http(&headers),
         Bytes::new(),
         10,
     );
@@ -558,7 +618,7 @@ async fn forward_proxy_replays_captured_request_through_proxy_loop() {
         } => {
             assert_eq!(request.uri().path(), "/replayed");
             assert_eq!(request.uri().query(), Some("from=ui"));
-            assert_eq!(request.headers()["x-replay"], "yes");
+            assert_eq!(request.headers().get("x-replay"), Some(b"yes".as_slice()));
             assert_eq!(response.status(), http::StatusCode::OK);
             assert_eq!(response.body().as_ref(), b"forward response");
         }
@@ -581,7 +641,7 @@ async fn forward_proxy_replay_failure_emits_request_complete() {
         http::Method::GET,
         format!("http://{unused_upstream}/missing").parse().unwrap(),
         http::Version::HTTP_11,
-        http::HeaderMap::new(),
+        proxyapi_models::HeaderBlock::new(),
         Bytes::new(),
         10,
     );
@@ -659,6 +719,102 @@ async fn forward_proxy_websocket_upgrade_emits_connection_frames_and_close() {
                         if frame.payload.as_ref() == b"echo:hello" {
                             saw_server_frame = true;
                         }
+                    }
+                },
+                ProxyEvent::WebSocketClosed { .. } => saw_closed = true,
+                _ => {}
+            }
+        }
+    })
+    .await
+    .unwrap();
+
+    let _ = shutdown_tx.send(());
+    let _ = upstream_shutdown.send(());
+    assert!(handle.await.unwrap().is_ok());
+}
+
+#[tokio::test]
+async fn forward_proxy_h2_extended_connect_websocket_emits_matching_events() {
+    let _ = rustls::crypto::ring::default_provider().install_default();
+    let (upstream_addr, upstream_shutdown) = start_websocket_upstream_server().await;
+    let (proxy_addr, shutdown_tx, handle, mut event_rx, _ca_dir) = start_forward_proxy().await;
+
+    let mut sender = connect_h2(proxy_addr).await;
+    // The protocol-core test asserts the setting explicitly. Let Hyper's
+    // background connection task consume it before constructing :protocol.
+    tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+    let mut invalid = Request::builder()
+        .method(http::Method::CONNECT)
+        .version(http::Version::HTTP_2)
+        .uri(format!("http://{upstream_addr}/invalid-ws-h2"))
+        .body(Full::new(Bytes::new()))
+        .unwrap();
+    invalid
+        .extensions_mut()
+        .insert(hyper::ext::Protocol::from_static("websocket"));
+    let invalid = sender.send_request(invalid).await.unwrap();
+    assert_eq!(invalid.status(), http::StatusCode::BAD_REQUEST);
+    assert_eq!(
+        invalid
+            .into_body()
+            .collect()
+            .await
+            .unwrap()
+            .to_bytes()
+            .as_ref(),
+        b"Invalid RFC 8441 WebSocket request"
+    );
+
+    let mut request = Request::builder()
+        .method(http::Method::CONNECT)
+        .version(http::Version::HTTP_2)
+        .uri(format!("http://{upstream_addr}/ws-h2"))
+        .header("sec-websocket-version", "13")
+        .body(Full::new(Bytes::new()))
+        .unwrap();
+    request
+        .extensions_mut()
+        .insert(hyper::ext::Protocol::from_static("websocket"));
+    let response = sender.send_request(request).await.unwrap();
+    assert_eq!(response.status(), http::StatusCode::OK);
+    assert_eq!(response.version(), http::Version::HTTP_2);
+
+    let upgraded = hyper::upgrade::on(response).await.unwrap();
+    let mut websocket =
+        WebSocketStream::from_raw_socket(TokioIo::new(upgraded), Role::Client, None).await;
+    websocket
+        .send(Message::Text("hello-h2".into()))
+        .await
+        .unwrap();
+    assert_eq!(
+        websocket.next().await.unwrap().unwrap(),
+        Message::Text("echo:hello-h2".into())
+    );
+    let _ = websocket.close(None).await;
+
+    let mut saw_connected = false;
+    let mut saw_client_frame = false;
+    let mut saw_server_frame = false;
+    let mut saw_closed = false;
+    tokio::time::timeout(std::time::Duration::from_secs(5), async {
+        while !(saw_connected && saw_client_frame && saw_server_frame && saw_closed) {
+            match event_rx.recv().await.unwrap() {
+                ProxyEvent::WebSocketConnected {
+                    request, response, ..
+                } => {
+                    saw_connected = true;
+                    assert_eq!(request.version(), http::Version::HTTP_2);
+                    assert_eq!(request.method(), http::Method::CONNECT);
+                    assert_eq!(request.uri().path(), "/ws-h2");
+                    assert_eq!(response.status(), http::StatusCode::OK);
+                }
+                ProxyEvent::WebSocketFrame { frame, .. } => match frame.direction {
+                    proxyapi_models::WsDirection::ClientToServer => {
+                        saw_client_frame |= frame.payload.as_ref() == b"hello-h2";
+                    }
+                    proxyapi_models::WsDirection::ServerToClient => {
+                        saw_server_frame |= frame.payload.as_ref() == b"echo:hello-h2";
                     }
                 },
                 ProxyEvent::WebSocketClosed { .. } => saw_closed = true,

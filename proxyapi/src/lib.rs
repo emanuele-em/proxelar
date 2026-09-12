@@ -16,6 +16,7 @@ pub mod error;
 pub mod event;
 pub mod filter;
 pub(crate) mod handler;
+pub mod header;
 pub mod intercept;
 pub mod proxy;
 mod rewind;
@@ -24,8 +25,9 @@ pub mod rules;
 pub mod scripting;
 pub mod session;
 
-use body::ProxyBody;
-use hyper::{Request, Response};
+pub use proxelar_proto::{
+    BodyFrame, ProtocolError, ProxyBody, ProxyRequest, ProxyResponse, RequestHead, ResponseHead,
+};
 use std::net::SocketAddr;
 
 #[cfg(feature = "scripting")]
@@ -47,8 +49,8 @@ pub use session::{RedactionPolicy, SessionError, SessionRecorder};
 
 /// Returned by [`HttpHandler::handle_request`] to either forward or short-circuit.
 pub enum RequestOrResponse {
-    Request(Request<ProxyBody>),
-    Response(Response<ProxyBody>),
+    Request(ProxyRequest),
+    Response(ProxyResponse),
 }
 
 /// Metadata about the incoming connection.
@@ -63,15 +65,7 @@ pub struct HttpContext {
 /// for each connection/request pair.
 #[async_trait::async_trait]
 pub trait HttpHandler: Clone + Send + Sync + 'static {
-    async fn handle_request(
-        &mut self,
-        ctx: &HttpContext,
-        req: Request<hyper::body::Incoming>,
-    ) -> RequestOrResponse;
+    async fn handle_request(&mut self, ctx: &HttpContext, req: ProxyRequest) -> RequestOrResponse;
 
-    async fn handle_response(
-        &mut self,
-        ctx: &HttpContext,
-        res: Response<hyper::body::Incoming>,
-    ) -> Response<ProxyBody>;
+    async fn handle_response(&mut self, ctx: &HttpContext, res: ProxyResponse) -> ProxyResponse;
 }

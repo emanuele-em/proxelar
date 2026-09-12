@@ -50,7 +50,7 @@ pub async fn handle_connection(
             return;
         }
     };
-    let bound = upstream.local_addr().ok();
+    let bound = upstream.get_ref().local_addr().ok();
     if let Err(error) = send_reply(&mut stream, 0, bound).await {
         tracing::debug!("SOCKS5 success reply failed: {error}");
         return;
@@ -69,6 +69,7 @@ pub async fn handle_connection(
             if let Err(error) = serve_pinned_stream(
                 stream,
                 upstream,
+                authority.clone(),
                 Scheme::HTTP,
                 handler,
                 ca,
@@ -115,6 +116,7 @@ pub async fn handle_connection(
             if let Err(error) = serve_pinned_stream(
                 stream,
                 upstream,
+                authority.clone(),
                 Scheme::HTTPS,
                 handler,
                 ca,
@@ -210,10 +212,10 @@ async fn accept_connect(stream: &mut TcpStream) -> Result<Authority, std::io::Er
 async fn connect_target(
     authority: &Authority,
     outbound: &mut OutboundConnector,
-) -> Result<TcpStream, BoxError> {
+) -> Result<Rewind<TcpStream>, BoxError> {
     let destination = format!("http://{authority}/").parse()?;
     poll_fn(|context| outbound.poll_ready(context)).await?;
-    Ok(outbound.call(destination).await?.into_inner())
+    outbound.call(destination).await
 }
 
 fn reply_status(error: &(dyn std::error::Error + 'static)) -> u8 {
@@ -385,7 +387,7 @@ mod tests {
             assert_eq!(&request, b"ping");
             stream.write_all(b"pong").await.unwrap();
         });
-        let mut outbound = OutboundConnector::new(None).unwrap();
+        let mut outbound = OutboundConnector::new(None);
         let mut connected = connect_target(
             &target.to_string().parse::<Authority>().unwrap(),
             &mut outbound,

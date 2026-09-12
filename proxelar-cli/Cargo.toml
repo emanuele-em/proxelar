@@ -19,7 +19,7 @@ copyright = "2026, Emanuele Micheletti <micheletti.emanuele@hotmail.com>"
 license-file = ["../LICENSE-MIT", "0"]
 section = "net"
 priority = "optional"
-# OpenSSL and Lua are vendored, so only the C runtime is resolved dynamically.
+# BoringSSL and Lua are vendored, so only the C runtime is resolved dynamically.
 # Set explicitly rather than via `$auto`, which cannot run dpkg-shlibdeps when
 # the aarch64 binary is cross-built on an amd64 runner.
 depends = "libc6, libgcc-s1"
@@ -28,7 +28,8 @@ Proxelar is a single-binary MITM proxy for inspecting, intercepting, replaying
 and rewriting HTTP, HTTPS and WebSocket traffic. It runs as an interactive TUI,
 plain terminal output, a web GUI, or a headless REST API, and supports forward,
 reverse, WireGuard, SOCKS5, DNS and fixed-target UDP capture modes, Lua hooks,
-declarative rules, and HAR/curl/raw export with secret redaction."""
+declarative rules, HTTP/3 reverse and WireGuard interception, and HAR/curl/raw
+export with secret redaction."""
 assets = [
     ["target/release/proxelar", "usr/bin/", "755"],
     ["../README.md", "usr/share/doc/proxelar/README.md", "644"],
@@ -36,9 +37,10 @@ assets = [
 ]
 
 [features]
-default = ["scripting", "vendored-lua"]
+default = ["scripting", "vendored-lua", "http3"]
 scripting = ["proxyapi/scripting"]
 vendored-lua = ["proxyapi/vendored-lua"]
+http3 = ["proxyapi/http3"]
 
 [dependencies]
 proxyapi = { version = "0.5.1", path = "../proxyapi" }

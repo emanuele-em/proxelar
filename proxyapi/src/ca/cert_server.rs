@@ -1,5 +1,5 @@
 use bytes::Bytes;
-use hyper::{Request, Response};
+use http::{Request, Response};
 
 use crate::body::{self, ProxyBody};
 
@@ -454,8 +454,10 @@ pub fn handle<T>(
 }
 
 fn pem_to_der(pem: &[u8]) -> Vec<u8> {
-    match openssl::x509::X509::from_pem(pem).and_then(|cert| cert.to_der()) {
-        Ok(der) => der,
+    use rustls_pki_types::pem::PemObject as _;
+
+    match rustls_pki_types::CertificateDer::from_pem_slice(pem) {
+        Ok(der) => der.as_ref().to_vec(),
         Err(e) => {
             tracing::error!("Failed to convert PEM to DER: {e}");
             // Return empty rather than corrupt data

@@ -1,10 +1,10 @@
 # Session format
 
-The native Proxelar session is JSON with a mandatory numeric `version`. Version 1 has this top-level shape:
+The native Proxelar session is JSON with a mandatory numeric `version`. Version 2 has this top-level shape:
 
 ```json
 {
-  "version": 1,
+  "version": 2,
   "created_at": 1784450000000,
   "flows": [],
   "websockets": [],
@@ -21,8 +21,22 @@ The native Proxelar session is JSON with a mandatory numeric `version`. Version 
 - `tcp_streams` contain target, opening time, ordered directional chunks, and closure state.
 - `dns_exchanges` contain the query name/type, parsed IP answers, override state, and completion state.
 - `udp_exchanges` contain the client and fixed target addresses, lossless request/response bytes, response-received state, and capture-limit flags.
-- duplicate HTTP header values are preserved.
+- HTTP headers are ordered lists, so global field order, duplicate values, and
+  HTTP/1 field-name casing are preserved. UTF-8 values use `value`; other bytes
+  use base64:
 
-Readers reject versions newer than the implementation supports. Additive collection fields use empty defaults so version-1 readers remain tolerant of data written before those collections existed. Any incompatible schema change must increment the version and provide an explicit migration or a clear rejection.
+  ```json
+  [
+    { "name": "X-Trace", "value": "first" },
+    { "name": "X-Binary", "value_base64": "gP8=" },
+    { "name": "X-Trace", "value": "last" }
+  ]
+  ```
+
+Readers accept only the current format version. Version 1 used a map-shaped
+header representation that could not preserve global field order or arbitrary
+bytes, so v1 files are rejected explicitly rather than decoded ambiguously.
+Future incompatible schema changes must increment the version and provide an
+explicit migration or a clear rejection.
 
 The format prioritizes fidelity and debuggability over compactness. It is not encrypted and native saves are not redacted. Use filesystem permissions appropriate for secrets-bearing traffic.

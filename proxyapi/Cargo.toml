@@ -16,6 +16,7 @@ keywords = ["proxy", "mitm", "http", "https", "lua"]
 [features]
 default = []
 scripting = ["dep:mlua", "dep:semver", "dep:sha2"]
+http3 = ["dep:boring", "dep:quiche", "moka/sync"]
 # Statically link a vendored Lua 5.4.
 vendored-lua = ["mlua?/vendored"]
 
@@ -28,17 +29,15 @@ flate2 = "1.1"
 brotli = "8"
 zstd = "0.13"
 encoding_rs = "0.8"
-hyper = { version = "1.10", features = ["http1", "http2", "server", "client"] }
-hyper-util = { version = "0.1", features = ["tokio", "server-auto", "client-legacy", "http1", "http2"] }
 http = "1.4"
-http-body-util = "0.1"
 bytes = "1.9"
 tokio-rustls = "0.26"
 rustls = { version = "0.23", default-features = false, features = ["ring", "logging", "std", "tls12"] }
 rustls-pki-types = "1.14"
-hyper-rustls = { version = "0.27", features = ["http1", "logging", "tls12", "ring", "webpki-tokio"] }
 webpki-roots = "1.0"
-openssl = { version = "0.10.80", features = ["vendored"] }
+rcgen = { version = "0.14.9", default-features = false, features = ["pem", "ring", "x509-parser"] }
+getrandom = "0.3"
+time = "0.3"
 moka = { version = "0.12", features = ["future"] }
 tokio = { version = "1.52", features = ["rt", "net", "io-util", "macros", "sync", "time", "fs"] }
 tokio-util = { version = "0.7", features = ["rt"] }
@@ -57,9 +56,25 @@ futures-util = { version = "0.3", default-features = false, features = ["sink"] 
 boringtun = { version = "0.7.1", default-features = false }
 netstack-smoltcp = "0.2.4"
 proxyapi_models = { version = "0.5.1", path = "../proxyapi_models" }
+proxelar-proto = { version = "0.5.1", path = "../proxelar-proto" }
+quiche = { version = "0.29.3", optional = true }
+boring = { version = "4.22", optional = true }
 
 [dev-dependencies]
-tokio = { version = "1.52", features = ["full"] }
+tokio = { version = "1.52", features = ["full", "test-util"] }
+hyper = { version = "1.10", features = ["http1", "http2", "server", "client"] }
+hyper-util = { version = "0.1", features = ["tokio", "http1", "http2"] }
+http-body-util = "0.1"
 reqwest = { version = "0.13", features = ["rustls"] }
 rustls = { version = "0.23", features = ["ring"] }
 tempfile = "3"
+stats_alloc = "0.1"
+x509-parser = "0.18"
+
+[[bench]]
+name = "protocol_baseline"
+harness = false
+
+[[bench]]
+name = "protocol_final"
+harness = false

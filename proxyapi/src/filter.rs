@@ -246,8 +246,8 @@ impl Term {
             Field::ContentType => response.is_some_and(|response| {
                 response
                     .headers()
-                    .get(http::header::CONTENT_TYPE)
-                    .and_then(|value| value.to_str().ok())
+                    .get(http::header::CONTENT_TYPE.as_str())
+                    .and_then(|value| std::str::from_utf8(value).ok())
                     .is_some_and(contains)
             }),
             Field::Size => response.is_some_and(|response| {
@@ -409,10 +409,12 @@ fn protocol(request: &ProxiedRequest, websocket: bool) -> &'static str {
     }
 }
 
-fn headers_contain(headers: &http::HeaderMap, needle: &str) -> bool {
-    headers.iter().any(|(name, value)| {
-        name.as_str().to_ascii_lowercase().contains(needle)
-            || String::from_utf8_lossy(value.as_bytes())
+fn headers_contain(headers: &proxyapi_models::HeaderBlock, needle: &str) -> bool {
+    headers.iter().any(|field| {
+        String::from_utf8_lossy(field.name())
+            .to_ascii_lowercase()
+            .contains(needle)
+            || String::from_utf8_lossy(field.value())
                 .to_ascii_lowercase()
                 .contains(needle)
     })
@@ -681,13 +683,16 @@ fn tokenize(input: &str) -> Result<Vec<Token>, FilterParseError> {
 mod tests {
     use super::*;
     use bytes::Bytes;
-    use http::{HeaderMap, Method, StatusCode, Version};
+    use http::{Method, StatusCode, Version};
+    use proxyapi_models::HeaderBlock;
 
     fn exchange() -> (ProxiedRequest, ProxiedResponse) {
-        let mut request_headers = HeaderMap::new();
-        request_headers.insert("x-trace", "alpha".parse().unwrap());
-        let mut response_headers = HeaderMap::new();
-        response_headers.insert("content-type", "application/json".parse().unwrap());
+        let mut request_headers = HeaderBlock::new();
+        request_headers.add("x-trace", "alpha").unwrap();
+        let mut response_headers = HeaderBlock::new();
+        response_headers
+            .add("content-type", "application/json")
+            .unwrap();
         (
             ProxiedRequest::new(
                 Method::POST,
@@ -811,7 +816,7 @@ mod tests {
     fn covers_http_filter_fields_and_parser_edges() {
         let (request, base_response) = exchange();
         let mut response_headers = base_response.headers().clone();
-        response_headers.insert("x-result", "finished".parse().unwrap());
+        response_headers.add("x-result", "finished").unwrap();
         let response = ProxiedResponse::new_with_body_metadata(
             base_response.status(),
             base_response.version(),
@@ -875,7 +880,7 @@ mod tests {
                 Method::GET,
                 "http://example.test/socket".parse().unwrap(),
                 Version::HTTP_11,
-                HeaderMap::new(),
+                HeaderBlock::new(),
                 Bytes::new(),
                 1,
             ),

@@ -1,7 +1,7 @@
 use bytes::Bytes;
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use proxyapi::{InterceptConfig, InterceptDecision};
-use proxyapi_models::ProxiedRequest;
+use proxyapi_models::{HeaderBlock, ProxiedRequest};
 use std::sync::Arc;
 use tokio::sync::mpsc;
 
@@ -210,12 +210,11 @@ pub fn handle_key_event(
 /// structured JSON marker and other invalid UTF-8 bodies use hexadecimal.
 fn request_to_text(req: &proxyapi_models::ProxiedRequest) -> (String, bool) {
     let mut text = format!("{} {} {:?}\n", req.method(), req.uri(), req.version());
-    for (name, value) in req.headers() {
-        text.push_str(&format!(
-            "{}: {}\n",
-            name,
-            String::from_utf8_lossy(value.as_bytes())
-        ));
+    for field in req.headers() {
+        text.push_str(std::str::from_utf8(field.name()).expect("header names are ASCII"));
+        text.push_str(": ");
+        text.push_str(&escape_header_value(field.value()));
+        text.push('\n');
     }
     text.push('\n');
     let structured = proxyapi::content::editable_content(req.headers(), req.body())
@@ -244,10 +243,65 @@ fn request_to_text(req: &proxyapi_models::ProxiedRequest) -> (String, bool) {
     (text, binary_body)
 }
 
+fn escape_header_value(value: &[u8]) -> String {
+    let mut escaped = String::with_capacity(value.len());
+    for byte in value {
+        match byte {
+            b'\\' => escaped.push_str("\\\\"),
+            b'\t' => escaped.push_str("\\t"),
+            0x20..=0x7e => escaped.push(char::from(*byte)),
+            _ => escaped.push_str(&format!("\\x{byte:02x}")),
+        }
+    }
+    escaped
+}
+
+fn unescape_header_value(value: &[u8]) -> Result<Vec<u8>, String> {
+    let mut decoded = Vec::with_capacity(value.len());
+    let mut index = 0;
+    while index < value.len() {
+        if value[index] != b'\\' {
+            decoded.push(value[index]);
+            index += 1;
+            continue;
+        }
+        match value.get(index + 1) {
+            Some(b'\\') => {
+                decoded.push(b'\\');
+                index += 2;
+            }
+            Some(b't') => {
+                decoded.push(b'\t');
+                index += 2;
+            }
+            Some(b'x') if index + 3 < value.len() => {
+                let digits = std::str::from_utf8(&value[index + 2..index + 4])
+                    .map_err(|_| "Invalid header byte escape")?;
+                decoded.push(
+                    u8::from_str_radix(digits, 16).map_err(|_| "Invalid header byte escape")?,
+                );
+                index += 4;
+            }
+            _ => return Err("Header backslashes must use \\\\, \\t, or \\xNN".to_owned()),
+        }
+    }
+    Ok(decoded)
+}
+
+fn trim_ows(mut value: &[u8]) -> &[u8] {
+    while matches!(value.first(), Some(b' ' | b'\t')) {
+        value = &value[1..];
+    }
+    while matches!(value.last(), Some(b' ' | b'\t')) {
+        value = &value[..value.len() - 1];
+    }
+    value
+}
+
 /// Parse a raw HTTP request text into (method, uri, headers, body).
 ///
 /// Both `\r\n` and `\n` line endings are accepted.
-fn parse_raw_http_request(text: &str) -> Result<(String, String, http::HeaderMap, Bytes), String> {
+fn parse_raw_http_request(text: &str) -> Result<(String, String, HeaderBlock, Bytes), String> {
     let normalised = text.replace("\r\n", "\n");
     let mut parts = normalised.splitn(2, "\n\n");
 
@@ -264,8 +318,10 @@ fn parse_raw_http_request(text: &str) -> Result<(String, String, http::HeaderMap
     let method = fields.next().ok_or("Missing method")?.trim().to_uppercase();
     let uri = fields.next().ok_or("Missing URI")?.trim().to_string();
     let version = fields.next().ok_or("Missing HTTP version")?;
-    if fields.next().is_some() || !matches!(version, "HTTP/1.0" | "HTTP/1.1") {
-        return Err("Request line must end with HTTP/1.0 or HTTP/1.1".to_owned());
+    if fields.next().is_some()
+        || !matches!(version, "HTTP/1.0" | "HTTP/1.1" | "HTTP/2.0" | "HTTP/3.0")
+    {
+        return Err("Request line has an unsupported HTTP version".to_owned());
     }
     method
         .parse::<http::Method>()
@@ -273,7 +329,7 @@ fn parse_raw_http_request(text: &str) -> Result<(String, String, http::HeaderMap
     uri.parse::<http::Uri>()
         .map_err(|error| format!("Invalid URI: {error}"))?;
 
-    let mut headers = http::HeaderMap::new();
+    let mut headers = HeaderBlock::new();
     for line in header_lines {
         let line = line.trim_end();
         if line.is_empty() {
@@ -282,11 +338,10 @@ fn parse_raw_http_request(text: &str) -> Result<(String, String, http::HeaderMap
         let (name, value) = line
             .split_once(':')
             .ok_or_else(|| format!("Invalid header line: {line}"))?;
-        let name = http::header::HeaderName::from_bytes(name.trim().as_bytes())
-            .map_err(|error| format!("Invalid header name: {error}"))?;
-        let value = http::header::HeaderValue::from_str(value.trim())
-            .map_err(|error| format!("Invalid header value: {error}"))?;
-        headers.append(name, value);
+        let value = unescape_header_value(trim_ows(value.as_bytes()))?;
+        headers
+            .add(name.trim(), value)
+            .map_err(|error| format!("Invalid header: {error}"))?;
     }
 
     let body = Bytes::copy_from_slice(body_str.as_bytes());
@@ -296,7 +351,7 @@ fn parse_raw_http_request(text: &str) -> Result<(String, String, http::HeaderMap
 fn parse_edited_http_request(
     text: &str,
     binary_body: bool,
-) -> Result<(String, String, http::HeaderMap, Bytes), String> {
+) -> Result<(String, String, HeaderBlock, Bytes), String> {
     let (method, uri, headers, body) = parse_raw_http_request(text)?;
     if !binary_body {
         return Ok((method, uri, headers, body));
@@ -324,7 +379,9 @@ fn parse_edited_http_request(
     }
     let decoded = compact
         .as_bytes()
-        .chunks_exact(2)
+        .as_chunks::<2>()
+        .0
+        .iter()
         .map(|pair| {
             let pair = std::str::from_utf8(pair).map_err(|_| "Invalid hex body")?;
             u8::from_str_radix(pair, 16).map_err(|_| "Invalid hex body")
@@ -337,18 +394,18 @@ fn parse_edited_http_request(
 mod tests {
     use super::*;
     use crossterm::event::KeyModifiers;
-    use http::{HeaderMap, Method, Version};
+    use http::{Method, Version};
     use proxyapi::ProxyEvent;
-    use proxyapi_models::{ProxiedRequest, ProxiedResponse};
+    use proxyapi_models::{HeaderBlock, ProxiedRequest, ProxiedResponse};
 
     fn key(code: KeyCode) -> KeyEvent {
         KeyEvent::new(code, KeyModifiers::NONE)
     }
 
     fn request(body: Bytes) -> ProxiedRequest {
-        let mut headers = HeaderMap::new();
-        headers.append("x-test", "one".parse().unwrap());
-        headers.append("x-test", "two".parse().unwrap());
+        let mut headers = HeaderBlock::new();
+        headers.add("x-test", "one").unwrap();
+        headers.add("x-test", "two").unwrap();
         ProxiedRequest::new(
             Method::POST,
             "http://api.test/path?x=1".parse().unwrap(),
@@ -372,8 +429,17 @@ mod tests {
 
         assert_eq!(method, "PATCH");
         assert_eq!(uri, "http://api.test/items");
-        assert_eq!(headers.get_all("x-test").iter().count(), 2);
+        assert_eq!(headers.get_all("x-test").count(), 2);
         assert_eq!(body.as_ref(), b"body");
+    }
+
+    #[test]
+    fn parse_raw_http_request_accepts_captured_http2_and_http3_versions() {
+        for version in ["HTTP/2.0", "HTTP/3.0"] {
+            let text = format!("GET https://api.test/ {version}\n\nx");
+            let (_, _, _, body) = parse_raw_http_request(&text).unwrap();
+            assert_eq!(body.as_ref(), b"x");
+        }
     }
 
     #[test]
@@ -381,7 +447,7 @@ mod tests {
         for text in [
             "GET /missing-version\n\n",
             "GET %%% HTTP/1.1\n\n",
-            "GET / HTTP/2\n\n",
+            "GET / HTTP/9.0\n\n",
             "GET / HTTP/1.1\ninvalid header\n\n",
         ] {
             assert!(
@@ -405,12 +471,36 @@ mod tests {
     }
 
     #[test]
-    fn request_to_text_roundtrips_structured_protobuf_fields() {
-        let mut headers = HeaderMap::new();
-        headers.insert(
-            http::header::CONTENT_TYPE,
-            "application/x-protobuf".parse().unwrap(),
+    fn request_to_text_roundtrips_binary_headers_and_http2() {
+        let mut headers = HeaderBlock::new();
+        headers
+            .add("x-binary", [0xff, b'\\', b'x', b'4', b'1', b'\t'])
+            .unwrap();
+        let request = ProxiedRequest::new(
+            Method::GET,
+            "https://api.test/".parse().unwrap(),
+            Version::HTTP_2,
+            headers,
+            Bytes::new(),
+            100,
         );
+
+        let (text, binary_body) = request_to_text(&request);
+        assert!(text.starts_with("GET https://api.test/ HTTP/2.0\n"));
+        assert!(text.contains("x-binary: \\xff\\\\x41\\t\n"));
+        let (_, _, headers, _) = parse_edited_http_request(&text, binary_body).unwrap();
+        assert_eq!(
+            headers.get("x-binary"),
+            Some([0xff, b'\\', b'x', b'4', b'1', b'\t'].as_slice())
+        );
+    }
+
+    #[test]
+    fn request_to_text_roundtrips_structured_protobuf_fields() {
+        let mut headers = HeaderBlock::new();
+        headers
+            .add("content-type", "application/x-protobuf")
+            .unwrap();
         let request = ProxiedRequest::new(
             Method::POST,
             "http://api.test/protobuf".parse().unwrap(),
@@ -464,7 +554,7 @@ mod tests {
             response: Box::new(ProxiedResponse::new(
                 http::StatusCode::OK,
                 Version::HTTP_11,
-                HeaderMap::new(),
+                HeaderBlock::new(),
                 Bytes::new(),
                 200,
             )),

@@ -143,3 +143,7 @@ mod tests {
         assert_eq!(exchange.response.as_ref(), b"response");
     }
 }
+
+#[cfg(test)]
+#[path = "tests/udp.rs"]
+mod failure_tests;

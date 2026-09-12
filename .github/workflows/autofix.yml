@@ -74,12 +74,16 @@ jobs:
       - uses: actions/checkout@v7
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
+      - name: Build lean proxyapi without optional engines
+        run: cargo build -p proxyapi --locked --no-default-features
       - name: Build without default features
         run: cargo build --workspace --locked --no-default-features
       - name: Test without default features
         run: cargo test --workspace --locked --no-default-features
       - name: Test proxyapi scripting explicitly
         run: cargo test -p proxyapi --locked --features scripting,vendored-lua -- scripting
+      - name: Test proxyapi HTTP/3 explicitly
+        run: cargo test -p proxyapi --locked --features http3
 
   coverage:
     name: Coverage
@@ -108,14 +112,17 @@ jobs:
           --fail-under-lines "$CORE_COVERAGE_TARGET_LINES"
 
   package:
-    name: Package crates
+    name: Inspect crate packages
     needs: fmt
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v7
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
-      - run: cargo package --workspace --locked --no-verify
+      # Stable Cargo resolves packaged path dependencies from crates.io. List
+      # every archive here; the release job publishes the dependency layers in
+      # order before packaging the next layer against the live index.
+      - run: cargo package --workspace --list
 
   rustdoc:
     name: Rustdoc

@@ -71,4 +71,7 @@ end
 - Reverse proxy mode does not require browser or OS proxy configuration.
 - Use `-i gui` if you prefer the web UI while developing.
 - Use `--upstream-trust default+ca:/path/to/ca.pem` if the upstream service uses a private HTTPS CA.
-- For HTTPS clients connecting to Proxelar itself, use forward proxy mode today; reverse proxy TLS termination for inbound clients is not the main supported workflow.
+- An `https://` target enables TLS on both sides of the reverse proxy. Point the
+  target hostname at Proxelar and trust the Proxelar CA in the client; TCP
+  negotiates H1/H2 and the HTTP/3-enabled CLI also listens for H3 on UDP at the
+  same port.

@@ -3,11 +3,11 @@
 Proxelar is a Rust workspace with a strict dependency direction:
 
 ```text
-proxelar-cli  →  proxyapi  →  proxyapi_models
-interfaces      engine       pure data
+proxelar-cli  →  proxyapi  →  proxelar-proto  →  proxyapi_models
+interfaces      engine       protocol core       pure data
 ```
 
-`proxyapi_models` owns serializable request, response, WebSocket, TCP, DNS, UDP, and session types. It must stay free of async and network behavior. `proxyapi` owns listeners, TLS, handlers, capture, filtering, content views, sessions/export, rules, and Lua hooks. `proxelar-cli` owns argument parsing and the terminal, TUI, web, API, and browser-launch experiences.
+`proxyapi_models` owns serializable request, response, WebSocket, TCP, DNS, UDP, and session types. It must stay free of async and network behavior. `proxelar-proto` owns transport-neutral heads and bodies plus the native H1 and H2 codecs/drivers. `proxyapi` owns listeners, TLS, H3, handlers, capture, filtering, content views, sessions/export, rules, and Lua hooks. `proxelar-cli` owns argument parsing and the terminal, TUI, web, API, and browser-launch experiences.
 
 ## Runtime flow
 
@@ -18,7 +18,7 @@ interfaces      engine       pure data
 5. `ProxyEvent` values fan out once to the selected interface and `SessionRecorder`.
 6. The recorder backs the REST API and clean-shutdown exporters.
 
-The upstream client is shared by forward, reverse, replay, and chaining paths. Preserve its normalization invariants: remove `Host`, join duplicate `Cookie` fields with `; `, strip hop-by-hop metadata, and pin upstream HTTP/1.1.
+Protocol drivers share one transport-neutral message model. Preserve `normalize_request()` invariants at H1 boundaries: remove `Host`, join duplicate `Cookie` fields with `; `, strip hop-by-hop metadata, and pin HTTP/1.1. H2/H3 adapters must use native lowercase and pseudo-header forms while retaining duplicate order.
 
 ## Extension points
 

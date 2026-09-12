@@ -15,7 +15,9 @@ use proxyapi::{
     DnsConfig, InterceptConfig, Proxy, ProxyConfig, ProxyMode, RedactionPolicy, RouteRules,
     SessionRecorder, WireGuardConfig,
 };
+use std::fs::OpenOptions;
 use std::net::SocketAddr;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use tokio::sync::RwLock;
 use tokio_util::sync::CancellationToken;
@@ -28,18 +30,17 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let _ = rustls::crypto::ring::default_provider().install_default();
 
     let args = Args::parse();
-    tracing_subscriber::fmt()
-        .with_env_filter(tracing_subscriber::EnvFilter::from_default_env())
-        .init();
-
-    let ca_dir = args.ca_dir.clone().unwrap_or_else(|| {
-        dirs::home_dir()
-            .unwrap_or_else(|| {
-                tracing::warn!("Could not determine home directory, using current directory");
-                std::path::PathBuf::from(".")
-            })
-            .join(".proxelar")
-    });
+    let (ca_dir, used_current_dir) = match args.ca_dir.clone() {
+        Some(path) => (path, false),
+        None => match dirs::home_dir() {
+            Some(home) => (home.join(".proxelar"), false),
+            None => (PathBuf::from(".").join(".proxelar"), true),
+        },
+    };
+    init_tracing(args.interface, &ca_dir)?;
+    if used_current_dir {
+        tracing::warn!("Could not determine home directory, using current directory");
+    }
     #[cfg(feature = "scripting")]
     let addons_dir = args
         .addons_dir
@@ -285,6 +286,25 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         export_raw(path, &session, redaction.as_ref())?;
     }
 
+    Ok(())
+}
+
+fn init_tracing(interface: Interface, ca_dir: &Path) -> Result<(), Box<dyn std::error::Error>> {
+    let filter = tracing_subscriber::EnvFilter::from_default_env();
+    if matches!(interface, Interface::Tui) {
+        std::fs::create_dir_all(ca_dir)?;
+        let log_file = OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(ca_dir.join("proxelar.log"))?;
+        tracing_subscriber::fmt()
+            .with_env_filter(filter)
+            .with_writer(log_file)
+            .with_ansi(false)
+            .init();
+    } else {
+        tracing_subscriber::fmt().with_env_filter(filter).init();
+    }
     Ok(())
 }
 

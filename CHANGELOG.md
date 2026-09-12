@@ -7,6 +7,43 @@
 
 ## [Unreleased]
 
+### Added
+
+- Add a native transport-neutral HTTP core with custom HTTP/1, direct HTTP/2, and ordered byte-safe headers across capture, replay, REST, and Lua.
+- Replace captured request and response header maps with `HeaderBlock`, exposing ordered iteration, case-insensitive lookup, duplicate-value lookup, append, replacement, and removal. The native HTTP/1 parser preserves interleaved duplicates, original field-name casing, and non-UTF-8 values, addressing #170. HTTP/2 retains duplicate-value order, but its `h2` adapter does not guarantee the original global wire order across different field names.
+- Carry ordered headers through intercept editing, TUI and web views, Lua hooks, replay, and session export. REST responses represent headers as ordered entries with text or base64 values, allowing arbitrary header bytes to survive JSON serialization without replacement characters.
+- Enable HTTP/3 by default in official CLI artifacts for reverse and WireGuard interception, including RFC 9220 WebSockets.
+- Add regression coverage for CONNECT backpressure in both directions, independent tunnel half-closes, cancellation and error propagation, Lua request-trailer preservation, and the exact SOCKS5 wire encoding of domain, IPv4, and IPv6 destinations.
+- Extend protocol tests to cover plaintext and TLS interception, pinned upstream destinations, HTTP/1 reverse WebSocket upgrades, Lua WebSocket edits and failures, HTTP/3 stream resets and driver shutdown, connection reuse after rejected requests, malformed binary content, and UDP/DNS listener lifecycle and timeout capture.
+
+### Changed
+
+- Remove Hyper from the `proxyapi` data path, public API, and production dependencies; it remains transitively in the CLI through Axum and as a dev-only protocol test dependency.
+- Bump native sessions to format v2 with ordered byte-safe header lists; v1 files are rejected explicitly instead of being decoded with lossy header semantics.
+- Compare header-value iterators directly when reconciling captured headers with hook edits, avoiding temporary header-value vectors while preserving duplicate-value order.
+- Simplify the protocol adapters by replacing the custom ready-frame stream with `futures_util::stream::iter`, making the infallible outbound connector constructor return `Self`, and removing obsolete dead-code allowances from the active HTTP/3 certificate path.
+
+### Fixed
+
+- Retire negotiated HTTP/2 upstream connections after GOAWAY or connection failure before dispatching the next request, while allowing existing response streams to drain.
+- Retire closed idle HTTP/1 upstream connections before reuse, including negotiated connections, without retrying requests whose bytes were already sent. Detect HTTP/2 stream resets while upload or response bodies await data so abandoned senders release their resources.
+- Remove IPv6 URI brackets before constructing the rustls server name for shared and negotiated HTTPS upstream connections.
+- Make the HTTP/1 application deadline opt-in so interactive interception retains its own 300-second deadline and can deliver its timeout response.
+- Preserve header order, casing, duplicate interleaving, and binary values in Lua short-circuit responses and their captured events.
+- Upgrade `h2` to 0.4.19 and require at least 0.4.16 to address RUSTSEC-2026-0258, which allowed undrained streams to queue unbounded empty DATA frames. Refresh the yanked `chacha20` 0.10.1 dependency to 0.10.2, update `event-listener` to 5.4.2 for RUSTSEC-2026-0221, and update `lru` to 0.18.4 for RUSTSEC-2026-0253.
+- Replace `tokio-quiche` with a direct Tokio driver for the maintained `quiche` crate, removing Foundations and its unmaintained YAML dependencies without advisory exceptions or version pins. Keep the dependency graph publishable using released crates.
+- Preserve received HTTP/3 informational responses and request/response trailers through the protocol adapters. The direct driver processes every HEADERS event, retains header byte values and interleaved duplicate order, and validates trailer and informational-response semantics.
+- Drive QUIC retransmission timers, handshake deadlines, and packet pacing explicitly. Bound UDP and body queues, isolate stream resets and backpressure, cancel abandoned stream tasks, and close connection tasks when their listener stops. Replace cached connections after GOAWAY without failing the next request. Wait for peer SETTINGS before opening an extended CONNECT WebSocket.
+- Configure HTTP/3 TLS directly from in-memory certificate material, removing temporary certificate/key files. Preserve the configured rustls upstream trust and hostname checks through BoringSSL verification, and mint cached WireGuard leaf certificates for the client's SNI. Remove URI brackets before resolving or verifying IPv6 literals and encode IPv6 certificate identities as IP subject alternative names.
+- Prevent CONNECT tunnels from stalling when either direction encounters backpressure. Request-body forwarding and response-body forwarding now progress independently, so a full request buffer cannot block a ready response and a full response queue cannot block incoming request bytes.
+- Preserve CONNECT half-close behavior: reaching request EOF closes only the application's read side, and closing the application's write side finishes the response body while allowing remaining request bytes to arrive. Dropping an unfinished response body cancels pending request forwarding; inbound body errors and unsupported CONNECT trailers are surfaced through the response stream while it remains open.
+- Preserve buffered request trailers when a Lua hook leaves the wire body unchanged, including ordinary header-only edits. Lua failures continue to log and pass the original request through, including its trailers. Replacing the body still discards the original trailers so checksums or other metadata for the previous body are not forwarded with the replacement.
+- Encode bracketed IPv6 destinations correctly when chaining through a SOCKS5 upstream proxy. URI brackets are removed before IP parsing, and IPv6 literals are sent with the SOCKS5 IPv6 address type and 16 address bytes instead of being treated as domain names; domain-name and IPv4 forwarding retain their respective wire formats.
+- Respect HTTP/1.0 upstream connection lifetimes. Responses without an explicit keep-alive token now close the client connection after the response rather than leaving an implicitly closing connection available for reuse.
+- Apply shared response-body suppression to the HTTP/1, HTTP/2, and HTTP/3 server paths. HEAD responses and statuses that forbid content, including informational responses, 204, 205, and 304, no longer emit supplied body bytes. Successful CONNECT responses remain eligible to carry tunnel data over HTTP/2 and HTTP/3.
+- Normalize negotiated HTTP/2 upstream requests and HTTP/3 reverse-proxy requests, including their WebSocket paths, before dispatch. Proxy credentials are removed, duplicate Cookie values are joined with `"; "`, and protocol adapters derive the appropriate authority fields and filter connection-specific headers before forwarding.
+- Keep WireGuard's shared UDP receive loop responsive when an HTTP/3 flow queue is saturated. Datagram dispatch no longer waits for space in one flow's queue: it drops that datagram and continues servicing other traffic. Closed flow queues return ownership of the datagram so the stale flow can be removed and dispatch can continue.
+
 ## [0.5.1] - 2026-07-31
 
 ### Added

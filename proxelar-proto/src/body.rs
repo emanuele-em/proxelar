@@ -1,0 +1,182 @@
+use std::fmt;
+use std::pin::Pin;
+use std::task::{Context, Poll};
+
+use bytes::{Bytes, BytesMut};
+use futures_core::Stream;
+use futures_util::StreamExt as _;
+use proxyapi_models::HeaderBlock;
+
+use crate::{ErrorKind, ProtocolError};
+
+/// A transport-neutral HTTP body frame.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum BodyFrame {
+    Data(Bytes),
+    Trailers(HeaderBlock),
+}
+
+pub type BodyResult = Result<BodyFrame, ProtocolError>;
+
+/// A fully collected body used only where buffering is explicitly required.
+#[derive(Clone, Debug, Default, Eq, PartialEq)]
+pub struct CollectedBody {
+    pub data: Bytes,
+    pub trailers: Option<HeaderBlock>,
+}
+
+impl CollectedBody {
+    /// Return the collected data bytes, matching the common body-collector API.
+    pub fn to_bytes(self) -> Bytes {
+        self.data
+    }
+}
+
+/// A backpressure-aware stream of data and trailer frames.
+///
+/// Pulling the next item is the only way to advance the producer, so protocol
+/// drivers can couple stream polling directly to H1 reads or H2/H3 flow-control
+/// credit. No body buffering is implicit in this type.
+pub struct ProxyBody {
+    inner: BodyInner,
+    exact_length: Option<u64>,
+    may_have_trailers: bool,
+}
+
+impl ProxyBody {
+    pub fn new<S>(stream: S) -> Self
+    where
+        S: Stream<Item = BodyResult> + Send + 'static,
+    {
+        Self {
+            inner: BodyInner::Stream(Box::pin(stream)),
+            exact_length: None,
+            may_have_trailers: true,
+        }
+    }
+
+    pub fn empty() -> Self {
+        Self {
+            inner: BodyInner::Empty,
+            exact_length: Some(0),
+            may_have_trailers: false,
+        }
+    }
+
+    pub fn full(data: impl Into<Bytes>) -> Self {
+        let data = data.into();
+        let length = data.len() as u64;
+        Self {
+            inner: BodyInner::Once(Some(Ok(BodyFrame::Data(data)))),
+            exact_length: Some(length),
+            may_have_trailers: false,
+        }
+    }
+
+    pub fn from_frames(frames: impl IntoIterator<Item = BodyResult>) -> Self {
+        let frames = frames.into_iter().collect::<Vec<_>>();
+        let exact_length = frames.iter().try_fold(0_u64, |length, frame| match frame {
+            Ok(BodyFrame::Data(data)) => length.checked_add(data.len() as u64),
+            Ok(BodyFrame::Trailers(_)) => Some(length),
+            Err(_) => None,
+        });
+        let may_have_trailers = frames
+            .iter()
+            .any(|frame| matches!(frame, Ok(BodyFrame::Trailers(_))));
+        Self {
+            inner: BodyInner::Stream(Box::pin(futures_util::stream::iter(frames))),
+            exact_length,
+            may_have_trailers,
+        }
+    }
+
+    /// Declare the exact number of data bytes produced by this body.
+    ///
+    /// Protocol adapters use this to select framing without polling the stream.
+    pub fn with_exact_length(mut self, length: u64) -> Self {
+        self.exact_length = Some(length);
+        self
+    }
+
+    /// Return the exact data length when the producer can determine it upfront.
+    pub const fn exact_length(&self) -> Option<u64> {
+        self.exact_length
+    }
+
+    /// Return whether the producer may emit a trailer block.
+    ///
+    /// Generic streams are conservative because inspecting them would consume
+    /// data. Ready bodies provide an exact hint.
+    pub const fn may_have_trailers(&self) -> bool {
+        self.may_have_trailers
+    }
+
+    /// Set the protocol adapter's trailer capability hint.
+    pub fn with_trailer_hint(mut self, may_have_trailers: bool) -> Self {
+        self.may_have_trailers = may_have_trailers;
+        self
+    }
+
+    /// Collect a body while retaining ordered trailers.
+    ///
+    /// Protocols permit at most one trailer block. A second block is rejected
+    /// instead of being silently merged or reordered.
+    pub async fn collect(mut self) -> Result<CollectedBody, ProtocolError> {
+        let mut first_data = None::<Bytes>;
+        let mut combined_data = None::<BytesMut>;
+        let mut trailers = None;
+        while let Some(frame) = self.next().await {
+            match frame? {
+                BodyFrame::Data(bytes) if bytes.is_empty() => {}
+                BodyFrame::Data(bytes) => {
+                    if let Some(combined) = &mut combined_data {
+                        combined.extend_from_slice(&bytes);
+                    } else if let Some(first) = first_data.take() {
+                        let mut combined = BytesMut::with_capacity(first.len() + bytes.len());
+                        combined.extend_from_slice(&first);
+                        combined.extend_from_slice(&bytes);
+                        combined_data = Some(combined);
+                    } else {
+                        first_data = Some(bytes);
+                    }
+                }
+                BodyFrame::Trailers(headers) if trailers.is_none() => trailers = Some(headers),
+                BodyFrame::Trailers(_) => {
+                    return Err(ProtocolError::new(
+                        ErrorKind::ProtocolViolation,
+                        "body contains more than one trailer block",
+                    ));
+                }
+            }
+        }
+        Ok(CollectedBody {
+            data: combined_data
+                .map_or_else(|| first_data.unwrap_or_default(), bytes::BytesMut::freeze),
+            trailers,
+        })
+    }
+}
+
+impl Stream for ProxyBody {
+    type Item = BodyResult;
+
+    fn poll_next(mut self: Pin<&mut Self>, context: &mut Context<'_>) -> Poll<Option<Self::Item>> {
+        match &mut self.inner {
+            BodyInner::Empty => Poll::Ready(None),
+            BodyInner::Once(frame) => Poll::Ready(frame.take()),
+            BodyInner::Stream(stream) => stream.as_mut().poll_next(context),
+        }
+    }
+}
+
+impl fmt::Debug for ProxyBody {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str("ProxyBody { .. }")
+    }
+}
+
+enum BodyInner {
+    Empty,
+    Once(Option<BodyResult>),
+    Stream(Pin<Box<dyn Stream<Item = BodyResult> + Send + 'static>>),
+}

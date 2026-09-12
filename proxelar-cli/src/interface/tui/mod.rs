@@ -1,12 +1,13 @@
-mod event;
 mod handler;
 mod state;
 mod ui;
 
 use crossterm::{
+    event::{Event, EventStream},
     execute,
     terminal::{disable_raw_mode, enable_raw_mode, EnterAlternateScreen, LeaveAlternateScreen},
 };
+use futures::StreamExt as _;
 use proxyapi::{InterceptConfig, ProxyEvent};
 use proxyapi_models::ProxiedRequest;
 use ratatui::prelude::*;
@@ -16,7 +17,6 @@ use tokio::sync::mpsc;
 use tokio_util::sync::CancellationToken;
 
 use crate::wireguard_setup::WireGuardSetup;
-use event::{spawn_event_loop, AppEvent};
 use handler::handle_key_event;
 use state::AppState;
 use ui::draw;
@@ -44,7 +44,7 @@ pub async fn run(
 }
 
 async fn run_inner(
-    event_rx: mpsc::Receiver<ProxyEvent>,
+    mut event_rx: mpsc::Receiver<ProxyEvent>,
     intercept: Arc<InterceptConfig>,
     replay_tx: mpsc::Sender<ProxiedRequest>,
     wireguard_setup: Option<Arc<WireGuardSetup>>,
@@ -60,29 +60,39 @@ async fn run_inner(
     let mut terminal = Terminal::new(backend)?;
 
     let mut state = AppState::new();
-    let mut app_events = spawn_event_loop(event_rx);
+    let mut terminal_events = EventStream::new();
+    let mut render_interval = tokio::time::interval(tokio::time::Duration::from_millis(50));
+    render_interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+    let mut dirty = true;
 
     loop {
-        let event = tokio::select! {
-            event = app_events.recv() => match event {
-                Some(e) => e,
+        tokio::select! {
+            proxy_event = event_rx.recv() => match proxy_event {
+                Some(proxy_event) => {
+                    state.add_event(proxy_event);
+                    dirty = true;
+                }
                 None => break,
             },
-            () = cancel.cancelled() => break,
-        };
-
-        match event {
-            AppEvent::Input(key_event) => {
-                if handle_key_event(key_event, &mut state, &intercept, &replay_tx) {
-                    break;
+            terminal_event = terminal_events.next() => match terminal_event {
+                Some(Ok(Event::Key(key_event))) => {
+                    if handle_key_event(key_event, &mut state, &intercept, &replay_tx) {
+                        break;
+                    }
+                    dirty = true;
                 }
-            }
-            AppEvent::Proxy(proxy_event) => {
-                state.add_event(proxy_event);
-            }
-            AppEvent::Render => {
-                terminal.draw(|f| draw(f, &mut state, wireguard_setup.as_deref()))?;
-            }
+                Some(Ok(Event::Resize(_, _))) => dirty = true,
+                Some(Ok(_)) => {}
+                Some(Err(error)) => return Err(error.into()),
+                None => break,
+            },
+            _ = render_interval.tick() => {
+                if dirty {
+                    terminal.draw(|frame| draw(frame, &mut state, wireguard_setup.as_deref()))?;
+                    dirty = false;
+                }
+            },
+            () = cancel.cancelled() => break,
         }
     }
 

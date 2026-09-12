@@ -96,17 +96,18 @@ cargo llvm-cov report -p proxyapi \
   --fail-under-lines 90
 ```
 
-CI additionally verifies package tarball construction with `cargo package --workspace --locked --no-verify`, Rust documentation with warnings denied, dependency audits, coverage, and the matrix on Linux, macOS, and Windows.
+CI additionally inspects every crate archive with `cargo package --workspace --list`, verifies Rust documentation with warnings denied, audits dependencies, measures coverage, and runs the matrix on Linux, macOS, and Windows. Release publishing follows dependency order so each packaged path dependency is available from the crates.io index before its consumer.
 
 ## Project Structure
 
 The [architecture guide](docs/src/contributing/architecture.md) traces the listener, handler, event, session, and interface boundaries in more detail.
 
-The workspace has three crates with a strict dependency direction: `proxelar-cli` → `proxyapi` → `proxyapi_models`.
+The workspace has four crates with a strict dependency direction: `proxelar-cli` → `proxyapi` → `proxelar-proto` → `proxyapi_models`.
 
 | Crate | Purpose |
 |-------|---------|
 | `proxyapi_models` | Pure data types — no async, no network |
+| `proxelar-proto` | Internal transport-neutral HTTP core and H1/H2 protocol engines |
 | `proxyapi` | Core proxy engine — forward/reverse proxy, TLS MITM, CA management |
 | `proxelar-cli` | Binary — CLI, terminal, TUI, and web GUI interfaces |
 

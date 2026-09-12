@@ -7,6 +7,9 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::Duration;
 
+#[cfg(feature = "http3")]
+use std::collections::HashMap;
+
 use base64::Engine;
 use boringtun::noise::{Tunn, TunnResult};
 use boringtun::x25519::{PublicKey, StaticSecret};
@@ -23,7 +26,14 @@ use crate::ca::Ssl;
 use crate::event::ProxyEvent;
 use crate::handler::CapturingHandler;
 
-use super::{dns, forward, udp, Client, DnsConfig};
+#[cfg(feature = "http3")]
+use crate::HttpHandler as _;
+#[cfg(feature = "http3")]
+use proxelar_proto::{BoxFuture, HttpService, ProtocolError, ProxyRequest, ProxyResponse};
+#[cfg(feature = "http3")]
+use rustls::client::danger::ServerCertVerifier;
+
+use super::{dns, forward, http1::NativePool, udp, DnsConfig};
 
 const MAX_PACKET_SIZE: usize = 65_535;
 const WIREGUARD_OVERHEAD: usize = 80;
@@ -34,6 +44,8 @@ const CLIENT_KEY_FILE: &str = "wireguard-client.key";
 // Android derives the tunnel/interface name from this stem and enforces the
 // WireGuard 15-character interface-name limit.
 const CLIENT_CONFIG_FILE: &str = "proxelar-wg.conf";
+#[cfg(feature = "http3")]
+const H3_FLOW_IDLE_TIMEOUT: Duration = Duration::from_secs(60);
 
 /// Key material and DNS policy for a single-peer WireGuard capture endpoint.
 ///
@@ -129,7 +141,7 @@ fn load_or_generate_key(path: &Path) -> io::Result<[u8; 32]> {
         Ok(value) => decode_key(value.trim()),
         Err(error) if error.kind() == io::ErrorKind::NotFound => {
             let mut key = [0_u8; 32];
-            openssl::rand::rand_bytes(&mut key).map_err(io::Error::other)?;
+            getrandom::fill(&mut key).map_err(|error| io::Error::other(error.to_string()))?;
             let encoded = format!("{}\n", encode_key(&key));
             crate::session::write_private(path, encoded.as_bytes())?;
             Ok(key)
@@ -183,7 +195,9 @@ pub async fn serve(
     config: WireGuardConfig,
     handler: CapturingHandler,
     ca: Arc<Ssl>,
-    client: Arc<Client>,
+    native_pool: Arc<NativePool>,
+    native_route: Option<String>,
+    upstream_tls: super::UpstreamTlsConfig,
     event_tx: mpsc::Sender<ProxyEvent>,
     replay_rx: Option<mpsc::Receiver<ProxiedRequest>>,
     shutdown: impl Future<Output = ()>,
@@ -207,6 +221,11 @@ pub async fn serve(
     let (encrypted_tx, encrypted_rx) = mpsc::channel(1_024);
     let cancel = CancellationToken::new();
     let mut tasks = JoinSet::new();
+    #[cfg(feature = "http3")]
+    let h3_verifier = super::tls::h3_server_verifier(&upstream_tls)
+        .map_err(|error| io::Error::other(error.to_string()))?;
+    #[cfg(not(feature = "http3"))]
+    let _ = upstream_tls;
 
     tasks.spawn(runner);
     tasks.spawn(stack_bridge(
@@ -225,12 +244,32 @@ pub async fn serve(
     tasks.spawn(tcp_loop(
         tcp_listener,
         handler.clone(),
-        ca,
-        Arc::clone(&client),
+        Arc::clone(&ca),
+        Arc::clone(&native_pool),
+        native_route.clone(),
         cancel.clone(),
     ));
-    tasks.spawn(udp_loop(virtual_udp, config.dns, event_tx, cancel.clone()));
-    tasks.spawn(replay_loop(handler, client, replay_rx, cancel.clone()));
+    tasks.spawn(udp_loop(
+        virtual_udp,
+        UdpLoopConfig {
+            dns: config.dns,
+            event_tx,
+            cancel: cancel.clone(),
+            #[cfg(feature = "http3")]
+            handler: handler.clone(),
+            #[cfg(feature = "http3")]
+            ca: Arc::clone(&ca),
+            #[cfg(feature = "http3")]
+            verifier: h3_verifier,
+        },
+    ));
+    tasks.spawn(replay_loop(
+        handler,
+        native_pool,
+        native_route,
+        replay_rx,
+        cancel.clone(),
+    ));
 
     tokio::pin!(shutdown);
     let result = tokio::select! {
@@ -249,7 +288,8 @@ pub async fn serve(
 
 async fn replay_loop(
     handler: CapturingHandler,
-    client: Arc<Client>,
+    native_pool: Arc<NativePool>,
+    native_route: Option<String>,
     mut replay_rx: Option<mpsc::Receiver<ProxiedRequest>>,
     cancel: CancellationToken,
 ) -> io::Result<()> {
@@ -261,7 +301,8 @@ async fn replay_loop(
                     tokio::spawn(forward::handle_replay(
                         request,
                         handler.clone(),
-                        Arc::clone(&client),
+                        Arc::clone(&native_pool),
+                        native_route.clone(),
                     ));
                 }
             }
@@ -429,7 +470,8 @@ async fn tcp_loop(
     mut listener: TcpListener,
     handler: CapturingHandler,
     ca: Arc<Ssl>,
-    client: Arc<Client>,
+    native_pool: Arc<NativePool>,
+    native_route: Option<String>,
     cancel: CancellationToken,
 ) -> io::Result<()> {
     loop {
@@ -446,7 +488,8 @@ async fn tcp_loop(
                     source,
                     handler.clone(),
                     Arc::clone(&ca),
-                    Arc::clone(&client),
+                    Arc::clone(&native_pool),
+                    native_route.clone(),
                     SocketAddr::new(IpAddr::V4(SERVER_ADDRESS), 80),
                     authority,
                 ));
@@ -455,49 +498,634 @@ async fn tcp_loop(
     }
 }
 
-async fn udp_loop(
-    socket: VirtualUdpSocket,
-    dns_config: DnsConfig,
+struct UdpLoopConfig {
+    dns: DnsConfig,
     event_tx: mpsc::Sender<ProxyEvent>,
     cancel: CancellationToken,
-) -> io::Result<()> {
+    #[cfg(feature = "http3")]
+    handler: CapturingHandler,
+    #[cfg(feature = "http3")]
+    ca: Arc<Ssl>,
+    #[cfg(feature = "http3")]
+    verifier: Arc<dyn ServerCertVerifier>,
+}
+
+#[cfg(not(feature = "http3"))]
+async fn udp_loop(socket: VirtualUdpSocket, config: UdpLoopConfig) -> io::Result<()> {
     let (mut reader, mut writer) = socket.split();
     let (response_tx, mut response_rx) = mpsc::channel(1_024);
     loop {
         tokio::select! {
-            () = cancel.cancelled() => return Ok(()),
+            () = config.cancel.cancelled() => return Ok(()),
             response = response_rx.recv() => {
                 let Some(response) = response else { return Ok(()); };
                 writer.send(response).await?;
             }
             datagram = reader.next() => {
                 let Some((request, source, destination)) = datagram else { return Ok(()); };
-                let response_tx = response_tx.clone();
-                let dns_config = dns_config.clone();
-                let event_tx = event_tx.clone();
-                tokio::spawn(async move {
-                    let response = if destination.port() == 53 {
-                        dns::resolve_packet(request, dns_config, event_tx).await
-                    } else {
-                        udp::exchange(source, destination, request, event_tx).await
-                    };
-                    match response {
-                        Ok(response) => {
-                            let _ = response_tx.send((response, destination, source)).await;
-                        }
-                        Err(error) => tracing::debug!(
-                            "WireGuard UDP exchange {source} -> {destination} failed: {error}"
-                        ),
-                    }
-                });
+                spawn_udp_exchange(
+                    request,
+                    source,
+                    destination,
+                    config.dns.clone(),
+                    config.event_tx.clone(),
+                    response_tx.clone(),
+                );
             }
         }
+    }
+}
+
+fn spawn_udp_exchange(
+    request: Vec<u8>,
+    source: SocketAddr,
+    destination: SocketAddr,
+    dns_config: DnsConfig,
+    event_tx: mpsc::Sender<ProxyEvent>,
+    response_tx: mpsc::Sender<(Vec<u8>, SocketAddr, SocketAddr)>,
+) {
+    tokio::spawn(async move {
+        let response = if destination.port() == 53 {
+            dns::resolve_packet(request, dns_config, event_tx).await
+        } else {
+            udp::exchange(source, destination, request, event_tx).await
+        };
+        match response {
+            Ok(response) => {
+                let _ = response_tx.send((response, destination, source)).await;
+            }
+            Err(error) => {
+                tracing::debug!("WireGuard UDP exchange {source} -> {destination} failed: {error}")
+            }
+        }
+    });
+}
+
+#[cfg(feature = "http3")]
+#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
+struct UdpFlowKey {
+    source: SocketAddr,
+    destination: SocketAddr,
+}
+
+#[cfg(feature = "http3")]
+struct H3FlowHandle {
+    generation: u64,
+    datagrams: mpsc::Sender<Vec<u8>>,
+}
+
+#[cfg(feature = "http3")]
+#[derive(Debug, Eq, PartialEq)]
+enum H3DatagramDispatch {
+    Queued,
+    Saturated,
+    Closed(Vec<u8>),
+}
+
+#[cfg(feature = "http3")]
+fn dispatch_h3_datagram(flow: &H3FlowHandle, datagram: Vec<u8>) -> H3DatagramDispatch {
+    match flow.datagrams.try_send(datagram) {
+        Ok(()) => H3DatagramDispatch::Queued,
+        Err(mpsc::error::TrySendError::Full(_)) => H3DatagramDispatch::Saturated,
+        Err(mpsc::error::TrySendError::Closed(datagram)) => H3DatagramDispatch::Closed(datagram),
+    }
+}
+
+#[cfg(feature = "http3")]
+struct H3FlowContext {
+    handler: CapturingHandler,
+    ca: Arc<Ssl>,
+    verifier: Arc<dyn ServerCertVerifier>,
+    response_tx: mpsc::Sender<(Vec<u8>, SocketAddr, SocketAddr)>,
+    completed_tx: mpsc::Sender<(UdpFlowKey, u64)>,
+    cancel: CancellationToken,
+}
+
+#[cfg(feature = "http3")]
+async fn udp_loop(socket: VirtualUdpSocket, config: UdpLoopConfig) -> io::Result<()> {
+    let (mut reader, mut writer) = socket.split();
+    let (response_tx, mut response_rx) = mpsc::channel(1_024);
+    let (completed_tx, mut completed_rx) = mpsc::channel(128);
+    let mut h3_flows = HashMap::<UdpFlowKey, H3FlowHandle>::new();
+    let mut next_generation = 0_u64;
+
+    loop {
+        tokio::select! {
+            () = config.cancel.cancelled() => return Ok(()),
+            response = response_rx.recv() => {
+                let Some(response) = response else { return Ok(()); };
+                writer.send(response).await?;
+            }
+            completed = completed_rx.recv() => {
+                let Some((key, generation)) = completed else { return Ok(()); };
+                if h3_flows.get(&key).is_some_and(|flow| flow.generation == generation) {
+                    h3_flows.remove(&key);
+                }
+            }
+            datagram = reader.next() => {
+                let Some((mut request, source, destination)) = datagram else { return Ok(()); };
+                let key = UdpFlowKey { source, destination };
+                if let Some(flow) = h3_flows.get(&key) {
+                    match dispatch_h3_datagram(flow, request) {
+                        H3DatagramDispatch::Queued => continue,
+                        H3DatagramDispatch::Saturated => {
+                            tracing::trace!(
+                                "Dropping WireGuard HTTP/3 datagram for saturated flow {source} -> {destination}"
+                            );
+                            continue;
+                        }
+                        H3DatagramDispatch::Closed(datagram) => request = datagram,
+                    }
+                    h3_flows.remove(&key);
+                }
+
+                if destination.port() != 53 && is_quic_initial(&request) {
+                    next_generation = next_generation.wrapping_add(1);
+                    let generation = next_generation;
+                    match start_h3_flow(
+                        key,
+                        generation,
+                        H3FlowContext {
+                            handler: config.handler.clone(),
+                            ca: Arc::clone(&config.ca),
+                            verifier: Arc::clone(&config.verifier),
+                            response_tx: response_tx.clone(),
+                            completed_tx: completed_tx.clone(),
+                            cancel: config.cancel.clone(),
+                        },
+                    ).await {
+                        Ok(flow) => {
+                            match dispatch_h3_datagram(&flow, request) {
+                                H3DatagramDispatch::Queued => {
+                                    h3_flows.insert(key, flow);
+                                    continue;
+                                }
+                                H3DatagramDispatch::Saturated => {
+                                    tracing::trace!(
+                                        "Dropping initial WireGuard HTTP/3 datagram for saturated flow {source} -> {destination}"
+                                    );
+                                    continue;
+                                }
+                                H3DatagramDispatch::Closed(datagram) => request = datagram,
+                            }
+                        }
+                        Err(error) => tracing::debug!(
+                            "WireGuard HTTP/3 interception {source} -> {destination} failed to start: {error}"
+                        ),
+                    }
+                }
+
+                spawn_udp_exchange(
+                    request,
+                    source,
+                    destination,
+                    config.dns.clone(),
+                    config.event_tx.clone(),
+                    response_tx.clone(),
+                );
+            }
+        }
+    }
+}
+
+#[cfg(feature = "http3")]
+fn is_quic_initial(datagram: &[u8]) -> bool {
+    let mut packet = datagram.to_vec();
+    quiche::Header::from_slice(&mut packet, 0).is_ok_and(|header| {
+        header.ty == quiche::Type::Initial && quiche::version_is_supported(header.version)
+    })
+}
+
+#[cfg(feature = "http3")]
+async fn start_h3_flow(
+    key: UdpFlowKey,
+    generation: u64,
+    context: H3FlowContext,
+) -> io::Result<H3FlowHandle> {
+    let H3FlowContext {
+        handler,
+        ca,
+        verifier,
+        response_tx,
+        completed_tx,
+        cancel,
+    } = context;
+    let authority = key
+        .destination
+        .to_string()
+        .parse::<Authority>()
+        .map_err(|_| invalid_input("invalid WireGuard HTTP/3 destination"))?;
+    let config = super::http3::server_config(ca, authority, true)
+        .map_err(|e| io::Error::other(e.to_string()))?;
+    let listener =
+        super::http3::H3Listener::bind("127.0.0.1:0".parse().expect("loopback address"), config)
+            .await?;
+    let relay_socket = UdpSocket::bind("127.0.0.1:0").await?;
+    relay_socket.connect(listener.local_addr()?).await?;
+    let (datagram_tx, datagram_rx) = mpsc::channel(128);
+    tokio::spawn(run_h3_flow(H3FlowRuntime {
+        key,
+        generation,
+        relay_socket,
+        listener,
+        datagrams: datagram_rx,
+        handler,
+        verifier,
+        response_tx,
+        completed_tx,
+        cancel,
+    }));
+    Ok(H3FlowHandle {
+        generation,
+        datagrams: datagram_tx,
+    })
+}
+
+#[cfg(feature = "http3")]
+struct H3FlowRuntime {
+    key: UdpFlowKey,
+    generation: u64,
+    relay_socket: UdpSocket,
+    listener: super::http3::H3Listener,
+    datagrams: mpsc::Receiver<Vec<u8>>,
+    handler: CapturingHandler,
+    verifier: Arc<dyn ServerCertVerifier>,
+    response_tx: mpsc::Sender<(Vec<u8>, SocketAddr, SocketAddr)>,
+    completed_tx: mpsc::Sender<(UdpFlowKey, u64)>,
+    cancel: CancellationToken,
+}
+
+#[cfg(feature = "http3")]
+async fn run_h3_flow(runtime: H3FlowRuntime) {
+    let H3FlowRuntime {
+        key,
+        generation,
+        relay_socket,
+        listener,
+        mut datagrams,
+        handler,
+        verifier,
+        response_tx,
+        completed_tx,
+        cancel,
+    } = runtime;
+    let upstreams = Arc::new(tokio::sync::Mutex::new(HashMap::new()));
+    let serving = listener.serve(move |_| WireGuardH3Service {
+        remote_addr: key.source,
+        destination: key.destination,
+        handler: handler.clone(),
+        verifier: Arc::clone(&verifier),
+        upstreams: Arc::clone(&upstreams),
+    });
+    tokio::pin!(serving);
+    let mut buffer = vec![0_u8; MAX_PACKET_SIZE];
+    let idle = tokio::time::sleep(H3_FLOW_IDLE_TIMEOUT);
+    tokio::pin!(idle);
+    loop {
+        tokio::select! {
+            () = cancel.cancelled() => break,
+            () = &mut idle => break,
+            datagram = datagrams.recv() => {
+                let Some(datagram) = datagram else { break; };
+                if let Err(error) = relay_socket.send(&datagram).await {
+                    tracing::debug!("WireGuard HTTP/3 relay send failed: {error}");
+                    break;
+                }
+                idle.as_mut().reset(tokio::time::Instant::now() + H3_FLOW_IDLE_TIMEOUT);
+            }
+            received = relay_socket.recv(&mut buffer) => {
+                match received {
+                    Ok(length) => {
+                        if response_tx
+                            .send((buffer[..length].to_vec(), key.destination, key.source))
+                            .await
+                            .is_err()
+                        {
+                            break;
+                        }
+                        idle.as_mut().reset(tokio::time::Instant::now() + H3_FLOW_IDLE_TIMEOUT);
+                    }
+                    Err(error) => {
+                        tracing::debug!("WireGuard HTTP/3 relay receive failed: {error}");
+                        break;
+                    }
+                }
+            }
+            result = &mut serving => {
+                if let Err(error) = result { tracing::debug!("WireGuard HTTP/3 listener failed: {error}"); }
+                break;
+            }
+        }
+    }
+    let _ = completed_tx.send((key, generation)).await;
+}
+
+#[cfg(feature = "http3")]
+#[derive(Clone)]
+struct WireGuardH3Service {
+    remote_addr: SocketAddr,
+    destination: SocketAddr,
+    handler: CapturingHandler,
+    verifier: Arc<dyn ServerCertVerifier>,
+    upstreams: Arc<tokio::sync::Mutex<HashMap<Authority, super::http3::ReverseH3Upstream>>>,
+}
+
+#[cfg(feature = "http3")]
+impl HttpService for WireGuardH3Service {
+    fn call(
+        &mut self,
+        request: ProxyRequest,
+    ) -> BoxFuture<'_, Result<ProxyResponse, ProtocolError>> {
+        let mut handler = self.handler.clone();
+        let remote_addr = self.remote_addr;
+        let destination = self.destination;
+        let verifier = Arc::clone(&self.verifier);
+        let upstreams = Arc::clone(&self.upstreams);
+        Box::pin(async move {
+            let context = crate::HttpContext { remote_addr };
+            if super::http3::is_extended_websocket(&request) {
+                let websocket_upstreams = Arc::clone(&upstreams);
+                let websocket_verifier = Arc::clone(&verifier);
+                return super::http3::handle_extended_websocket(
+                    request,
+                    handler,
+                    remote_addr,
+                    None,
+                    move |request| async move {
+                        let authority = request.head.uri.authority().cloned().ok_or_else(|| {
+                            ProtocolError::new(
+                                proxelar_proto::ErrorKind::MalformedMessage,
+                                "HTTP/3 WebSocket request has no authority",
+                            )
+                        })?;
+                        let upstream = {
+                            let mut clients = websocket_upstreams.lock().await;
+                            clients
+                                .entry(authority)
+                                .or_insert_with(|| {
+                                    super::http3::ReverseH3Upstream::new_with_remote(
+                                        request.head.uri.clone(),
+                                        websocket_verifier,
+                                        destination,
+                                    )
+                                })
+                                .clone()
+                        };
+                        upstream.send(request).await
+                    },
+                )
+                .await;
+            }
+            let request = match handler.handle_request(&context, request).await {
+                crate::RequestOrResponse::Request(request) => request,
+                crate::RequestOrResponse::Response(response) => return Ok(response),
+            };
+            let Some(authority) = request.head.uri.authority().cloned() else {
+                return Ok(handler.synthetic_protocol_response(
+                    http::StatusCode::BAD_REQUEST,
+                    http::HeaderMap::new(),
+                    bytes::Bytes::from_static(b"HTTP/3 request has no authority"),
+                ));
+            };
+            let upstream = {
+                let mut clients = upstreams.lock().await;
+                clients
+                    .entry(authority)
+                    .or_insert_with(|| {
+                        super::http3::ReverseH3Upstream::new_with_remote(
+                            request.head.uri.clone(),
+                            verifier,
+                            destination,
+                        )
+                    })
+                    .clone()
+            };
+            match upstream.send(request).await {
+                Ok(response) => Ok(handler.handle_response(&context, response).await),
+                Err(error) => {
+                    tracing::debug!("WireGuard HTTP/3 upstream failed: {error}");
+                    Ok(handler.synthetic_protocol_response(
+                        http::StatusCode::BAD_GATEWAY,
+                        http::HeaderMap::new(),
+                        bytes::Bytes::from_static(b"Bad Gateway"),
+                    ))
+                }
+            }
+        })
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[cfg(feature = "http3")]
+    #[test]
+    fn classifies_only_supported_quic_initial_packets() {
+        let initial = [0xc0, 0x00, 0x00, 0x00, 0x01, 1, 7, 1, 9, 0];
+        let unsupported = [0xc0, 0xfa, 0xfa, 0xfa, 0xfa, 1, 7, 1, 9, 0];
+
+        assert!(is_quic_initial(&initial));
+        assert!(!is_quic_initial(&unsupported));
+        assert!(!is_quic_initial(b"ordinary UDP"));
+    }
+
+    #[cfg(feature = "http3")]
+    #[tokio::test]
+    async fn saturated_h3_flow_queue_drops_without_waiting() {
+        let (datagrams, mut receiver) = mpsc::channel(1);
+        let flow = H3FlowHandle {
+            generation: 1,
+            datagrams,
+        };
+
+        assert_eq!(
+            dispatch_h3_datagram(&flow, vec![1]),
+            H3DatagramDispatch::Queued
+        );
+        assert_eq!(
+            dispatch_h3_datagram(&flow, vec![2]),
+            H3DatagramDispatch::Saturated
+        );
+        assert_eq!(receiver.recv().await, Some(vec![1]));
+
+        drop(receiver);
+        assert_eq!(
+            dispatch_h3_datagram(&flow, vec![3]),
+            H3DatagramDispatch::Closed(vec![3])
+        );
+    }
+
+    #[cfg(feature = "http3")]
+    #[derive(Clone)]
+    struct WireGuardTestH3Service;
+
+    #[cfg(feature = "http3")]
+    impl HttpService for WireGuardTestH3Service {
+        fn call(
+            &mut self,
+            request: ProxyRequest,
+        ) -> BoxFuture<'_, Result<ProxyResponse, ProtocolError>> {
+            Box::pin(async move {
+                assert_eq!(request.head.version, http::Version::HTTP_3);
+                assert_eq!(request.head.uri.path(), "/inside-wireguard");
+                let mut headers = proxyapi_models::HeaderBlock::new();
+                headers.add("x-wireguard-upstream", "h3").unwrap();
+                Ok(ProxyResponse::new(
+                    proxelar_proto::ResponseHead::new(
+                        http::StatusCode::CREATED,
+                        http::Version::HTTP_3,
+                        headers,
+                    ),
+                    proxelar_proto::ProxyBody::full("wireguard h3 upstream"),
+                ))
+            })
+        }
+    }
+
+    #[cfg(feature = "http3")]
+    async fn spawn_wireguard_test_h3_upstream() -> (SocketAddr, tokio::task::JoinHandle<()>) {
+        let _ = rustls::crypto::ring::default_provider().install_default();
+        let ca_dir = tempfile::tempdir().unwrap();
+        let ca = Arc::new(Ssl::load_or_generate(ca_dir.path()).unwrap());
+        let config =
+            super::super::http3::server_config(ca, "127.0.0.1:443".parse().unwrap(), false)
+                .unwrap();
+        let listener =
+            super::super::http3::H3Listener::bind("127.0.0.1:0".parse().unwrap(), config)
+                .await
+                .unwrap();
+        let address = listener.local_addr().unwrap();
+        let task = tokio::spawn(async move {
+            listener.serve(|_| WireGuardTestH3Service).await.unwrap();
+        });
+        (address, task)
+    }
+
+    #[cfg(feature = "http3")]
+    #[tokio::test]
+    async fn wireguard_h3_relay_routes_captures_and_mints_sni_certificate() {
+        use crate::handler::DEFAULT_BODY_CAPTURE_LIMIT;
+        use crate::UpstreamTlsConfig;
+        use proxelar_proto::{ProxyBody, RequestHead};
+
+        let _ = rustls::crypto::ring::default_provider().install_default();
+        let (upstream_addr, upstream_task) = spawn_wireguard_test_h3_upstream().await;
+        let proxy_ca_dir = tempfile::tempdir().unwrap();
+        let proxy_ca = Arc::new(Ssl::load_or_generate(proxy_ca_dir.path()).unwrap());
+        let proxy_ca_file = tempfile::NamedTempFile::new().unwrap();
+        std::fs::write(proxy_ca_file.path(), proxy_ca.ca_cert_pem()).unwrap();
+        let client_verifier = super::super::tls::h3_server_verifier(
+            &UpstreamTlsConfig::CaFileOnly(proxy_ca_file.path().to_path_buf()),
+        )
+        .unwrap();
+        let upstream_verifier =
+            super::super::tls::h3_server_verifier(&UpstreamTlsConfig::Insecure).unwrap();
+        let (event_tx, mut event_rx) = mpsc::channel(8);
+        let handler =
+            CapturingHandler::new(event_tx).with_body_capture_limit(DEFAULT_BODY_CAPTURE_LIMIT);
+        let flow_key = UdpFlowKey {
+            source: "10.0.0.2:42424".parse().unwrap(),
+            destination: upstream_addr,
+        };
+        let (response_tx, mut response_rx) = mpsc::channel(128);
+        let (completed_tx, mut completed_rx) = mpsc::channel(8);
+        let cancel = CancellationToken::new();
+        let flow = start_h3_flow(
+            flow_key,
+            1,
+            H3FlowContext {
+                handler,
+                ca: proxy_ca,
+                verifier: upstream_verifier,
+                response_tx,
+                completed_tx,
+                cancel: cancel.clone(),
+            },
+        )
+        .await
+        .unwrap();
+
+        let bridge = Arc::new(UdpSocket::bind("127.0.0.1:0").await.unwrap());
+        let bridge_addr = bridge.local_addr().unwrap();
+        let bridge_task = {
+            let bridge = Arc::clone(&bridge);
+            let datagrams = flow.datagrams;
+            tokio::spawn(async move {
+                let mut client = None;
+                let mut buffer = vec![0_u8; MAX_PACKET_SIZE];
+                loop {
+                    tokio::select! {
+                        received = bridge.recv_from(&mut buffer) => {
+                            let (length, source) = received.unwrap();
+                            client = Some(source);
+                            if datagrams.send(buffer[..length].to_vec()).await.is_err() {
+                                break;
+                            }
+                        }
+                        response = response_rx.recv() => {
+                            let Some((response, _, _)) = response else { break; };
+                            if let Some(client) = client {
+                                bridge.send_to(&response, client).await.unwrap();
+                            }
+                        }
+                    }
+                }
+            })
+        };
+
+        let target: http::Uri = format!("https://wireguard.test:{}/", bridge_addr.port())
+            .parse()
+            .unwrap();
+        let client = super::super::http3::ReverseH3Upstream::new_with_remote(
+            target,
+            client_verifier,
+            bridge_addr,
+        );
+        let request = ProxyRequest::new(
+            RequestHead::new(
+                http::Method::GET,
+                format!(
+                    "https://wireguard.test:{}/inside-wireguard",
+                    bridge_addr.port()
+                )
+                .parse()
+                .unwrap(),
+                http::Version::HTTP_3,
+                proxyapi_models::HeaderBlock::new(),
+            ),
+            ProxyBody::empty(),
+        );
+        let response = tokio::time::timeout(Duration::from_secs(5), client.send(request))
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(response.head.status, http::StatusCode::CREATED);
+        assert_eq!(
+            response.head.headers.get("x-wireguard-upstream"),
+            Some(b"h3".as_slice())
+        );
+        assert_eq!(
+            response.body.collect().await.unwrap().data,
+            "wireguard h3 upstream"
+        );
+        assert!(matches!(
+            tokio::time::timeout(Duration::from_secs(2), event_rx.recv())
+                .await
+                .unwrap(),
+            Some(ProxyEvent::RequestComplete { .. })
+        ));
+
+        cancel.cancel();
+        assert_eq!(
+            tokio::time::timeout(Duration::from_secs(5), completed_rx.recv())
+                .await
+                .unwrap(),
+            Some((flow_key, 1))
+        );
+        bridge_task.abort();
+        upstream_task.abort();
+    }
 
     #[test]
     fn generates_stable_private_client_configuration() {
@@ -550,8 +1178,8 @@ mod tests {
     fn boringtun_peer_roundtrip_decrypts_ipv4_packet() {
         let mut server_key = [0_u8; 32];
         let mut client_key = [0_u8; 32];
-        openssl::rand::rand_bytes(&mut server_key).unwrap();
-        openssl::rand::rand_bytes(&mut client_key).unwrap();
+        getrandom::fill(&mut server_key).unwrap();
+        getrandom::fill(&mut client_key).unwrap();
         let server_private = StaticSecret::from(server_key);
         let client_private = StaticSecret::from(client_key);
         let server_public = PublicKey::from(&server_private);
@@ -684,7 +1312,7 @@ mod tests {
             http::Method::GET,
             "http://example.test/".parse().unwrap(),
             http::Version::HTTP_11,
-            http::HeaderMap::new(),
+            proxyapi_models::HeaderBlock::new(),
             bytes::Bytes::new(),
             1,
         );
@@ -743,8 +1371,8 @@ mod tests {
     async fn packet_processors_complete_a_handshake_and_exchange_packets() {
         let mut server_key = [0_u8; 32];
         let mut client_key = [0_u8; 32];
-        openssl::rand::rand_bytes(&mut server_key).unwrap();
-        openssl::rand::rand_bytes(&mut client_key).unwrap();
+        getrandom::fill(&mut server_key).unwrap();
+        getrandom::fill(&mut client_key).unwrap();
         let server_private = StaticSecret::from(server_key);
         let client_private = StaticSecret::from(client_key);
         let server_public = PublicKey::from(&server_private);
@@ -864,3 +1492,7 @@ mod tests {
             .unwrap();
     }
 }
+
+#[cfg(all(test, feature = "http3"))]
+#[path = "tests/wireguard.rs"]
+mod protocol_tests;

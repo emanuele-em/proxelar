@@ -1,5 +1,4 @@
 use http::Request;
-use http_body_util::BodyExt;
 use proxyapi::ca::{cert_server, Ssl};
 
 #[test]

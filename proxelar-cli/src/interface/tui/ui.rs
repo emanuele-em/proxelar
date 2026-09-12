@@ -1,16 +1,17 @@
 use std::collections::VecDeque;
+use std::ops::Range;
 
 use chrono::{Local, TimeZone};
-use http::{HeaderMap, Uri};
+use http::Uri;
 use proxyapi_models::{
-    CapturedDnsExchange, CapturedTcpStream, CapturedUdpExchange, StreamDirection, WsDirection,
-    WsFrame, WsOpcode,
+    CapturedDnsExchange, CapturedTcpStream, CapturedUdpExchange, HeaderBlock, StreamDirection,
+    WsDirection, WsFrame, WsOpcode,
 };
 use ratatui::{
     layout::{Alignment, Constraint, Direction, Layout, Rect},
     style::{Color, Modifier, Style},
     text::{Line, Span},
-    widgets::{Block, Borders, Cell, Clear, Paragraph, Row, Table, Wrap},
+    widgets::{Block, Borders, Cell, Clear, Paragraph, Row, Table, TableState, Wrap},
     Frame,
 };
 
@@ -52,6 +53,26 @@ pub fn draw(f: &mut Frame, state: &mut AppState, wireguard_setup: Option<&WireGu
         env!("CARGO_PKG_VERSION")
     );
 
+    // `Table` owns and collects every supplied row. Limit construction to the
+    // current terminal viewport while keeping selection/offset in global
+    // filtered coordinates.
+    let visible_capacity = usize::from(chunks[0].height.saturating_sub(3)).max(1);
+    let visible_range = visible_row_range(
+        req_count,
+        state.table_state.selected(),
+        state.table_state.offset(),
+        visible_capacity,
+    );
+    *state.table_state.offset_mut() = visible_range.start;
+    let mut visible_table_state = TableState::default();
+    visible_table_state.select(
+        state
+            .table_state
+            .selected()
+            .filter(|selected| visible_range.contains(selected))
+            .map(|selected| selected - visible_range.start),
+    );
+
     // Request table
     let header = Row::new(vec![
         Cell::from("Time"),
@@ -70,7 +91,7 @@ pub fn draw(f: &mut Frame, state: &mut AppState, wireguard_setup: Option<&WireGu
             .add_modifier(Modifier::BOLD),
     );
 
-    let rows: Vec<Row> = filtered
+    let rows: Vec<Row> = filtered[visible_range.clone()]
         .iter()
         .map(|(_idx, entry)| match entry {
             FlowEntry::Complete {
@@ -270,10 +291,10 @@ pub fn draw(f: &mut Frame, state: &mut AppState, wireguard_setup: Option<&WireGu
         if let Some(setup) = wireguard_setup {
             draw_wireguard_setup(f, chunks[0], setup);
         } else {
-            f.render_stateful_widget(table, chunks[0], &mut state.table_state);
+            f.render_stateful_widget(table, chunks[0], &mut visible_table_state);
         }
     } else {
-        f.render_stateful_widget(table, chunks[0], &mut state.table_state);
+        f.render_stateful_widget(table, chunks[0], &mut visible_table_state);
     }
 
     // Detail panel
@@ -297,6 +318,28 @@ pub fn draw(f: &mut Frame, state: &mut AppState, wireguard_setup: Option<&WireGu
     if state.show_help {
         draw_help_modal(f);
     }
+}
+
+fn visible_row_range(
+    total: usize,
+    selected: Option<usize>,
+    current_offset: usize,
+    capacity: usize,
+) -> Range<usize> {
+    if total == 0 {
+        return 0..0;
+    }
+    let capacity = capacity.max(1).min(total);
+    let max_start = total - capacity;
+    let mut start = current_offset.min(max_start);
+    if let Some(selected) = selected.map(|selected| selected.min(total - 1)) {
+        if selected < start {
+            start = selected;
+        } else if selected >= start + capacity {
+            start = selected + 1 - capacity;
+        }
+    }
+    start..(start + capacity).min(total)
 }
 
 fn draw_wireguard_setup(f: &mut Frame, area: Rect, setup: &WireGuardSetup) {
@@ -673,11 +716,14 @@ fn build_request_lines(request: &proxyapi_models::ProxiedRequest) -> Vec<Line<'s
         Line::from(""),
     ];
 
-    for (name, value) in request.headers() {
+    for field in request.headers() {
         lines.push(Line::from(vec![
-            Span::styled(name.as_str().to_owned(), Style::default().fg(Color::Cyan)),
+            Span::styled(
+                String::from_utf8_lossy(field.name()).into_owned(),
+                Style::default().fg(Color::Cyan),
+            ),
             Span::raw(": "),
-            Span::raw(String::from_utf8_lossy(value.as_bytes()).into_owned()),
+            Span::raw(String::from_utf8_lossy(field.value()).into_owned()),
         ]));
     }
 
@@ -715,11 +761,14 @@ fn build_response_lines(response: &proxyapi_models::ProxiedResponse) -> Vec<Line
         Line::from(""),
     ];
 
-    for (name, value) in response.headers() {
+    for field in response.headers() {
         lines.push(Line::from(vec![
-            Span::styled(name.as_str().to_owned(), Style::default().fg(Color::Cyan)),
+            Span::styled(
+                String::from_utf8_lossy(field.name()).into_owned(),
+                Style::default().fg(Color::Cyan),
+            ),
             Span::raw(": "),
-            Span::raw(String::from_utf8_lossy(value.as_bytes()).into_owned()),
+            Span::raw(String::from_utf8_lossy(field.value()).into_owned()),
         ]));
     }
 
@@ -742,7 +791,7 @@ fn build_response_lines(response: &proxyapi_models::ProxiedResponse) -> Vec<Line
     lines
 }
 
-fn render_body(headers: &http::HeaderMap, body: &[u8]) -> String {
+fn render_body(headers: &HeaderBlock, body: &[u8]) -> String {
     match proxyapi::content::content_view(headers, body) {
         Ok(view) => view.text,
         Err(error) => format!(
@@ -996,10 +1045,10 @@ fn proto_from_uri(uri: &Uri, is_ws: bool) -> &'static str {
     }
 }
 
-fn abbrev_content_type(headers: &HeaderMap) -> String {
+fn abbrev_content_type(headers: &HeaderBlock) -> String {
     headers
-        .get(http::header::CONTENT_TYPE)
-        .and_then(|v| v.to_str().ok())
+        .get(http::header::CONTENT_TYPE.as_str())
+        .and_then(|value| std::str::from_utf8(value).ok())
         .map(|s| s.split(';').next().unwrap_or(s).trim().to_owned())
         .unwrap_or_else(|| "[no content]".to_owned())
 }
@@ -1200,14 +1249,14 @@ fn draw_help_modal(f: &mut Frame) {
 mod tests {
     use super::*;
     use bytes::Bytes;
-    use http::{HeaderMap, Method, StatusCode, Version};
-    use proxyapi_models::{ProxiedRequest, ProxiedResponse};
+    use http::{Method, StatusCode, Version};
+    use proxyapi_models::{HeaderBlock, ProxiedRequest, ProxiedResponse};
     use ratatui::{backend::TestBackend, buffer::Buffer, Terminal};
 
     fn request(method: Method, uri: &str, body: Bytes, time: i64) -> Box<ProxiedRequest> {
-        let mut headers = HeaderMap::new();
-        headers.insert("content-type", "application/json".parse().unwrap());
-        headers.insert("x-test", "ui".parse().unwrap());
+        let mut headers = HeaderBlock::new();
+        headers.add("content-type", "application/json").unwrap();
+        headers.add("x-test", "ui").unwrap();
         Box::new(ProxiedRequest::new(
             method,
             uri.parse().unwrap(),
@@ -1224,9 +1273,9 @@ mod tests {
         body: Bytes,
         time: i64,
     ) -> Box<ProxiedResponse> {
-        let mut headers = HeaderMap::new();
+        let mut headers = HeaderBlock::new();
         if let Some(content_type) = content_type {
-            headers.insert(http::header::CONTENT_TYPE, content_type.parse().unwrap());
+            headers.add("content-type", content_type).unwrap();
         }
         Box::new(ProxiedResponse::new(
             status,
@@ -1257,6 +1306,16 @@ mod tests {
             .map(|row| row.iter().map(|cell| cell.symbol()).collect::<String>())
             .collect::<Vec<_>>()
             .join("\n")
+    }
+
+    #[test]
+    fn visible_rows_are_bounded_and_follow_selection() {
+        assert_eq!(visible_row_range(0, None, 0, 10), 0..0);
+        assert_eq!(visible_row_range(5, None, 0, 10), 0..5);
+        assert_eq!(visible_row_range(10_000, None, 0, 20), 0..20);
+        assert_eq!(visible_row_range(100, Some(75), 0, 20), 56..76);
+        assert_eq!(visible_row_range(100, Some(10), 56, 20), 10..30);
+        assert_eq!(visible_row_range(100, Some(99), 90, 20), 80..100);
     }
 
     #[test]

@@ -5,7 +5,8 @@ use std::io::{self, Read};
 
 use base64::Engine as _;
 use bytes::Bytes;
-use http::header::{HeaderMap, CONTENT_ENCODING, CONTENT_TYPE};
+use http::header::{CONTENT_ENCODING, CONTENT_TYPE};
+use proxyapi_models::HeaderBlock;
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
@@ -115,10 +116,10 @@ pub enum ContentEditError {
 }
 
 /// Decode all `Content-Encoding` layers in reverse application order.
-pub fn decode_body(headers: &HeaderMap, body: &[u8]) -> Result<Bytes, ContentError> {
+pub fn decode_body(headers: &HeaderBlock, body: &[u8]) -> Result<Bytes, ContentError> {
     let Some(value) = headers
-        .get(CONTENT_ENCODING)
-        .and_then(|value| value.to_str().ok())
+        .get(CONTENT_ENCODING.as_str())
+        .and_then(|value| std::str::from_utf8(value).ok())
     else {
         return Ok(Bytes::copy_from_slice(body));
     };
@@ -176,7 +177,7 @@ fn read_limited(reader: impl Read, encoding: &str) -> Result<Vec<u8>, ContentErr
 }
 
 /// Detect and render a decoded content body for terminal or web display.
-pub fn content_view(headers: &HeaderMap, body: &[u8]) -> Result<ContentView, ContentError> {
+pub fn content_view(headers: &HeaderBlock, body: &[u8]) -> Result<ContentView, ContentError> {
     let decoded = decode_body(headers, body)?;
     let media_type = media_type(headers);
     let kind = detect_kind(media_type, &decoded);
@@ -187,8 +188,8 @@ pub fn content_view(headers: &HeaderMap, body: &[u8]) -> Result<ContentView, Con
         text,
         decoded_len: decoded.len(),
         content_encoding: headers
-            .get(CONTENT_ENCODING)
-            .and_then(|value| value.to_str().ok())
+            .get(CONTENT_ENCODING.as_str())
+            .and_then(|value| std::str::from_utf8(value).ok())
             .map(str::to_owned),
         inline_image,
     })
@@ -199,7 +200,7 @@ pub fn content_view(headers: &HeaderMap, body: &[u8]) -> Result<ContentView, Con
 /// Compressed bodies are decoded first. Callers should remove the original
 /// content encoding after replacing the wire body, as the proxy handler does.
 pub fn editable_content(
-    headers: &HeaderMap,
+    headers: &HeaderBlock,
     body: &[u8],
 ) -> Result<Option<EditableContent>, ContentEditError> {
     let decoded = decode_body(headers, body)?;
@@ -225,10 +226,10 @@ pub fn encode_edit(format: &str, text: &str) -> Result<Bytes, ContentEditError> 
     Ok(Bytes::from(bytes))
 }
 
-fn media_type(headers: &HeaderMap) -> &str {
+fn media_type(headers: &HeaderBlock) -> &str {
     headers
-        .get(CONTENT_TYPE)
-        .and_then(|value| value.to_str().ok())
+        .get(CONTENT_TYPE.as_str())
+        .and_then(|value| std::str::from_utf8(value).ok())
         .and_then(|value| value.split(';').next())
         .map(str::trim)
         .unwrap_or("")
@@ -275,7 +276,7 @@ fn detect_kind(media_type: &str, body: &[u8]) -> ContentKind {
     }
 }
 
-fn render(kind: ContentKind, media_type: &str, headers: &HeaderMap, body: &[u8]) -> String {
+fn render(kind: ContentKind, media_type: &str, headers: &HeaderBlock, body: &[u8]) -> String {
     match kind {
         ContentKind::Json => serde_json::from_slice::<serde_json::Value>(body)
             .and_then(|value| serde_json::to_string_pretty(&value))
@@ -416,7 +417,7 @@ fn markup_opens_scope(tag: &str) -> bool {
     )
 }
 
-fn render_multipart(headers: &HeaderMap, body: &[u8]) -> String {
+fn render_multipart(headers: &HeaderBlock, body: &[u8]) -> String {
     let Some(boundary) = content_type_parameter(headers, "boundary") else {
         return format!("Multipart body · {} bytes · boundary missing", body.len());
     };
@@ -685,7 +686,7 @@ fn messagepack_from_json(text: &str) -> Result<Vec<u8>, ContentEditError> {
         .map_err(|error| ContentEditError::MessagePack(error.to_string()))
 }
 
-fn decode_text(headers: &HeaderMap, body: &[u8]) -> String {
+fn decode_text(headers: &HeaderBlock, body: &[u8]) -> String {
     let charset = content_type_parameter(headers, "charset");
     if let Some(encoding) =
         charset.and_then(|label| encoding_rs::Encoding::for_label(label.as_bytes()))
@@ -697,10 +698,10 @@ fn decode_text(headers: &HeaderMap, body: &[u8]) -> String {
     }
 }
 
-fn content_type_parameter<'a>(headers: &'a HeaderMap, parameter: &str) -> Option<&'a str> {
+fn content_type_parameter<'a>(headers: &'a HeaderBlock, parameter: &str) -> Option<&'a str> {
     headers
-        .get(CONTENT_TYPE)
-        .and_then(|value| value.to_str().ok())
+        .get(CONTENT_TYPE.as_str())
+        .and_then(|value| std::str::from_utf8(value).ok())
         .and_then(|value| {
             value.split(';').skip(1).find_map(|segment| {
                 let (name, value) = segment.trim().split_once('=')?;
@@ -786,11 +787,11 @@ mod tests {
     use super::*;
     use std::io::Write as _;
 
-    fn headers(content_type: &str, encoding: Option<&str>) -> HeaderMap {
-        let mut headers = HeaderMap::new();
-        headers.insert(CONTENT_TYPE, content_type.parse().unwrap());
+    fn headers(content_type: &str, encoding: Option<&str>) -> HeaderBlock {
+        let mut headers = HeaderBlock::new();
+        headers.add(CONTENT_TYPE.as_str(), content_type).unwrap();
         if let Some(encoding) = encoding {
-            headers.insert(CONTENT_ENCODING, encoding.parse().unwrap());
+            headers.add(CONTENT_ENCODING.as_str(), encoding).unwrap();
         }
         headers
     }

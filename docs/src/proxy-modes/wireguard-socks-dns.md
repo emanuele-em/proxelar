@@ -11,7 +11,7 @@ WireGuard mode accepts a mobile or IoT device without firewall rules or system-p
 
 The QR code contains the client private key. Display it only on a trusted screen. It disappears from the TUI and web GUI after the first captured event, although the configuration file remains available for later import.
 
-TCP is reconstructed in a userspace network stack and follows the normal HTTP, TLS MITM, WebSocket, and raw-stream paths. UDP is relayed to its original destination, while port 53 uses `--dns-upstream` and repeatable `--dns-map` overrides.
+TCP is reconstructed in a userspace network stack and follows the normal HTTP, TLS MITM, WebSocket, and raw-stream paths. QUIC Initial packets on UDP are intercepted as HTTP/3 with dynamic SNI certificates, capture, Lua hooks, and RFC 9220 WebSockets; other UDP is relayed to its original destination. Port 53 uses `--dns-upstream` and repeatable `--dns-map` overrides.
 
 The endpoint must be reachable by the device. When binding to a concrete address it is derived automatically; when binding to `0.0.0.0` or `::`, Proxelar probes the route to the configured DNS server. Set `--wireguard-endpoint` explicitly for NAT, containers, multiple network interfaces, or a public hostname. Deleting the three `wireguard-*` files in the CA directory rotates the generated single-client identity; this also requires re-importing the client config.
 

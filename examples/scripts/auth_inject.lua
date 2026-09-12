@@ -7,7 +7,7 @@ local TOKEN = "Bearer my-dev-token-12345"
 
 function on_request(request)
     if string.find(request.url, "api%.example%.com") then
-        request.headers["Authorization"] = TOKEN
+        request.headers:set("Authorization", TOKEN)
     end
     return request
 end

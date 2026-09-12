@@ -1,9 +1,12 @@
 use async_trait::async_trait;
 use bytes::{Bytes, BytesMut};
-use http_body_util::BodyExt;
-use hyper::body::Body as HttpBody;
-use hyper::{Request, Response};
-use proxyapi_models::{BodyMetadata, ProxiedRequest, ProxiedResponse};
+use futures_util::StreamExt as _;
+use http::{Request, Response};
+use proxelar_proto::{
+    BodyFrame, CollectedBody, ErrorKind, ProtocolError, ProxyRequest, ProxyResponse, RequestHead,
+    ResponseHead,
+};
+use proxyapi_models::{BodyMetadata, HeaderBlock, HeaderField, ProxiedRequest, ProxiedResponse};
 use std::sync::Arc;
 use tokio::sync::{mpsc, Notify};
 
@@ -19,19 +22,134 @@ use crate::{HttpContext, HttpHandler, RequestOrResponse};
 pub const DEFAULT_BODY_CAPTURE_LIMIT: Option<usize> = None;
 
 enum BodyCollection {
-    Complete(Bytes),
+    Complete(CollectedBody),
     Exceeded { captured: Bytes, body: ProxyBody },
+    Failed { captured: Bytes, body: ProxyBody },
 }
 
 enum RequestBody {
-    Buffered(Bytes),
+    Buffered(CollectedBody),
     Streaming { captured: Bytes, body: ProxyBody },
+}
+
+enum CompatRequestOrResponse {
+    Request(Request<ProxyBody>),
+    Response(Response<ProxyBody>),
+}
+
+/// Lossless headers retained while a message passes through the temporary
+/// `http` compatibility layer.
+///
+/// `HeaderMap` groups duplicate field names, so it cannot represent global
+/// interleaving such as `A: 1, B: 2, A: 3`. The compatibility snapshot lets
+/// us detect whether a legacy consumer actually changed the map. If it did
+/// not, the original ordered block is forwarded and captured byte-for-byte.
+#[derive(Clone, Debug)]
+struct PreservedHeaders {
+    ordered: HeaderBlock,
+    compatibility: http::HeaderMap,
+}
+
+#[derive(Clone, Debug)]
+struct InformationalResponses(Vec<ResponseHead>);
+
+fn preserve_headers(
+    headers: &mut http::HeaderMap,
+    extensions: &mut http::Extensions,
+    ordered: HeaderBlock,
+) -> Result<(), crate::header::HeaderConversionError> {
+    let compatibility = crate::header::to_http(&ordered)?;
+    *headers = compatibility.clone();
+    extensions.insert(PreservedHeaders {
+        ordered,
+        compatibility,
+    });
+    Ok(())
+}
+
+fn ordered_headers(headers: &http::HeaderMap, extensions: &http::Extensions) -> HeaderBlock {
+    extensions
+        .get::<PreservedHeaders>()
+        .filter(|preserved| preserved.compatibility == *headers)
+        .map_or_else(
+            || crate::header::from_http(headers),
+            |preserved| preserved.ordered.clone(),
+        )
+}
+
+/// Apply mutations made through `HeaderMap` to the preserved block without
+/// disturbing unrelated fields. This keeps interleaved duplicates intact when
+/// a route rule or body-framing helper changes a different header.
+fn synchronize_preserved_headers(headers: &http::HeaderMap, extensions: &mut http::Extensions) {
+    let Some(preserved) = extensions.get_mut::<PreservedHeaders>() else {
+        return;
+    };
+    if preserved.compatibility == *headers {
+        return;
+    }
+
+    preserved.ordered =
+        apply_header_map_delta(&preserved.ordered, &preserved.compatibility, headers);
+    preserved.compatibility = headers.clone();
+}
+
+fn apply_header_map_delta(
+    ordered: &HeaderBlock,
+    before: &http::HeaderMap,
+    after: &http::HeaderMap,
+) -> HeaderBlock {
+    let mut changed_names = Vec::<http::HeaderName>::new();
+    for name in before.keys().chain(after.keys()) {
+        if changed_names.iter().any(|known| known == name) {
+            continue;
+        }
+        if !before.get_all(name).iter().eq(after.get_all(name).iter()) {
+            changed_names.push(name.clone());
+        }
+    }
+    if changed_names.is_empty() {
+        return ordered.clone();
+    }
+
+    let mut output = HeaderBlock::new();
+    let mut emitted = Vec::<http::HeaderName>::new();
+    for field in ordered {
+        let Ok(name) = http::HeaderName::from_bytes(field.name()) else {
+            output.push(field.clone());
+            continue;
+        };
+        if !changed_names.contains(&name) {
+            output.push(field.clone());
+            continue;
+        }
+        if emitted.contains(&name) {
+            continue;
+        }
+        emitted.push(name.clone());
+        for value in after.get_all(&name) {
+            if let Ok(field) = HeaderField::new(field.name(), value.as_bytes()) {
+                output.push(field);
+            }
+        }
+    }
+
+    for name in changed_names {
+        if emitted.contains(&name) {
+            continue;
+        }
+        for value in after.get_all(&name) {
+            if let Ok(field) = HeaderField::new(name.as_str(), value.as_bytes()) {
+                output.push(field);
+            }
+        }
+    }
+    output
 }
 
 impl RequestBody {
     fn hook_bytes(&self) -> &Bytes {
         match self {
-            Self::Buffered(bytes)
+            Self::Buffered(CollectedBody { data: bytes, .. })
             | Self::Streaming {
                 captured: bytes, ..
             } => bytes,
@@ -39,16 +157,19 @@ impl RequestBody {
     }
 
     fn apply_modified_body(&mut self, original_hook_body: &Bytes, modified_body: Bytes) {
-        if matches!(self, Self::Streaming { .. }) && modified_body == *original_hook_body {
+        if modified_body == *original_hook_body {
             return;
         }
 
-        *self = Self::Buffered(modified_body);
+        *self = Self::Buffered(CollectedBody {
+            data: modified_body,
+            trailers: None,
+        });
     }
 
     fn metadata(&self) -> BodyMetadata {
         match self {
-            Self::Buffered(bytes) => BodyMetadata::complete(bytes.len()),
+            Self::Buffered(body) => BodyMetadata::complete(body.data.len()),
             Self::Streaming { captured, .. } => BodyMetadata {
                 truncated: true,
                 total_seen: captured.len(),
@@ -68,7 +189,7 @@ enum CapturedRequest {
         method: http::Method,
         uri: http::Uri,
         version: http::Version,
-        headers: http::HeaderMap,
+        headers: proxyapi_models::HeaderBlock,
         body: BodyCapture,
         done: Arc<Notify>,
         time: i64,
@@ -90,7 +211,7 @@ impl CapturedRequest {
             method: parts.method.clone(),
             uri: parts.uri.clone(),
             version: parts.version,
-            headers: parts.headers.clone(),
+            headers: ordered_headers(&parts.headers, &parts.extensions),
             body,
             done,
             time,
@@ -191,6 +312,14 @@ fn reconcile_edited_body_headers(headers: &mut http::HeaderMap, body: &Bytes) {
     }
 }
 
+fn reconcile_edited_ordered_body_headers(headers: &mut HeaderBlock, body: &Bytes) {
+    headers.remove(b"transfer-encoding");
+    headers.remove(b"content-encoding");
+    if let Err(error) = headers.set(b"content-length", body.len().to_string().as_bytes()) {
+        tracing::warn!("Could not update Content-Length after body edit: {error}");
+    }
+}
+
 fn try_send_event(tx: &mpsc::Sender<ProxyEvent>, event: ProxyEvent) {
     match tx.try_send(event) {
         Ok(()) => {}
@@ -264,23 +393,49 @@ impl HookedResponseBody {
 ///
 /// When the body exceeds the limit, returns a reconstructed streaming body that
 /// first replays already-read bytes, then continues the original body.
-async fn collect_body<B>(mut body: B, limit: Option<usize>, kind: &'static str) -> BodyCollection
-where
-    B: HttpBody<Data = Bytes, Error = hyper::Error> + Send + Sync + Unpin + 'static,
-{
+async fn collect_body(
+    mut body: ProxyBody,
+    limit: Option<usize>,
+    kind: &'static str,
+) -> BodyCollection {
     let mut buffer = BytesMut::new();
+    let mut trailers = None;
 
-    while let Some(frame) = body.frame().await {
+    while let Some(frame) = body.next().await {
         let frame = match frame {
             Ok(frame) => frame,
             Err(e) => {
                 tracing::warn!("Failed to collect {kind} body: {e}");
-                return BodyCollection::Complete(Bytes::new());
+                return failed_body_collection(buffer.freeze(), trailers, e);
             }
         };
 
-        let Ok(data) = frame.into_data() else {
-            continue;
+        let data = match frame {
+            BodyFrame::Data(data) if trailers.is_none() => data,
+            BodyFrame::Data(_) => {
+                return failed_body_collection(
+                    buffer.freeze(),
+                    trailers,
+                    ProtocolError::new(
+                        ErrorKind::ProtocolViolation,
+                        "body data received after trailers",
+                    ),
+                );
+            }
+            BodyFrame::Trailers(headers) if trailers.is_none() => {
+                trailers = Some(headers);
+                continue;
+            }
+            BodyFrame::Trailers(_) => {
+                return failed_body_collection(
+                    buffer.freeze(),
+                    trailers,
+                    ProtocolError::new(
+                        ErrorKind::ProtocolViolation,
+                        "body contains more than one trailer block",
+                    ),
+                );
+            }
         };
 
         let Some(limit) = limit else {
@@ -299,7 +454,10 @@ where
             let captured = buffer.freeze();
             let overflow = data.slice(keep..);
             return BodyCollection::Exceeded {
-                body: body::prefix([captured.clone(), overflow], body),
+                body: body::prefix(
+                    [BodyFrame::Data(captured.clone()), BodyFrame::Data(overflow)],
+                    body,
+                ),
                 captured,
             };
         }
@@ -307,7 +465,29 @@ where
         buffer.extend_from_slice(&data);
     }
 
-    BodyCollection::Complete(buffer.freeze())
+    BodyCollection::Complete(CollectedBody {
+        data: buffer.freeze(),
+        trailers,
+    })
+}
+
+fn failed_body_collection(
+    captured: Bytes,
+    trailers: Option<HeaderBlock>,
+    error: ProtocolError,
+) -> BodyCollection {
+    let mut frames = Vec::with_capacity(3);
+    if !captured.is_empty() {
+        frames.push(Ok(BodyFrame::Data(captured.clone())));
+    }
+    if let Some(trailers) = trailers {
+        frames.push(Ok(BodyFrame::Trailers(trailers)));
+    }
+    frames.push(Err(error));
+    BodyCollection::Failed {
+        captured,
+        body: ProxyBody::from_frames(frames),
+    }
 }
 
 /// Default handler that captures request/response pairs and emits [`ProxyEvent`]s.
@@ -442,7 +622,7 @@ impl CapturingHandler {
     pub(crate) async fn handle_replayed_request(
         &mut self,
         req: ProxiedRequest,
-    ) -> Option<Request<ProxyBody>> {
+    ) -> Option<ProxyRequest> {
         let id = next_id();
         self.pending_id = Some(id);
 
@@ -496,7 +676,7 @@ impl CapturingHandler {
                             }
                             headers = h;
                             if b != body_bytes {
-                                reconcile_edited_body_headers(&mut headers, &b);
+                                reconcile_edited_ordered_body_headers(&mut headers, &b);
                             }
                             body_bytes = b;
                             self.captured_request =
@@ -529,11 +709,10 @@ impl CapturingHandler {
             }
         }
 
-        let mut builder = Request::builder().method(method).uri(uri).version(version);
-        if let Some(h) = builder.headers_mut() {
-            *h = headers;
-        }
-        builder.body(body::full(body_bytes)).ok()
+        Some(ProxyRequest::new(
+            RequestHead::new(method, uri, version, headers),
+            body::full(body_bytes),
+        ))
     }
 
     pub(crate) fn send_event(&self, event: ProxyEvent) {
@@ -551,6 +730,28 @@ impl CapturingHandler {
         Response::from_parts(parts, body::full(body))
     }
 
+    pub(crate) fn synthetic_protocol_response(
+        &mut self,
+        status: http::StatusCode,
+        headers: http::HeaderMap,
+        body: Bytes,
+    ) -> ProxyResponse {
+        response_to_protocol(self.synthetic_response(status, headers, body))
+    }
+
+    #[cfg(feature = "scripting")]
+    fn synthetic_ordered_response(
+        &mut self,
+        status: http::StatusCode,
+        headers: HeaderBlock,
+        body: Bytes,
+    ) -> Result<Response<ProxyBody>, crate::header::HeaderConversionError> {
+        let (mut parts, body) = synthetic_response_parts(status, http::HeaderMap::new(), body);
+        preserve_headers(&mut parts.headers, &mut parts.extensions, headers)?;
+        self.emit_response_snapshot(&parts, body.clone());
+        Ok(Response::from_parts(parts, body::full(body)))
+    }
+
     pub(crate) fn emit_synthetic_completion(
         &mut self,
         status: http::StatusCode,
@@ -561,52 +762,66 @@ impl CapturingHandler {
         self.emit_response_snapshot(&parts, body);
     }
 
-    pub(crate) async fn handle_upstream_response<B>(
+    pub(crate) async fn handle_upstream_response(
         &mut self,
-        res: Response<B>,
-    ) -> Response<ProxyBody>
-    where
-        B: HttpBody<Data = Bytes, Error = hyper::Error> + Send + Sync + Unpin + 'static,
-    {
+        res: Response<ProxyBody>,
+    ) -> Response<ProxyBody> {
         let (parts, body) = res.into_parts();
         if !self.should_buffer_response() {
             return self.stream_response(parts, body);
         }
 
         match collect_body(body, self.body_capture_limit, "response").await {
-            BodyCollection::Complete(body_bytes) => {
-                self.finish_buffered_response(parts, body_bytes)
-            }
+            BodyCollection::Complete(body) => self.finish_buffered_response(parts, body),
             BodyCollection::Exceeded { captured, body } => {
                 self.finish_limited_response(parts, captured, body)
             }
+            BodyCollection::Failed { body, .. } => self.stream_response(parts, body),
         }
     }
 
-    pub(crate) async fn record_upstream_response<B>(&mut self, res: Response<B>)
-    where
-        B: HttpBody<Data = Bytes, Error = hyper::Error> + Send + Sync + Unpin + 'static,
-    {
+    pub(crate) async fn record_upstream_response(&mut self, res: Response<ProxyBody>) {
         let (parts, body) = res.into_parts();
         match collect_body(body, self.body_capture_limit, "response").await {
-            BodyCollection::Complete(body_bytes) => self.emit_captured_response(parts, body_bytes),
+            BodyCollection::Complete(body) => self.emit_captured_response(parts, body.data),
             BodyCollection::Exceeded { captured, .. } => {
+                self.emit_captured_response(parts, captured);
+            }
+            BodyCollection::Failed { captured, .. } => {
                 self.emit_captured_response(parts, captured);
             }
         }
     }
 
+    pub(crate) async fn record_protocol_response(
+        &mut self,
+        response: ProxyResponse,
+    ) -> Result<(), crate::header::HeaderConversionError> {
+        self.record_upstream_response(response_from_protocol(response)?)
+            .await;
+        Ok(())
+    }
+
     fn finish_buffered_response(
         &mut self,
         parts: http::response::Parts,
-        body_bytes: Bytes,
+        collected: CollectedBody,
     ) -> Response<ProxyBody> {
-        let hooked = self.apply_response_hook_to_snapshot(parts, body_bytes);
+        let hooked = self.apply_response_hook_to_snapshot(parts, collected.data);
+        let preserve_trailers = hooked.body.is_original();
         let HookedResponse { parts, body } = hooked;
         let body_bytes = body.into_bytes();
         self.emit_response_snapshot(&parts, body_bytes.clone());
 
-        Response::from_parts(parts, body::full(body_bytes))
+        let body = if preserve_trailers {
+            body::collected(CollectedBody {
+                data: body_bytes,
+                trailers: collected.trailers,
+            })
+        } else {
+            body::full(body_bytes)
+        };
+        Response::from_parts(parts, body)
     }
 
     fn finish_limited_response(
@@ -632,13 +847,14 @@ impl CapturingHandler {
         self.emit_response_snapshot(&parts, body.into_bytes());
     }
 
-    fn stream_response<B>(&mut self, parts: http::response::Parts, body: B) -> Response<ProxyBody>
-    where
-        B: HttpBody<Data = Bytes, Error = hyper::Error> + Send + Sync + 'static,
-    {
+    fn stream_response(
+        &mut self,
+        parts: http::response::Parts,
+        body: ProxyBody,
+    ) -> Response<ProxyBody> {
         let status = parts.status;
         let version = parts.version;
-        let headers = parts.headers.clone();
+        let headers = ordered_headers(&parts.headers, &parts.extensions);
         let request = self.take_captured_request_state();
         let id = self.pending_id.take().unwrap_or_else(next_id);
         let event_tx = self.event_tx_clone();
@@ -703,7 +919,7 @@ impl CapturingHandler {
                 &req_method,
                 &req_url,
                 parts.status.as_u16(),
-                &parts.headers,
+                &ordered_headers(&parts.headers, &parts.extensions),
                 &hook_body,
             ) {
                 Ok(crate::scripting::ScriptResponseAction::Modified {
@@ -711,15 +927,26 @@ impl CapturingHandler {
                     headers,
                     body,
                 }) => {
+                    if let Err(error) =
+                        preserve_headers(&mut parts.headers, &mut parts.extensions, headers)
+                    {
+                        tracing::warn!(
+                            "Lua on_response produced headers unsupported by the temporary Hyper adapter (passing through): {error}"
+                        );
+                        return HookedResponse {
+                            parts,
+                            body: HookedResponseBody::Original(captured_body),
+                        };
+                    }
                     if let Ok(s) = http::StatusCode::from_u16(status) {
                         parts.status = s;
                     }
-                    parts.headers = headers;
                     if body == hook_body {
                         if decoded_headers.as_ref().is_some_and(|headers| {
                             !crate::encoding::can_reuse_wire_body(headers, &parts.headers)
                         }) {
                             let wire = crate::encoding::encode_from_hook(&mut parts.headers, body);
+                            synchronize_preserved_headers(&parts.headers, &mut parts.extensions);
                             return HookedResponse {
                                 parts,
                                 body: HookedResponseBody::Replaced(wire),
@@ -736,7 +963,9 @@ impl CapturingHandler {
                     // Re-encode the script's plaintext back to the wire encoding
                     // (only when we decoded it in the first place).
                     let wire = if decoded.is_some() {
-                        crate::encoding::encode_from_hook(&mut parts.headers, body)
+                        let wire = crate::encoding::encode_from_hook(&mut parts.headers, body);
+                        synchronize_preserved_headers(&parts.headers, &mut parts.extensions);
+                        wire
                     } else {
                         body
                     };
@@ -774,7 +1003,7 @@ impl CapturingHandler {
         let proxied_response = ProxiedResponse::new(
             parts.status,
             parts.version,
-            parts.headers.clone(),
+            ordered_headers(&parts.headers, &parts.extensions),
             body,
             now_millis(),
         );
@@ -799,16 +1028,16 @@ impl CapturingHandler {
         request_body: RequestBody,
     ) -> Request<ProxyBody> {
         match request_body {
-            RequestBody::Buffered(body_bytes) => {
+            RequestBody::Buffered(body) => {
                 self.captured_request = Some(CapturedRequest::buffered(ProxiedRequest::new(
                     parts.method.clone(),
                     parts.uri.clone(),
                     parts.version,
-                    parts.headers.clone(),
-                    body_bytes.clone(),
+                    ordered_headers(&parts.headers, &parts.extensions),
+                    body.data.clone(),
                     now_millis(),
                 )));
-                Request::from_parts(parts, body::full(body_bytes))
+                Request::from_parts(parts, body::collected(body))
             }
             RequestBody::Streaming { captured, body } => {
                 let capture = BodyCapture::new(self.body_capture_limit);
@@ -829,13 +1058,8 @@ impl CapturingHandler {
     }
 }
 
-#[async_trait]
-impl HttpHandler for CapturingHandler {
-    async fn handle_request(
-        &mut self,
-        _ctx: &HttpContext,
-        req: Request<hyper::body::Incoming>,
-    ) -> RequestOrResponse {
+impl CapturingHandler {
+    async fn handle_compat_request(&mut self, req: Request<ProxyBody>) -> CompatRequestOrResponse {
         // Assign a stable ID at request start so that RequestIntercepted and
         // RequestComplete events for the same flow share the same ID.
         let id = next_id();
@@ -843,10 +1067,11 @@ impl HttpHandler for CapturingHandler {
 
         let (mut parts, incoming) = req.into_parts();
         if let Some(rules) = &self.route_rules {
-            match rules
+            let outcome = rules
                 .apply(&parts.method, &mut parts.uri, &mut parts.headers)
-                .await
-            {
+                .await;
+            synchronize_preserved_headers(&parts.headers, &mut parts.extensions);
+            match outcome {
                 Ok(crate::rules::RuleOutcome::Forward) => {}
                 Ok(crate::rules::RuleOutcome::Respond {
                     status,
@@ -855,11 +1080,18 @@ impl HttpHandler for CapturingHandler {
                 }) => {
                     let (captured, metadata) =
                         match collect_body(incoming, self.body_capture_limit, "request").await {
-                            BodyCollection::Complete(bytes) => {
-                                let metadata = BodyMetadata::complete(bytes.len());
-                                (bytes, metadata)
+                            BodyCollection::Complete(body) => {
+                                let metadata = BodyMetadata::complete(body.data.len());
+                                (body.data, metadata)
                             }
                             BodyCollection::Exceeded { captured, .. } => {
+                                let metadata = BodyMetadata {
+                                    truncated: true,
+                                    total_seen: captured.len(),
+                                };
+                                (captured, metadata)
+                            }
+                            BodyCollection::Failed { captured, .. } => {
                                 let metadata = BodyMetadata {
                                     truncated: true,
                                     total_seen: captured.len(),
@@ -872,13 +1104,13 @@ impl HttpHandler for CapturingHandler {
                             parts.method,
                             parts.uri,
                             parts.version,
-                            parts.headers,
+                            ordered_headers(&parts.headers, &parts.extensions),
                             captured,
                             metadata,
                             now_millis(),
                         ),
                     ));
-                    return RequestOrResponse::Response(
+                    return CompatRequestOrResponse::Response(
                         self.synthetic_response(status, headers, body),
                     );
                 }
@@ -900,16 +1132,22 @@ impl HttpHandler for CapturingHandler {
                 parts,
                 body::capture(incoming, capture, move || done.notify_one()),
             );
-            return RequestOrResponse::Request(req);
+            return CompatRequestOrResponse::Request(req);
         }
 
-        let mut request_body =
-            match collect_body(incoming, self.body_capture_limit, "request").await {
-                BodyCollection::Complete(bytes) => RequestBody::Buffered(bytes),
-                BodyCollection::Exceeded { captured, body } => {
-                    RequestBody::Streaming { captured, body }
-                }
-            };
+        let mut request_body = match collect_body(incoming, self.body_capture_limit, "request")
+            .await
+        {
+            BodyCollection::Complete(body) => RequestBody::Buffered(body),
+            BodyCollection::Exceeded { captured, body } => {
+                RequestBody::Streaming { captured, body }
+            }
+            BodyCollection::Failed { captured, body } => {
+                let request = self
+                    .forward_request_from_body(parts, RequestBody::Streaming { captured, body });
+                return CompatRequestOrResponse::Request(request);
+            }
+        };
 
         // Run Lua on_request hook (if scripting is enabled and a script is loaded).
         // This runs synchronously with the complete body or the capped snapshot.
@@ -923,7 +1161,7 @@ impl HttpHandler for CapturingHandler {
             match engine.on_request(
                 parts.method.as_str(),
                 &parts.uri.to_string(),
-                &parts.headers,
+                &ordered_headers(&parts.headers, &parts.extensions),
                 &hook_body,
             ) {
                 Ok(crate::scripting::ScriptRequestAction::Forward {
@@ -932,32 +1170,62 @@ impl HttpHandler for CapturingHandler {
                     headers,
                     body,
                 }) => {
-                    if let Ok(m) = method.parse() {
-                        parts.method = m;
-                    }
-                    if let Ok(u) = url.parse() {
-                        parts.uri = u;
-                    }
-                    parts.headers = headers;
-                    // Re-encode the script's plaintext back to the wire encoding
-                    // (only when we decoded it in the first place).
-                    let wire = if body == hook_body {
-                        if decoded_headers.as_ref().is_some_and(|headers| {
-                            !crate::encoding::can_reuse_wire_body(headers, &parts.headers)
-                        }) {
-                            crate::encoding::encode_from_hook(&mut parts.headers, body)
-                        } else {
-                            raw.clone()
+                    match preserve_headers(
+                        &mut parts.headers,
+                        &mut parts.extensions,
+                        headers,
+                    ) {
+                        Ok(()) => {
+                            if let Ok(m) = method.parse() {
+                                parts.method = m;
+                            }
+                            if let Ok(u) = url.parse() {
+                                parts.uri = u;
+                            }
+                            // Re-encode the script's plaintext back to the wire encoding
+                            // (only when we decoded it in the first place).
+                            let wire = if body == hook_body {
+                                if decoded_headers.as_ref().is_some_and(|headers| {
+                                    !crate::encoding::can_reuse_wire_body(headers, &parts.headers)
+                                }) {
+                                    let wire = crate::encoding::encode_from_hook(
+                                        &mut parts.headers,
+                                        body,
+                                    );
+                                    synchronize_preserved_headers(
+                                        &parts.headers,
+                                        &mut parts.extensions,
+                                    );
+                                    wire
+                                } else {
+                                    raw.clone()
+                                }
+                            } else if decoded.is_some() {
+                                let wire = crate::encoding::encode_from_hook(
+                                    &mut parts.headers,
+                                    body,
+                                );
+                                synchronize_preserved_headers(
+                                    &parts.headers,
+                                    &mut parts.extensions,
+                                );
+                                wire
+                            } else {
+                                body
+                            };
+                            if decoded.is_none() && wire != raw {
+                                reconcile_edited_body_headers(&mut parts.headers, &wire);
+                                synchronize_preserved_headers(
+                                    &parts.headers,
+                                    &mut parts.extensions,
+                                );
+                            }
+                            request_body.apply_modified_body(&raw, wire);
                         }
-                    } else if decoded.is_some() {
-                        crate::encoding::encode_from_hook(&mut parts.headers, body)
-                    } else {
-                        body
-                    };
-                    if decoded.is_none() && wire != raw {
-                        reconcile_edited_body_headers(&mut parts.headers, &wire);
+                        Err(error) => tracing::warn!(
+                            "Lua on_request produced headers unsupported by the temporary Hyper adapter (passing through): {error}"
+                        ),
                     }
-                    request_body.apply_modified_body(&raw, wire);
                 }
                 Ok(crate::scripting::ScriptRequestAction::ShortCircuit {
                     status,
@@ -969,7 +1237,7 @@ impl HttpHandler for CapturingHandler {
                         parts.method.clone(),
                         parts.uri.clone(),
                         parts.version,
-                        parts.headers.clone(),
+                        ordered_headers(&parts.headers, &parts.extensions),
                         request_body.hook_bytes().clone(),
                         request_body.metadata(),
                         now_millis(),
@@ -978,11 +1246,12 @@ impl HttpHandler for CapturingHandler {
 
                     let status_code = http::StatusCode::from_u16(status)
                         .unwrap_or(http::StatusCode::INTERNAL_SERVER_ERROR);
-                    return RequestOrResponse::Response(self.synthetic_response(
-                        status_code,
-                        headers,
-                        body,
-                    ));
+                    match self.synthetic_ordered_response(status_code, headers, body) {
+                        Ok(response) => return CompatRequestOrResponse::Response(response),
+                        Err(error) => tracing::warn!(
+                            "Lua short-circuit produced headers unsupported by the temporary Hyper adapter (passing through): {error}"
+                        ),
+                    }
                 }
                 Ok(crate::scripting::ScriptRequestAction::PassThrough) => {}
                 Err(e) => {
@@ -998,7 +1267,7 @@ impl HttpHandler for CapturingHandler {
                     parts.method.clone(),
                     parts.uri.clone(),
                     parts.version,
-                    parts.headers.clone(),
+                    ordered_headers(&parts.headers, &parts.extensions),
                     request_body.hook_bytes().clone(),
                     request_body.metadata(),
                     now_millis(),
@@ -1034,9 +1303,24 @@ impl HttpHandler for CapturingHandler {
                                 parts.uri = u;
                             }
                             let hook_body = request_body.hook_bytes().clone();
-                            parts.headers = headers;
+                            if let Err(error) =
+                                preserve_headers(&mut parts.headers, &mut parts.extensions, headers)
+                            {
+                                tracing::warn!(
+                                    "Edited request has invalid compatibility headers: {error}"
+                                );
+                                return CompatRequestOrResponse::Response(self.synthetic_response(
+                                    http::StatusCode::BAD_REQUEST,
+                                    http::HeaderMap::new(),
+                                    Bytes::from_static(b"Invalid edited headers"),
+                                ));
+                            }
                             if body != hook_body {
                                 reconcile_edited_body_headers(&mut parts.headers, &body);
+                                synchronize_preserved_headers(
+                                    &parts.headers,
+                                    &mut parts.extensions,
+                                );
                             }
                             request_body.apply_modified_body(&hook_body, body);
                         }
@@ -1044,7 +1328,7 @@ impl HttpHandler for CapturingHandler {
                             // Short-circuit: captured_request is already set above.
                             let status_code = http::StatusCode::from_u16(status)
                                 .unwrap_or(http::StatusCode::BAD_GATEWAY);
-                            return RequestOrResponse::Response(self.synthetic_response(
+                            return CompatRequestOrResponse::Response(self.synthetic_response(
                                 status_code,
                                 http::HeaderMap::new(),
                                 body,
@@ -1054,7 +1338,7 @@ impl HttpHandler for CapturingHandler {
                             // Timeout or sender dropped (intercept turned off):
                             // return 504 so the client gets a clear error.
                             tracing::warn!("Intercept timed out for id={id}, returning 504");
-                            return RequestOrResponse::Response(self.synthetic_response(
+                            return CompatRequestOrResponse::Response(self.synthetic_response(
                                 http::StatusCode::GATEWAY_TIMEOUT,
                                 http::HeaderMap::new(),
                                 Bytes::new(),
@@ -1063,21 +1347,130 @@ impl HttpHandler for CapturingHandler {
                     }
 
                     let req = self.forward_request_from_body(parts, request_body);
-                    return RequestOrResponse::Request(req);
+                    return CompatRequestOrResponse::Request(req);
                 }
             }
         }
 
         let req = self.forward_request_from_body(parts, request_body);
-        RequestOrResponse::Request(req)
+        CompatRequestOrResponse::Request(req)
+    }
+}
+
+fn request_from_protocol(
+    request: ProxyRequest,
+) -> Result<Request<ProxyBody>, crate::header::HeaderConversionError> {
+    let (head, body) = request.into_parts();
+    let mut request = Request::new(body);
+    *request.method_mut() = head.method;
+    *request.uri_mut() = head.uri;
+    *request.version_mut() = head.version;
+    let compatibility = crate::header::to_http(&head.headers)?;
+    *request.headers_mut() = compatibility.clone();
+    request.extensions_mut().insert(PreservedHeaders {
+        ordered: head.headers,
+        compatibility,
+    });
+    Ok(request)
+}
+
+fn request_to_protocol(request: Request<ProxyBody>) -> ProxyRequest {
+    let (parts, body) = request.into_parts();
+    ProxyRequest::new(
+        RequestHead::new(
+            parts.method,
+            parts.uri,
+            parts.version,
+            ordered_headers(&parts.headers, &parts.extensions),
+        ),
+        body,
+    )
+}
+
+fn response_from_protocol(
+    response: ProxyResponse,
+) -> Result<Response<ProxyBody>, crate::header::HeaderConversionError> {
+    let (informational, head, body) = response.into_parts();
+    let mut response = Response::new(body);
+    *response.status_mut() = head.status;
+    *response.version_mut() = head.version;
+    let compatibility = crate::header::to_http(&head.headers)?;
+    *response.headers_mut() = compatibility.clone();
+    response.extensions_mut().insert(PreservedHeaders {
+        ordered: head.headers,
+        compatibility,
+    });
+    if !informational.is_empty() {
+        response
+            .extensions_mut()
+            .insert(InformationalResponses(informational));
+    }
+    Ok(response)
+}
+
+fn response_to_protocol(response: Response<ProxyBody>) -> ProxyResponse {
+    let (mut parts, body) = response.into_parts();
+    let informational = parts
+        .extensions
+        .remove::<InformationalResponses>()
+        .map_or_else(Vec::new, |responses| responses.0);
+    ProxyResponse::new(
+        ResponseHead::new(
+            parts.status,
+            parts.version,
+            ordered_headers(&parts.headers, &parts.extensions),
+        ),
+        body,
+    )
+    .with_informational(informational)
+}
+
+#[async_trait]
+impl HttpHandler for CapturingHandler {
+    async fn handle_request(
+        &mut self,
+        _ctx: &HttpContext,
+        request: ProxyRequest,
+    ) -> RequestOrResponse {
+        let request = match request_from_protocol(request) {
+            Ok(request) => request,
+            Err(error) => {
+                tracing::warn!("Handler compatibility conversion failed: {error}");
+                return RequestOrResponse::Response(response_to_protocol(self.synthetic_response(
+                    http::StatusCode::BAD_REQUEST,
+                    http::HeaderMap::new(),
+                    Bytes::from_static(b"Invalid request headers"),
+                )));
+            }
+        };
+
+        match self.handle_compat_request(request).await {
+            CompatRequestOrResponse::Request(request) => {
+                RequestOrResponse::Request(request_to_protocol(request))
+            }
+            CompatRequestOrResponse::Response(response) => {
+                RequestOrResponse::Response(response_to_protocol(response))
+            }
+        }
     }
 
     async fn handle_response(
         &mut self,
         _ctx: &HttpContext,
-        res: Response<hyper::body::Incoming>,
-    ) -> Response<ProxyBody> {
-        self.handle_upstream_response(res).await
+        response: ProxyResponse,
+    ) -> ProxyResponse {
+        let response = match response_from_protocol(response) {
+            Ok(response) => response,
+            Err(error) => {
+                tracing::warn!("Handler compatibility conversion failed: {error}");
+                return response_to_protocol(self.synthetic_response(
+                    http::StatusCode::BAD_GATEWAY,
+                    http::HeaderMap::new(),
+                    Bytes::from_static(b"Invalid upstream headers"),
+                ));
+            }
+        };
+        response_to_protocol(self.handle_upstream_response(response).await)
     }
 }
 
@@ -1085,7 +1478,21 @@ impl HttpHandler for CapturingHandler {
 mod tests {
     use super::*;
     use http::{HeaderMap, Method, StatusCode, Uri, Version};
-    use http_body_util::BodyExt;
+
+    fn collected(data: impl Into<Bytes>) -> CollectedBody {
+        CollectedBody {
+            data: data.into(),
+            trailers: None,
+        }
+    }
+
+    fn interleaved_headers() -> HeaderBlock {
+        HeaderBlock::from_fields([
+            HeaderField::new("X-Order", "first").unwrap(),
+            HeaderField::new("X-Middle", "second").unwrap(),
+            HeaderField::new("X-Order", "third").unwrap(),
+        ])
+    }
 
     fn proxied_request() -> ProxiedRequest {
         let mut headers = HeaderMap::new();
@@ -1094,7 +1501,7 @@ mod tests {
             Method::POST,
             "http://example.test/path?x=1".parse::<Uri>().unwrap(),
             Version::HTTP_11,
-            headers,
+            crate::header::from_http(&headers),
             Bytes::from_static(b"request body"),
             100,
         )
@@ -1142,6 +1549,147 @@ mod tests {
         assert_eq!(headers[http::header::CONTENT_LENGTH], "6");
     }
 
+    #[test]
+    fn compatibility_mutation_keeps_unrelated_interleaved_headers() {
+        let ordered = interleaved_headers();
+        let mut headers = crate::header::to_http(&ordered).unwrap();
+        let mut extensions = http::Extensions::new();
+        extensions.insert(PreservedHeaders {
+            ordered: ordered.clone(),
+            compatibility: headers.clone(),
+        });
+
+        headers.insert(http::header::CONTENT_LENGTH, "6".parse().unwrap());
+        synchronize_preserved_headers(&headers, &mut extensions);
+
+        let synchronized = ordered_headers(&headers, &extensions);
+        assert_eq!(
+            synchronized.iter().take(3).collect::<Vec<_>>(),
+            ordered.iter().collect::<Vec<_>>()
+        );
+        assert_eq!(synchronized.get(b"content-length"), Some(b"6".as_slice()));
+    }
+
+    #[tokio::test]
+    async fn native_handler_preserves_interleaved_request_headers() {
+        let (event_tx, _event_rx) = mpsc::channel(1);
+        let mut handler = CapturingHandler::new(event_tx);
+        let headers = interleaved_headers();
+        let request = ProxyRequest::new(
+            RequestHead::new(
+                Method::GET,
+                "http://example.test/".parse().unwrap(),
+                Version::HTTP_11,
+                headers.clone(),
+            ),
+            body::empty(),
+        );
+        let context = HttpContext {
+            remote_addr: "127.0.0.1:12345".parse().unwrap(),
+        };
+
+        let RequestOrResponse::Request(forwarded) = handler.handle_request(&context, request).await
+        else {
+            panic!("request should be forwarded");
+        };
+
+        assert_eq!(forwarded.head.headers, headers);
+    }
+
+    #[tokio::test]
+    async fn native_handler_preserves_interleaved_response_headers() {
+        let (event_tx, _event_rx) = mpsc::channel(1);
+        let mut handler = CapturingHandler::new(event_tx);
+        let headers = interleaved_headers();
+        let response = ProxyResponse::new(
+            ResponseHead::new(StatusCode::OK, Version::HTTP_11, headers.clone()),
+            body::empty(),
+        )
+        .with_informational(vec![ResponseHead::new(
+            StatusCode::EARLY_HINTS,
+            Version::HTTP_11,
+            HeaderBlock::from_fields([HeaderField::new("Link", "</style.css>").unwrap()]),
+        )]);
+        let context = HttpContext {
+            remote_addr: "127.0.0.1:12345".parse().unwrap(),
+        };
+
+        let forwarded = handler.handle_response(&context, response).await;
+
+        assert_eq!(forwarded.head.headers, headers);
+        assert_eq!(forwarded.informational.len(), 1);
+        assert_eq!(forwarded.informational[0].status, StatusCode::EARLY_HINTS);
+        assert_eq!(
+            forwarded.informational[0].headers.get("link"),
+            Some(b"</style.css>".as_slice())
+        );
+    }
+
+    #[tokio::test]
+    async fn replay_capture_preserves_interleaved_response_headers() {
+        let (event_tx, mut event_rx) = mpsc::channel(1);
+        let mut handler = CapturingHandler::new(event_tx);
+        handler.captured_request = Some(CapturedRequest::buffered(proxied_request()));
+        let headers = interleaved_headers();
+
+        handler
+            .record_protocol_response(ProxyResponse::new(
+                ResponseHead::new(StatusCode::OK, Version::HTTP_11, headers.clone()),
+                body::empty(),
+            ))
+            .await
+            .unwrap();
+
+        let ProxyEvent::RequestComplete { response, .. } = event_rx.recv().await.unwrap() else {
+            panic!("replay should complete");
+        };
+        assert_eq!(response.headers(), &headers);
+    }
+
+    #[tokio::test]
+    async fn captured_flow_preserves_interleaved_request_headers() {
+        let (event_tx, mut event_rx) = mpsc::channel(1);
+        let mut handler = CapturingHandler::new(event_tx);
+        let headers = interleaved_headers();
+        let request = ProxyRequest::new(
+            RequestHead::new(
+                Method::GET,
+                "http://example.test/".parse().unwrap(),
+                Version::HTTP_11,
+                headers.clone(),
+            ),
+            body::full(Bytes::from_static(b"request")),
+        );
+        let context = HttpContext {
+            remote_addr: "127.0.0.1:12345".parse().unwrap(),
+        };
+
+        let RequestOrResponse::Request(forwarded) = handler.handle_request(&context, request).await
+        else {
+            panic!("request should be forwarded");
+        };
+        forwarded.body.collect().await.unwrap();
+        let response = handler
+            .handle_response(
+                &context,
+                ProxyResponse::new(
+                    ResponseHead::new(StatusCode::OK, Version::HTTP_11, HeaderBlock::new()),
+                    body::empty(),
+                ),
+            )
+            .await;
+        response.body.collect().await.unwrap();
+
+        let event = tokio::time::timeout(std::time::Duration::from_secs(1), event_rx.recv())
+            .await
+            .unwrap()
+            .unwrap();
+        let ProxyEvent::RequestComplete { request, .. } = event else {
+            panic!("flow should complete");
+        };
+        assert_eq!(request.headers(), &headers);
+    }
+
     #[tokio::test]
     async fn finish_buffered_response_uses_pending_id_and_rebuilds_response_body() {
         let (event_tx, mut event_rx) = mpsc::channel(1);
@@ -1157,7 +1705,8 @@ mod tests {
             .into_parts();
         parts.version = Version::HTTP_11;
 
-        let response = handler.finish_buffered_response(parts, Bytes::from_static(b"accepted"));
+        let response =
+            handler.finish_buffered_response(parts, collected(Bytes::from_static(b"accepted")));
 
         assert_eq!(body_bytes(response).await.as_ref(), b"accepted");
         match event_rx.recv().await.unwrap() {
@@ -1169,7 +1718,7 @@ mod tests {
                 assert_eq!(id, 77);
                 assert_eq!(request.uri().path(), "/path");
                 assert_eq!(response.status(), StatusCode::ACCEPTED);
-                assert_eq!(response.headers()["x-response"], "ok");
+                assert_eq!(response.headers().get("x-response"), Some(b"ok".as_slice()));
                 assert_eq!(response.body().as_ref(), b"accepted");
             }
             other => panic!("expected RequestComplete, got {other:?}"),
@@ -1186,10 +1735,31 @@ mod tests {
             .unwrap()
             .into_parts();
 
-        let response = handler.finish_buffered_response(parts, Bytes::new());
+        let response = handler.finish_buffered_response(parts, CollectedBody::default());
 
         assert!(body_bytes(response).await.is_empty());
         assert!(event_rx.try_recv().is_err());
+    }
+
+    #[tokio::test]
+    async fn finish_buffered_response_preserves_unedited_trailers() {
+        let (event_tx, _event_rx) = mpsc::channel(1);
+        let mut handler = CapturingHandler::new(event_tx);
+        let (parts, _) = Response::builder().body(()).unwrap().into_parts();
+        let mut trailers = HeaderBlock::new();
+        trailers.add("x-checksum", "abc").unwrap();
+
+        let response = handler.finish_buffered_response(
+            parts,
+            CollectedBody {
+                data: Bytes::from_static(b"body"),
+                trailers: Some(trailers.clone()),
+            },
+        );
+        let collected = response.into_body().collect().await.unwrap();
+
+        assert_eq!(collected.data.as_ref(), b"body");
+        assert_eq!(collected.trailers, Some(trailers));
     }
 
     #[tokio::test]
@@ -1219,7 +1789,10 @@ mod tests {
                 assert_eq!(id, 78);
                 assert_eq!(request.uri().path(), "/path");
                 assert_eq!(response.status(), StatusCode::BAD_GATEWAY);
-                assert_eq!(response.headers()["x-synthetic"], "yes");
+                assert_eq!(
+                    response.headers().get("x-synthetic"),
+                    Some(b"yes".as_slice())
+                );
                 assert_eq!(response.body().as_ref(), b"synthetic body");
             }
             other => panic!("expected RequestComplete, got {other:?}"),
@@ -1399,15 +1972,58 @@ mod tests {
                 assert_eq!(captured.as_ref(), b"abcd");
                 assert_eq!(body.collect().await.unwrap().to_bytes().as_ref(), b"abcdef");
             }
+            BodyCollection::Failed { .. } => panic!("unexpected body error"),
         }
     }
 
     #[tokio::test]
     async fn collect_body_buffers_full_body_when_unlimited() {
         match collect_body(body::full(Bytes::from_static(b"abcdef")), None, "response").await {
-            BodyCollection::Complete(body) => assert_eq!(body.as_ref(), b"abcdef"),
+            BodyCollection::Complete(body) => assert_eq!(body.data.as_ref(), b"abcdef"),
             BodyCollection::Exceeded { .. } => panic!("expected complete body"),
+            BodyCollection::Failed { .. } => panic!("unexpected body error"),
         }
+    }
+
+    #[tokio::test]
+    async fn collect_body_preserves_trailers() {
+        let mut trailers = HeaderBlock::new();
+        trailers.add("x-checksum", "abc").unwrap();
+        let input = ProxyBody::from_frames([
+            Ok(BodyFrame::Data(Bytes::from_static(b"data"))),
+            Ok(BodyFrame::Trailers(trailers.clone())),
+        ]);
+
+        match collect_body(input, None, "response").await {
+            BodyCollection::Complete(body) => {
+                assert_eq!(body.data.as_ref(), b"data");
+                assert_eq!(body.trailers, Some(trailers));
+            }
+            _ => panic!("expected complete body"),
+        }
+    }
+
+    #[tokio::test]
+    async fn collect_body_propagates_stream_errors_after_buffered_data() {
+        let input = ProxyBody::from_frames([
+            Ok(BodyFrame::Data(Bytes::from_static(b"partial"))),
+            Err(ProtocolError::new(ErrorKind::Io, "upstream reset")),
+        ]);
+
+        let BodyCollection::Failed { captured, mut body } =
+            collect_body(input, None, "response").await
+        else {
+            panic!("expected body error");
+        };
+        assert_eq!(captured.as_ref(), b"partial");
+        assert_eq!(
+            body.next().await.unwrap().unwrap(),
+            BodyFrame::Data(captured)
+        );
+        assert_eq!(
+            body.next().await.unwrap().unwrap_err().to_string(),
+            "upstream reset"
+        );
     }
 
     #[tokio::test]
@@ -1422,7 +2038,7 @@ mod tests {
 
         assert_eq!(request.method(), Method::POST);
         assert_eq!(request.uri().path(), "/path");
-        assert_eq!(request.headers()["x-original"], "yes");
+        assert_eq!(request.headers().get("x-original"), Some(b"yes".as_slice()));
         let body = request.into_body().collect().await.unwrap().to_bytes();
         assert_eq!(body.as_ref(), b"request body");
         assert!(handler.pending_id.is_some());
@@ -1478,7 +2094,7 @@ mod tests {
             InterceptDecision::Modified {
                 method: "PUT".to_owned(),
                 uri: "http://example.test/changed".to_owned(),
-                headers,
+                headers: crate::header::from_http(&headers),
                 body: Bytes::from_static(b"changed body"),
             },
         ));
@@ -1486,7 +2102,7 @@ mod tests {
         let request = task.await.unwrap().unwrap();
         assert_eq!(request.method(), Method::PUT);
         assert_eq!(request.uri().path(), "/changed");
-        assert_eq!(request.headers()["x-modified"], "yes");
+        assert_eq!(request.headers().get("x-modified"), Some(b"yes".as_slice()));
         let body = request.into_body().collect().await.unwrap().to_bytes();
         assert_eq!(body.as_ref(), b"changed body");
     }
@@ -1515,7 +2131,7 @@ mod tests {
         let request = task.await.unwrap().unwrap();
         assert_eq!(request.method(), Method::POST);
         assert_eq!(request.uri().path(), "/path");
-        assert_eq!(request.headers()["x-original"], "yes");
+        assert_eq!(request.headers().get("x-original"), Some(b"yes".as_slice()));
         let body = request.into_body().collect().await.unwrap().to_bytes();
         assert_eq!(body.as_ref(), b"request body");
     }
@@ -1600,6 +2216,98 @@ mod tests {
 
     #[cfg(feature = "scripting")]
     #[tokio::test]
+    async fn scripting_request_trailers_survive_header_edits_but_not_body_replacement() {
+        for (script, expected_body, preserve_trailers) in [
+            ("req.headers:set('x-script', 'yes')", "original", true),
+            ("req.body = 'edited'", "edited", false),
+            ("error('script failed')", "original", true),
+        ] {
+            let directory = tempfile::tempdir().unwrap();
+            let script_path = directory.path().join("request.lua");
+            std::fs::write(
+                &script_path,
+                format!("function on_request(req) {script}; return req end"),
+            )
+            .unwrap();
+            let engine = Arc::new(crate::scripting::ScriptEngine::new(&script_path).unwrap());
+            let (event_tx, _event_rx) = mpsc::channel(1);
+            let mut handler = CapturingHandler::new(event_tx).with_script_engine(engine);
+            let trailers =
+                HeaderBlock::from_fields([
+                    HeaderField::new("x-checksum", "original-checksum").unwrap()
+                ]);
+            let request = ProxyRequest::new(
+                RequestHead::new(
+                    Method::POST,
+                    "http://example.test/".parse().unwrap(),
+                    Version::HTTP_11,
+                    HeaderBlock::new(),
+                ),
+                ProxyBody::from_frames([
+                    Ok(BodyFrame::Data(Bytes::from_static(b"original"))),
+                    Ok(BodyFrame::Trailers(trailers.clone())),
+                ]),
+            );
+            let context = HttpContext {
+                remote_addr: "127.0.0.1:12345".parse().unwrap(),
+            };
+            let RequestOrResponse::Request(request) =
+                handler.handle_request(&context, request).await
+            else {
+                panic!("request should be forwarded");
+            };
+            if script.starts_with("req.headers") {
+                assert_eq!(request.headers().get("x-script"), Some(b"yes".as_slice()));
+            }
+            let collected = request.body.collect().await.unwrap();
+            assert_eq!(collected.data, expected_body);
+            assert_eq!(collected.trailers, preserve_trailers.then_some(trailers));
+        }
+    }
+
+    #[cfg(feature = "scripting")]
+    #[tokio::test]
+    async fn scripting_short_circuit_preserves_ordered_headers_in_response_and_capture() {
+        let directory = tempfile::tempdir().unwrap();
+        let script = directory.path().join("response.lua");
+        std::fs::write(
+            &script,
+            "function on_request(req) return {status=200, headers=req.headers, body='ok'} end",
+        )
+        .unwrap();
+        let engine = Arc::new(crate::scripting::ScriptEngine::new(&script).unwrap());
+        let (events, mut receiver) = mpsc::channel(10);
+        let mut handler = CapturingHandler::new(events).with_script_engine(engine);
+        let mut headers = interleaved_headers();
+        headers.add("X-Binary", [0x80, 0xff]).unwrap();
+        let request = ProxyRequest::new(
+            RequestHead::new(
+                Method::GET,
+                "http://example.test/".parse().unwrap(),
+                Version::HTTP_11,
+                headers.clone(),
+            ),
+            ProxyBody::empty(),
+        );
+        let context = HttpContext {
+            remote_addr: "127.0.0.1:12345".parse().unwrap(),
+        };
+        let RequestOrResponse::Response(response) = handler.handle_request(&context, request).await
+        else {
+            panic!("expected short-circuit response");
+        };
+        assert_eq!(response.head.headers, headers);
+        assert_eq!(response.body.collect().await.unwrap().data, "ok");
+        loop {
+            if let ProxyEvent::RequestComplete { response, .. } = receiver.recv().await.unwrap() {
+                assert_eq!(response.headers(), &headers);
+                break;
+            }
+        }
+    }
+
+    #[cfg(feature = "scripting")]
+    #[tokio::test]
     async fn finish_buffered_response_runs_script_response_hook() {
         use std::io::Write;
         use tempfile::NamedTempFile;
@@ -1629,7 +2337,8 @@ mod tests {
             .unwrap()
             .into_parts();
 
-        let response = handler.finish_buffered_response(parts, Bytes::from_static(b"original"));
+        let response =
+            handler.finish_buffered_response(parts, collected(Bytes::from_static(b"original")));
 
         assert_eq!(response.status(), StatusCode::CREATED);
         assert_eq!(response.headers()["x-script"], "yes");
@@ -1637,7 +2346,7 @@ mod tests {
         match event_rx.recv().await.unwrap() {
             ProxyEvent::RequestComplete { response, .. } => {
                 assert_eq!(response.status(), StatusCode::CREATED);
-                assert_eq!(response.headers()["x-script"], "yes");
+                assert_eq!(response.headers().get("x-script"), Some(b"yes".as_slice()));
                 assert_eq!(response.body().as_ref(), b"scripted");
             }
             other => panic!("expected RequestComplete, got {other:?}"),
@@ -1685,7 +2394,7 @@ mod tests {
             .unwrap()
             .into_parts();
 
-        let response = handler.finish_buffered_response(parts, compressed);
+        let response = handler.finish_buffered_response(parts, collected(compressed));
 
         // Output stays brotli-encoded with a refreshed content-length.
         assert_eq!(response.headers()["content-encoding"], "br");
@@ -1733,7 +2442,7 @@ mod tests {
             .unwrap()
             .into_parts();
 
-        let response = handler.finish_buffered_response(parts, compressed);
+        let response = handler.finish_buffered_response(parts, collected(compressed));
 
         assert!(response.headers().get("content-encoding").is_none());
         assert_eq!(response.headers()["content-length"], "18");
@@ -1779,7 +2488,7 @@ mod tests {
             .unwrap()
             .into_parts();
 
-        let response = handler.finish_buffered_response(parts, compressed);
+        let response = handler.finish_buffered_response(parts, collected(compressed));
 
         assert_eq!(response.headers()["content-encoding"], "gzip");
         let wire = body_bytes(response).await;
@@ -1787,6 +2496,47 @@ mod tests {
         headers.insert(http::header::CONTENT_ENCODING, "gzip".parse().unwrap());
         let decoded = crate::encoding::decode_for_hook(&headers, &wire).unwrap();
         assert_eq!(decoded.as_ref(), b"original plaintext");
+    }
+
+    #[cfg(feature = "scripting")]
+    #[tokio::test]
+    async fn request_script_error_passes_original_message_through() {
+        use std::io::Write;
+        use tempfile::NamedTempFile;
+
+        let mut file = NamedTempFile::new().unwrap();
+        file.write_all(
+            br#"
+            function on_request(req)
+                error("boom")
+            end
+            "#,
+        )
+        .unwrap();
+        file.flush().unwrap();
+
+        let engine = Arc::new(crate::scripting::ScriptEngine::new(file.path()).unwrap());
+        let (event_tx, _event_rx) = mpsc::channel(1);
+        let mut handler = CapturingHandler::new(event_tx).with_script_engine(engine);
+        let request = Request::builder()
+            .method(Method::POST)
+            .uri("http://example.test/pass-through")
+            .header("x-original", "yes")
+            .body(body::full(Bytes::from_static(b"original")))
+            .unwrap();
+
+        let CompatRequestOrResponse::Request(request) =
+            handler.handle_compat_request(request).await
+        else {
+            panic!("script error unexpectedly short-circuited request");
+        };
+        assert_eq!(request.method(), Method::POST);
+        assert_eq!(request.uri().path(), "/pass-through");
+        assert_eq!(request.headers()["x-original"], "yes");
+        assert_eq!(
+            request.into_body().collect().await.unwrap().data,
+            Bytes::from_static(b"original")
+        );
     }
 
     #[cfg(feature = "scripting")]
@@ -1816,7 +2566,8 @@ mod tests {
             .unwrap()
             .into_parts();
 
-        let response = handler.finish_buffered_response(parts, Bytes::from_static(b"original"));
+        let response =
+            handler.finish_buffered_response(parts, collected(Bytes::from_static(b"original")));
 
         assert_eq!(response.status(), StatusCode::OK);
         assert_eq!(body_bytes(response).await.as_ref(), b"original");
@@ -1851,7 +2602,8 @@ mod tests {
             .unwrap()
             .into_parts();
 
-        let response = handler.finish_buffered_response(parts, Bytes::from_static(b"original"));
+        let response =
+            handler.finish_buffered_response(parts, collected(Bytes::from_static(b"original")));
 
         assert_eq!(response.status(), StatusCode::OK);
         assert_eq!(response.headers()["x-original-response"], "yes");
@@ -1859,7 +2611,10 @@ mod tests {
         match event_rx.recv().await.unwrap() {
             ProxyEvent::RequestComplete { response, .. } => {
                 assert_eq!(response.status(), StatusCode::OK);
-                assert_eq!(response.headers()["x-original-response"], "yes");
+                assert_eq!(
+                    response.headers().get("x-original-response"),
+                    Some(b"yes".as_slice())
+                );
                 assert_eq!(response.body().as_ref(), b"original");
             }
             other => panic!("expected RequestComplete, got {other:?}"),

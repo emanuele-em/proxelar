@@ -36,7 +36,7 @@ docker build -t proxelar .
 cargo install proxelar
 ```
 
-This builds and installs the `proxelar` binary. Lua 5.4 and OpenSSL are vendored and compiled from source, so no system dependencies are required beyond a Rust toolchain.
+This builds and installs the `proxelar` binary with Lua and HTTP/3 enabled. Lua 5.4 and BoringSSL are compiled from source; source installations therefore need CMake, Clang/libclang, and a C/C++ toolchain in addition to Rust.
 
 ## From source
 
@@ -48,9 +48,15 @@ cargo build --release
 
 The binary is at `target/release/proxelar`.
 
-## Without Lua scripting
+## Feature-minimal builds
 
-If you don't need scripting and want a smaller build:
+The published binary and Cargo defaults include Lua scripting and HTTP/3. To keep H3 but omit Lua:
+
+```bash
+cargo install proxelar --no-default-features --features http3
+```
+
+For a smaller H1/H2-only binary without Lua or H3:
 
 ```bash
 cargo install proxelar --no-default-features
