@@ -1,4 +1,3 @@
-use std::collections::VecDeque;
 use std::fmt;
 use std::pin::Pin;
 use std::task::{Context, Poll};
@@ -75,7 +74,7 @@ impl ProxyBody {
     }
 
     pub fn from_frames(frames: impl IntoIterator<Item = BodyResult>) -> Self {
-        let frames = frames.into_iter().collect::<VecDeque<_>>();
+        let frames = frames.into_iter().collect::<Vec<_>>();
         let exact_length = frames.iter().try_fold(0_u64, |length, frame| match frame {
             Ok(BodyFrame::Data(data)) => length.checked_add(data.len() as u64),
             Ok(BodyFrame::Trailers(_)) => Some(length),
@@ -85,7 +84,7 @@ impl ProxyBody {
             .iter()
             .any(|frame| matches!(frame, Ok(BodyFrame::Trailers(_))));
         Self {
-            inner: BodyInner::Stream(Box::pin(ReadyFrames { frames })),
+            inner: BodyInner::Stream(Box::pin(futures_util::stream::iter(frames))),
             exact_length,
             may_have_trailers,
         }
@@ -176,20 +175,8 @@ impl fmt::Debug for ProxyBody {
     }
 }
 
-struct ReadyFrames {
-    frames: VecDeque<BodyResult>,
-}
-
 enum BodyInner {
     Empty,
     Once(Option<BodyResult>),
     Stream(Pin<Box<dyn Stream<Item = BodyResult> + Send + 'static>>),
-}
-
-impl Stream for ReadyFrames {
-    type Item = BodyResult;
-
-    fn poll_next(mut self: Pin<&mut Self>, _context: &mut Context<'_>) -> Poll<Option<Self::Item>> {
-        Poll::Ready(self.frames.pop_front())
-    }
 }

@@ -655,6 +655,38 @@ impl Http1Connector for ClosingConnector {
     }
 }
 
+#[derive(Clone)]
+struct Http10DefaultCloseConnector {
+    connections: Arc<AtomicUsize>,
+}
+
+impl Http1Connector for Http10DefaultCloseConnector {
+    fn connect(&self, _key: PoolKey) -> BoxFuture<'static, Result<BoxIo, ProtocolError>> {
+        let connections = Arc::clone(&self.connections);
+        Box::pin(async move {
+            connections.fetch_add(1, Ordering::SeqCst);
+            let (client_io, mut peer): (DuplexStream, DuplexStream) = tokio::io::duplex(1024);
+            tokio::spawn(async move {
+                let mut request = Vec::new();
+                let mut byte = [0_u8; 1];
+                while !request.ends_with(b"\r\n\r\n") {
+                    peer.read_exact(&mut byte).await.unwrap();
+                    request.push(byte[0]);
+                }
+                peer.write_all(b"HTTP/1.0 200 OK\r\nContent-Length: 2\r\n\r\nok")
+                    .await
+                    .unwrap();
+
+                // A conforming client closes after this default-close response.
+                // If another request is incorrectly reused here, consume one byte
+                // and drop the connection so that the request fails visibly.
+                let _ = peer.read(&mut byte).await;
+            });
+            Ok(Box::new(client_io) as BoxIo)
+        })
+    }
+}
+
 #[tokio::test]
 async fn pool_reuses_connections_by_destination_tls_and_route() {
     let connections = Arc::new(AtomicUsize::new(0));
@@ -686,6 +718,38 @@ async fn pool_reuses_connections_by_destination_tls_and_route() {
         .await
         .unwrap();
     response.body.collect().await.unwrap();
+    assert_eq!(connections.load(Ordering::SeqCst), 2);
+}
+
+#[tokio::test]
+async fn pool_does_not_reuse_an_http10_default_close_response() {
+    let connections = Arc::new(AtomicUsize::new(0));
+    let pool = Http1Pool::new(
+        Http10DefaultCloseConnector {
+            connections: Arc::clone(&connections),
+        },
+        ConnectionConfig::default(),
+    );
+    let key = PoolKey {
+        destination: "example.test:80".to_owned(),
+        tls: false,
+        outbound_route: None,
+    };
+
+    for path in ["/one", "/two"] {
+        let response = tokio::time::timeout(
+            Duration::from_secs(1),
+            pool.send(key.clone(), request(Method::GET, path, ProxyBody::empty())),
+        )
+        .await
+        .expect("HTTP/1.0 request timed out")
+        .unwrap();
+        assert_eq!(
+            response.body.collect().await.unwrap().data,
+            Bytes::from_static(b"ok")
+        );
+    }
+
     assert_eq!(connections.load(Ordering::SeqCst), 2);
 }
 

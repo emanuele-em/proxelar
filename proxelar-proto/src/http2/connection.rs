@@ -17,8 +17,8 @@ use super::{
 };
 use crate::http1::BoxIo;
 use crate::{
-    BodyFrame, BoxFuture, ErrorKind, HttpClient as HttpClientTrait, HttpService, ProtocolError,
-    ProxyBody, ProxyRequest, ProxyResponse,
+    response_body_is_forbidden, BodyFrame, BoxFuture, ErrorKind, HttpClient as HttpClientTrait,
+    HttpService, ProtocolError, ProxyBody, ProxyRequest, ProxyResponse,
 };
 
 /// HTTP/2 settings shared by client and server drivers.
@@ -88,51 +88,63 @@ pub fn body_tunnel(mut inbound: ProxyBody, capacity: usize) -> (DuplexStream, Pr
     let (application, bridge) = tokio::io::duplex(capacity);
     let (mut bridge_reader, mut bridge_writer) = tokio::io::split(bridge);
     let (outbound_tx, outbound_rx) = mpsc::channel(capacity.div_ceil(16 * 1024).max(1));
+    // The receive pump must not keep the response body open after the
+    // application's write half closes. Upgrade only to report an error.
+    let error_tx = outbound_tx.downgrade();
     tokio::spawn(async move {
-        let mut request_open = true;
-        let mut output = vec![0_u8; capacity.min(16 * 1024)];
-        loop {
-            tokio::select! {
-                frame = inbound.next(), if request_open => {
-                    match frame {
-                        Some(Ok(BodyFrame::Data(data))) => {
-                            if bridge_writer.write_all(&data).await.is_err() {
-                                break;
-                            }
+        let receive = async move {
+            let result = async {
+                while let Some(frame) = inbound.next().await {
+                    match frame? {
+                        BodyFrame::Data(data) => {
+                            bridge_writer.write_all(&data).await.map_err(|error| {
+                                ProtocolError::new(ErrorKind::Io, error.to_string())
+                            })?
                         }
-                        Some(Ok(BodyFrame::Trailers(_))) => {
-                            let _ = outbound_tx.send(Err(ProtocolError::new(
+                        BodyFrame::Trailers(_) => {
+                            return Err(ProtocolError::new(
                                 ErrorKind::ProtocolViolation,
                                 "CONNECT byte stream received trailers",
-                            ))).await;
-                            break;
-                        }
-                        Some(Err(error)) => {
-                            let _ = outbound_tx.send(Err(error)).await;
-                            break;
-                        }
-                        None => {
-                            request_open = false;
-                            let _ = bridge_writer.shutdown().await;
+                            ));
                         }
                     }
                 }
-                read = bridge_reader.read(&mut output) => {
-                    match read {
-                        Ok(0) | Err(_) => break,
-                        Ok(read) => {
-                            if outbound_tx
-                                .send(Ok(BodyFrame::Data(Bytes::copy_from_slice(&output[..read]))))
-                                .await
-                                .is_err()
-                            {
-                                break;
-                            }
-                        }
-                    }
+                bridge_writer
+                    .shutdown()
+                    .await
+                    .map_err(|error| ProtocolError::new(ErrorKind::Io, error.to_string()))
+            }
+            .await;
+            if let Err(error) = result {
+                if let Some(sender) = error_tx.upgrade() {
+                    let _ = sender.send(Err(error)).await;
+                }
+                return Err(());
+            }
+            Ok(())
+        };
+        let transmit = async move {
+            let mut output = vec![0_u8; capacity.min(16 * 1024)];
+            loop {
+                let read = tokio::select! {
+                    read = bridge_reader.read(&mut output) => read,
+                    () = outbound_tx.closed() => return Err(()),
+                };
+                let frame = match read {
+                    Ok(0) => return Ok(()),
+                    Ok(read) => Ok(BodyFrame::Data(Bytes::copy_from_slice(&output[..read]))),
+                    Err(error) => Err(ProtocolError::new(ErrorKind::Io, error.to_string())),
+                };
+                let failed = frame.is_err();
+                outbound_tx.send(frame).await.map_err(|_| ())?;
+                if failed {
+                    return Err(());
                 }
             }
-        }
+        };
+        // A normal half-close leaves the opposite pump running; a failure
+        // cancels it. Neither direction waits for the other's buffer to drain.
+        let _ = tokio::try_join!(receive, transmit);
     });
     (
         application,
@@ -211,6 +223,7 @@ where
             return Err(error);
         }
     };
+    let request_method = head.method.clone();
     let body = recv_body(request.into_body());
     let response = match service.call(ProxyRequest::new(head, body)).await {
         Ok(response) => response,
@@ -232,7 +245,8 @@ where
             .map_err(map_h2_error)?;
     }
     let response = to_h2_response(&head)?;
-    let end_stream = body_is_known_empty(&body);
+    let end_stream =
+        response_body_is_forbidden(&request_method, head.status) || body_is_known_empty(&body);
     let mut send = respond
         .send_response(response, end_stream)
         .map_err(map_h2_error)?;

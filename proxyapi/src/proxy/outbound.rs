@@ -1,5 +1,5 @@
 use std::future::Future;
-use std::net::{IpAddr, Ipv4Addr, Ipv6Addr};
+use std::net::IpAddr;
 use std::pin::Pin;
 use std::str::FromStr;
 use std::task::{Context, Poll};
@@ -86,11 +86,11 @@ pub(crate) enum OutboundConnector {
 }
 
 impl OutboundConnector {
-    pub(crate) fn new(proxy: Option<&UpstreamProxyConfig>) -> Result<Self, crate::Error> {
+    pub(crate) fn new(proxy: Option<&UpstreamProxyConfig>) -> Self {
         match proxy {
-            None => Ok(Self::Direct),
-            Some(config) if config.kind == ProxyKind::Http => Ok(Self::Http(config.clone())),
-            Some(config) => Ok(Self::Socks5(config.clone())),
+            None => Self::Direct,
+            Some(config) if config.kind == ProxyKind::Http => Self::Http(config.clone()),
+            Some(config) => Self::Socks5(config.clone()),
         }
     }
 }
@@ -218,7 +218,12 @@ async fn connect_socks5_proxy(
         .port_u16()
         .ok_or_else(|| invalid_input("SOCKS5 destination has no port"))?;
     let mut request = vec![5, 1, 0];
-    if let Ok(address) = destination.host().parse::<IpAddr>() {
+    let host = destination.host();
+    let host = host
+        .strip_prefix('[')
+        .and_then(|host| host.strip_suffix(']'))
+        .unwrap_or(host);
+    if let Ok(address) = host.parse::<IpAddr>() {
         match address {
             IpAddr::V4(address) => {
                 request.push(1);
@@ -230,7 +235,7 @@ async fn connect_socks5_proxy(
             }
         }
     } else {
-        let host = destination.host().as_bytes();
+        let host = host.as_bytes();
         let length = u8::try_from(host.len())
             .map_err(|_| invalid_input("SOCKS5 destination name exceeds 255 bytes"))?;
         request.extend_from_slice(&[3, length]);
@@ -251,7 +256,6 @@ async fn connect_socks5_proxy(
         1 => {
             let mut ignored = [0_u8; 4];
             stream.read_exact(&mut ignored).await?;
-            let _ = Ipv4Addr::from(ignored);
         }
         3 => {
             let length = stream.read_u8().await?;
@@ -261,7 +265,6 @@ async fn connect_socks5_proxy(
         4 => {
             let mut ignored = [0_u8; 16];
             stream.read_exact(&mut ignored).await?;
-            let _ = Ipv6Addr::from(ignored);
         }
         _ => {
             return Err(invalid_data(
@@ -380,6 +383,50 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn socks5_encodes_domain_ipv4_and_ipv6_destinations() {
+        for (destination, address) in [
+            (
+                "http://example.test:443/",
+                [vec![3, 12], b"example.test".to_vec()].concat(),
+            ),
+            ("http://127.0.0.1:443/", vec![1, 127, 0, 0, 1]),
+            (
+                "http://[::1]:443/",
+                [vec![4], std::net::Ipv6Addr::LOCALHOST.octets().to_vec()].concat(),
+            ),
+        ] {
+            let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+            let proxy: UpstreamProxyConfig = format!("socks5://{}", listener.local_addr().unwrap())
+                .parse()
+                .unwrap();
+            let server = tokio::spawn(async move {
+                let (mut stream, _) = listener.accept().await.unwrap();
+                let mut greeting = [0; 3];
+                stream.read_exact(&mut greeting).await.unwrap();
+                assert_eq!(greeting, [5, 1, 0]);
+                stream.write_all(&[5, 0]).await.unwrap();
+
+                let expected = [vec![5, 1, 0], address, 443_u16.to_be_bytes().to_vec()].concat();
+                let mut request = vec![0; expected.len()];
+                stream.read_exact(&mut request).await.unwrap();
+                assert_eq!(request, expected);
+                stream
+                    .write_all(&[5, 0, 0, 1, 127, 0, 0, 1, 0, 0])
+                    .await
+                    .unwrap();
+            });
+            tokio::time::timeout(
+                std::time::Duration::from_secs(5),
+                OutboundConnector::new(Some(&proxy)).call(destination.parse().unwrap()),
+            )
+            .await
+            .expect("SOCKS5 handshake did not complete")
+            .unwrap();
+            server.await.unwrap();
+        }
+    }
+
+    #[tokio::test]
     async fn constructs_and_calls_each_connector_kind() {
         use std::future::poll_fn;
         use tokio::io::{AsyncReadExt as _, AsyncWriteExt as _};
@@ -390,7 +437,7 @@ mod tests {
         let direct_server = tokio::spawn(async move {
             let (_stream, _) = direct_listener.accept().await.unwrap();
         });
-        let mut direct = OutboundConnector::new(None).unwrap();
+        let mut direct = OutboundConnector::new(None);
         poll_fn(|context| direct.poll_ready(context)).await.unwrap();
         direct
             .call(format!("http://{direct_address}/").parse().unwrap())
@@ -421,7 +468,7 @@ mod tests {
         let authenticated = http_config.clone().with_auth("user", "password");
         assert_eq!(authenticated.username.as_deref(), Some("user"));
         assert_eq!(authenticated.password.as_deref(), Some("password"));
-        let mut http = OutboundConnector::new(Some(&authenticated)).unwrap();
+        let mut http = OutboundConnector::new(Some(&authenticated));
         assert!(matches!(http, OutboundConnector::Http(_)));
         poll_fn(|context| http.poll_ready(context)).await.unwrap();
         let mut tunneled = http
@@ -467,7 +514,7 @@ mod tests {
         });
         let socks_config: UpstreamProxyConfig =
             format!("socks5://{socks_address}").parse().unwrap();
-        let mut socks = OutboundConnector::new(Some(&socks_config)).unwrap();
+        let mut socks = OutboundConnector::new(Some(&socks_config));
         assert!(matches!(socks, OutboundConnector::Socks5(_)));
         poll_fn(|context| socks.poll_ready(context)).await.unwrap();
         socks
@@ -516,7 +563,7 @@ mod tests {
         let authenticated_config: UpstreamProxyConfig =
             format!("socks5://{authenticated_address}").parse().unwrap();
         let authenticated_socks = authenticated_config.with_auth("user", "password");
-        let mut authenticated = OutboundConnector::new(Some(&authenticated_socks)).unwrap();
+        let mut authenticated = OutboundConnector::new(Some(&authenticated_socks));
         authenticated
             .call("http://example.test/".parse().unwrap())
             .await

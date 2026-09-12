@@ -15,5 +15,7 @@ mod service;
 
 pub use body::{BodyFrame, BodyResult, CollectedBody, ProxyBody};
 pub use error::{ErrorKind, ProtocolError};
-pub use message::{ProxyRequest, ProxyResponse, RequestHead, ResponseHead};
+pub use message::{
+    response_body_is_forbidden, ProxyRequest, ProxyResponse, RequestHead, ResponseHead,
+};
 pub use service::{BoxFuture, HttpClient, HttpService};

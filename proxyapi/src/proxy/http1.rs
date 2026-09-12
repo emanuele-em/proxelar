@@ -240,6 +240,8 @@ impl NegotiatedUpstream {
                         "HTTP/1 Upgrade cannot be forwarded over a negotiated HTTP/2 upstream",
                     ));
                 }
+                let mut request = request;
+                super::prepare_upstream_protocol_request(&mut request, false)?;
                 client
                     .send_request(request)
                     .await
@@ -324,13 +326,16 @@ impl NegotiatedUpstream {
                     .await
                     .map(NativeWebSocketResponse::Http1)
             }
-            NegotiatedClient::Http2(client) => match client.ensure_extended_connect().await {
-                Ok(()) => client
-                    .send_request(request)
-                    .await
-                    .map(NativeWebSocketResponse::Http2),
-                Err(error) => Err(error),
-            },
+            NegotiatedClient::Http2(client) => {
+                super::prepare_upstream_protocol_request(&mut request, true)?;
+                match client.ensure_extended_connect().await {
+                    Ok(()) => client
+                        .send_request(request)
+                        .await
+                        .map(NativeWebSocketResponse::Http2),
+                    Err(error) => Err(error),
+                }
+            }
         };
         if result
             .as_ref()

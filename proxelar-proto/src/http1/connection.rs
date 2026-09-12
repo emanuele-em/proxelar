@@ -16,8 +16,8 @@ use tokio::sync::{mpsc, oneshot, Mutex, OwnedSemaphorePermit, Semaphore};
 use tokio::time::timeout;
 
 use crate::{
-    BodyResult, BoxFuture, ErrorKind, HttpClient as HttpClientTrait, HttpService, ProtocolError,
-    ProxyBody, ProxyRequest, ProxyResponse,
+    response_body_is_forbidden, BodyResult, BoxFuture, ErrorKind, HttpClient as HttpClientTrait,
+    HttpService, ProtocolError, ProxyBody, ProxyRequest, ProxyResponse,
 };
 
 use super::{
@@ -448,10 +448,7 @@ fn prepare_response_framing(
     close: &mut bool,
 ) -> Result<BodyFraming, ProtocolError> {
     let status = response.head.status;
-    let no_body = request_method == Method::HEAD
-        || status.is_informational()
-        || status == StatusCode::NO_CONTENT
-        || status == StatusCode::NOT_MODIFIED;
+    let no_body = response_body_is_forbidden(request_method, status);
     let tunnel = request_method == Method::CONNECT && status.is_success();
     if no_body || tunnel {
         response.head.headers.remove("transfer-encoding");
@@ -732,7 +729,7 @@ async fn run_client(
                 break;
             }
         };
-        let response_close = response_requests_close(&head.headers);
+        let response_close = !request_keep_alive(&head.headers, head.version);
         let framing = BodyFraming::for_response(&method, head.status, semantics);
         let upgraded =
             framing == BodyFraming::Tunnel || head.status == StatusCode::SWITCHING_PROTOCOLS;

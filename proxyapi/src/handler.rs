@@ -103,9 +103,7 @@ fn apply_header_map_delta(
         if changed_names.iter().any(|known| known == name) {
             continue;
         }
-        let before_values = before.get_all(name).iter().collect::<Vec<_>>();
-        let after_values = after.get_all(name).iter().collect::<Vec<_>>();
-        if before_values != after_values {
+        if !before.get_all(name).iter().eq(after.get_all(name).iter()) {
             changed_names.push(name.clone());
         }
     }
@@ -159,7 +157,7 @@ impl RequestBody {
     }
 
     fn apply_modified_body(&mut self, original_hook_body: &Bytes, modified_body: Bytes) {
-        if matches!(self, Self::Streaming { .. }) && modified_body == *original_hook_body {
+        if modified_body == *original_hook_body {
             return;
         }
 
@@ -2207,6 +2205,57 @@ mod tests {
         handler.send_event(ProxyEvent::Error {
             message: "closed".to_owned(),
         });
+    }
+
+    #[cfg(feature = "scripting")]
+    #[tokio::test]
+    async fn scripting_request_trailers_survive_header_edits_but_not_body_replacement() {
+        for (script, expected_body, preserve_trailers) in [
+            ("req.headers:set('x-script', 'yes')", "original", true),
+            ("req.body = 'edited'", "edited", false),
+            ("error('script failed')", "original", true),
+        ] {
+            let directory = tempfile::tempdir().unwrap();
+            let script_path = directory.path().join("request.lua");
+            std::fs::write(
+                &script_path,
+                format!("function on_request(req) {script}; return req end"),
+            )
+            .unwrap();
+            let engine = Arc::new(crate::scripting::ScriptEngine::new(&script_path).unwrap());
+            let (event_tx, _event_rx) = mpsc::channel(1);
+            let mut handler = CapturingHandler::new(event_tx).with_script_engine(engine);
+            let trailers =
+                HeaderBlock::from_fields([
+                    HeaderField::new("x-checksum", "original-checksum").unwrap()
+                ]);
+            let request = ProxyRequest::new(
+                RequestHead::new(
+                    Method::POST,
+                    "http://example.test/".parse().unwrap(),
+                    Version::HTTP_11,
+                    HeaderBlock::new(),
+                ),
+                ProxyBody::from_frames([
+                    Ok(BodyFrame::Data(Bytes::from_static(b"original"))),
+                    Ok(BodyFrame::Trailers(trailers.clone())),
+                ]),
+            );
+            let context = HttpContext {
+                remote_addr: "127.0.0.1:12345".parse().unwrap(),
+            };
+            let RequestOrResponse::Request(request) =
+                handler.handle_request(&context, request).await
+            else {
+                panic!("request should be forwarded");
+            };
+            if script.starts_with("req.headers") {
+                assert_eq!(request.headers().get("x-script"), Some(b"yes".as_slice()));
+            }
+            let collected = request.body.collect().await.unwrap();
+            assert_eq!(collected.data, expected_body);
+            assert_eq!(collected.trailers, preserve_trailers.then_some(trailers));
+        }
     }
 
     #[cfg(feature = "scripting")]

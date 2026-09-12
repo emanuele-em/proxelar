@@ -30,10 +30,6 @@ pub trait CertificateAuthority: Send + Sync + 'static {
 
 #[cfg(feature = "http3")]
 #[derive(Clone, Debug)]
-#[allow(
-    dead_code,
-    reason = "consumed by the reverse HTTP/3 listener introduced in the next activation layer"
-)]
 pub(crate) struct H3Certificate {
     pub(crate) certificate_pem: Bytes,
     pub(crate) private_key_pem: Bytes,
@@ -43,16 +39,8 @@ struct GeneratedCertificate {
     certificate: CertificateDer<'static>,
     private_key_der: Vec<u8>,
     #[cfg(feature = "http3")]
-    #[allow(
-        dead_code,
-        reason = "consumed by the reverse HTTP/3 listener introduced in the next activation layer"
-    )]
     certificate_pem: Bytes,
     #[cfg(feature = "http3")]
-    #[allow(
-        dead_code,
-        reason = "consumed by the reverse HTTP/3 listener introduced in the next activation layer"
-    )]
     private_key_pem: Bytes,
 }
 
@@ -62,10 +50,6 @@ pub struct Ssl {
     ca_cert_pem: Bytes,
     cache: Cache<Authority, Arc<ServerConfig>>,
     #[cfg(feature = "http3")]
-    #[allow(
-        dead_code,
-        reason = "consumed by the reverse HTTP/3 listener introduced in the next activation layer"
-    )]
     h3_cache: Cache<Authority, Arc<H3Certificate>>,
 }
 
@@ -157,10 +141,6 @@ impl Ssl {
     }
 
     #[cfg(feature = "http3")]
-    #[allow(
-        dead_code,
-        reason = "consumed by the reverse HTTP/3 listener introduced in the next activation layer"
-    )]
     pub(crate) async fn gen_h3_certificate(
         &self,
         authority: &Authority,

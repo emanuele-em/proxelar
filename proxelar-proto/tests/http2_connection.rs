@@ -4,15 +4,140 @@ use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use bytes::Bytes;
+use futures_util::StreamExt as _;
 use proxelar_proto::http2::{
-    serve_connection, ConnectionConfig, H2Client, H2Connector, H2Pool, H2PoolKey,
+    body_tunnel, serve_connection, ConnectionConfig, H2Client, H2Connector, H2Pool, H2PoolKey,
 };
 use proxelar_proto::{
     BodyFrame, BoxFuture, ErrorKind, HttpService, ProtocolError, ProxyBody, ProxyRequest,
     ProxyResponse, ResponseHead,
 };
 use proxyapi_models::{HeaderBlock, HeaderField};
-use tokio::io::DuplexStream;
+use tokio::io::{AsyncReadExt as _, AsyncWriteExt as _, DuplexStream};
+use tokio::time::timeout;
+
+#[tokio::test]
+async fn tunnel_response_progresses_while_request_is_backpressured() {
+    let (application, mut outbound) = body_tunnel(ProxyBody::full(vec![1; 32]), 16);
+    let (mut reader, mut writer) = tokio::io::split(application);
+    // This confirms the receive pump is writing a frame larger than its buffer.
+    reader.read_u8().await.unwrap();
+    writer.write_all(b"response").await.unwrap();
+    let frame = timeout(Duration::from_secs(1), outbound.next())
+        .await
+        .expect("response stalled behind request backpressure")
+        .unwrap()
+        .unwrap();
+    assert_eq!(frame, BodyFrame::Data(Bytes::from_static(b"response")));
+}
+
+#[tokio::test]
+async fn tunnel_request_progresses_while_response_is_backpressured() {
+    let (request_tx, request_rx) = tokio::sync::oneshot::channel();
+    let inbound = ProxyBody::new(futures_util::stream::once(async {
+        request_rx.await.unwrap()
+    }));
+    let (application, _outbound) = body_tunnel(inbound, 16);
+    let (mut reader, mut writer) = tokio::io::split(application);
+    let writing = writer.write_all(&[2; 128]);
+    tokio::pin!(writing);
+    assert!(timeout(Duration::from_millis(20), &mut writing)
+        .await
+        .is_err());
+
+    request_tx
+        .send(Ok(BodyFrame::Data(Bytes::from_static(b"request"))))
+        .unwrap();
+    let mut request = [0; 7];
+    timeout(Duration::from_secs(1), reader.read_exact(&mut request))
+        .await
+        .expect("request stalled behind response backpressure")
+        .unwrap();
+    assert_eq!(&request, b"request");
+}
+
+#[tokio::test]
+async fn tunnel_request_eof_keeps_response_writable() {
+    let (mut application, mut outbound) = body_tunnel(ProxyBody::empty(), 16);
+    assert_eq!(application.read(&mut [0]).await.unwrap(), 0);
+    application.write_all(b"response").await.unwrap();
+    application.shutdown().await.unwrap();
+    let body = timeout(Duration::from_secs(1), async {
+        let mut data = Vec::new();
+        while let Some(frame) = outbound.next().await {
+            if let BodyFrame::Data(bytes) = frame.unwrap() {
+                data.extend_from_slice(&bytes);
+            }
+        }
+        data
+    })
+    .await
+    .unwrap();
+    assert_eq!(body, b"response");
+}
+
+#[tokio::test]
+async fn tunnel_response_eof_keeps_request_readable() {
+    let (request_tx, request_rx) = tokio::sync::oneshot::channel();
+    let inbound = ProxyBody::new(futures_util::stream::once(async {
+        request_rx.await.unwrap()
+    }));
+    let (mut application, mut outbound) = body_tunnel(inbound, 16);
+    application.shutdown().await.unwrap();
+    assert!(timeout(Duration::from_secs(1), outbound.next())
+        .await
+        .unwrap()
+        .is_none());
+
+    request_tx
+        .send(Ok(BodyFrame::Data(Bytes::from_static(b"request"))))
+        .unwrap();
+    let mut request = Vec::new();
+    timeout(
+        Duration::from_secs(1),
+        application.read_to_end(&mut request),
+    )
+    .await
+    .unwrap()
+    .unwrap();
+    assert_eq!(request, b"request");
+}
+
+#[tokio::test]
+async fn dropping_tunnel_response_cancels_pending_request() {
+    let (mut request_tx, request_rx) = tokio::sync::oneshot::channel();
+    let inbound = ProxyBody::new(futures_util::stream::once(async {
+        request_rx.await.unwrap()
+    }));
+    let (mut application, outbound) = body_tunnel(inbound, 16);
+    drop(outbound);
+    timeout(Duration::from_secs(1), request_tx.closed())
+        .await
+        .unwrap();
+    assert_eq!(application.read(&mut [0]).await.unwrap(), 0);
+}
+
+#[tokio::test]
+async fn tunnel_reports_inbound_errors_and_rejects_trailers() {
+    for frame in [
+        Err(ProtocolError::new(ErrorKind::Reset, "request reset")),
+        Ok(BodyFrame::Trailers(HeaderBlock::new())),
+    ] {
+        let expected = match &frame {
+            Err(error) => error.kind(),
+            Ok(_) => ErrorKind::ProtocolViolation,
+        };
+        let (mut application, mut outbound) = body_tunnel(ProxyBody::from_frames([frame]), 16);
+        let error = timeout(Duration::from_secs(1), outbound.next())
+            .await
+            .unwrap()
+            .unwrap()
+            .unwrap_err();
+        assert_eq!(error.kind(), expected);
+        assert!(outbound.next().await.is_none());
+        assert_eq!(application.read(&mut [0]).await.unwrap(), 0);
+    }
+}
 
 #[derive(Clone)]
 struct EchoService;
@@ -119,6 +244,80 @@ async fn one_connection_multiplexes_concurrent_streams() {
     for task in tasks {
         task.await.unwrap();
     }
+    drop(client);
+    server.await.unwrap().unwrap();
+}
+
+#[derive(Clone)]
+struct ForbiddenBodyService;
+
+impl HttpService for ForbiddenBodyService {
+    fn call(
+        &mut self,
+        request: ProxyRequest,
+    ) -> BoxFuture<'_, Result<ProxyResponse, ProtocolError>> {
+        Box::pin(async move {
+            let status = match request.head.uri.path() {
+                "/head" => http::StatusCode::OK,
+                "/no-content" => http::StatusCode::NO_CONTENT,
+                "/reset-content" => http::StatusCode::RESET_CONTENT,
+                "/not-modified" => http::StatusCode::NOT_MODIFIED,
+                path => panic!("unexpected path {path}"),
+            };
+            Ok(ProxyResponse::new(
+                ResponseHead::new(status, http::Version::HTTP_2, HeaderBlock::new()),
+                ProxyBody::full(Bytes::from_static(b"forbidden response body")),
+            ))
+        })
+    }
+}
+
+#[tokio::test]
+async fn server_suppresses_semantically_forbidden_response_bodies() {
+    let (client_io, server_io) = tokio::io::duplex(1024);
+    let server = tokio::spawn(serve_connection(
+        server_io,
+        ForbiddenBodyService,
+        ConnectionConfig::default(),
+    ));
+    let client = H2Client::handshake(client_io, ConnectionConfig::default())
+        .await
+        .unwrap();
+
+    for (method, path, status) in [
+        (http::Method::HEAD, "/head", http::StatusCode::OK),
+        (
+            http::Method::GET,
+            "/no-content",
+            http::StatusCode::NO_CONTENT,
+        ),
+        (
+            http::Method::GET,
+            "/reset-content",
+            http::StatusCode::RESET_CONTENT,
+        ),
+        (
+            http::Method::GET,
+            "/not-modified",
+            http::StatusCode::NOT_MODIFIED,
+        ),
+    ] {
+        let response = client
+            .send_request(ProxyRequest::new(
+                proxelar_proto::RequestHead::new(
+                    method,
+                    format!("https://example.test{path}").parse().unwrap(),
+                    http::Version::HTTP_2,
+                    HeaderBlock::new(),
+                ),
+                ProxyBody::empty(),
+            ))
+            .await
+            .unwrap();
+        assert_eq!(response.head.status, status);
+        assert!(response.body.collect().await.unwrap().data.is_empty());
+    }
+
     drop(client);
     server.await.unwrap().unwrap();
 }
