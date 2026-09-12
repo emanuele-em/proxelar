@@ -615,6 +615,53 @@ async fn pool_keeps_connection_after_stream_reset() {
 }
 
 #[tokio::test]
+async fn goaway_closes_client_for_new_requests_while_response_drains() {
+    let (client_io, server_io) = tokio::io::duplex(4096);
+    let (finish_tx, finish_rx) = tokio::sync::oneshot::channel();
+    let server = tokio::spawn(async move {
+        let mut conn = h2::server::handshake(server_io).await.unwrap();
+        let (_, mut respond) = conn.accept().await.unwrap().unwrap();
+        let mut send = respond
+            .send_response(http::Response::new(()), false)
+            .unwrap();
+        send.send_data(Bytes::from_static(b"before"), false)
+            .unwrap();
+        conn.graceful_shutdown();
+        tokio::select! {
+            result = conn.accept() => panic!("connection stopped before response drained: {result:?}"),
+            signal = finish_rx => { signal.unwrap(); }
+        }
+        send.send_data(Bytes::from_static(b"after"), true).unwrap();
+        assert!(conn.accept().await.is_none());
+    });
+    let client = H2Client::handshake(client_io, ConnectionConfig::default())
+        .await
+        .unwrap();
+    assert!(!client.is_closed());
+    let response = client
+        .send_request(request("/drain", ProxyBody::empty()))
+        .await
+        .unwrap();
+    timeout(Duration::from_secs(2), async {
+        while !client.is_closed() {
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .expect("GOAWAY did not stop new streams");
+    finish_tx.send(()).unwrap();
+    assert_eq!(
+        timeout(Duration::from_secs(2), response.body.collect())
+            .await
+            .unwrap()
+            .unwrap()
+            .data,
+        "beforeafter"
+    );
+    server.await.unwrap();
+}
+
+#[tokio::test]
 async fn peer_reset_drops_pending_upload_and_keeps_other_streams_usable() {
     let (client_io, server_io) = tokio::io::duplex(4096);
     let server = tokio::spawn(async move {

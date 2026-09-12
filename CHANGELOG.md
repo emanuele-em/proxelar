@@ -25,6 +25,7 @@
 
 ### Fixed
 
+- Retire negotiated HTTP/2 upstream connections after GOAWAY or connection failure before dispatching the next request, while allowing existing response streams to drain.
 - Retire closed idle HTTP/1 upstream connections before reuse, including negotiated connections, without retrying requests whose bytes were already sent. Detect HTTP/2 stream resets while upload or response bodies await data so abandoned senders release their resources.
 - Remove IPv6 URI brackets before constructing the rustls server name for shared and negotiated HTTPS upstream connections.
 - Make the HTTP/1 application deadline opt-in so interactive interception retains its own 300-second deadline and can deliver its timeout response.
