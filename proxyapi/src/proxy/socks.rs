@@ -387,7 +387,7 @@ mod tests {
             assert_eq!(&request, b"ping");
             stream.write_all(b"pong").await.unwrap();
         });
-        let mut outbound = OutboundConnector::new(None).unwrap();
+        let mut outbound = OutboundConnector::new(None);
         let mut connected = connect_target(
             &target.to_string().parse::<Authority>().unwrap(),
             &mut outbound,

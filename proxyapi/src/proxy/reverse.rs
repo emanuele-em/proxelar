@@ -351,7 +351,10 @@ impl HttpService for ReverseH3Service {
                     handler,
                     remote_addr,
                     Some(wire_target),
-                    move |request| async move { upstream.send(request).await },
+                    move |mut request| async move {
+                        super::prepare_upstream_protocol_request(&mut request, false)?;
+                        upstream.send(request).await
+                    },
                 )
                 .await;
             }
@@ -365,12 +368,13 @@ impl HttpService for ReverseH3Service {
                     error.to_string(),
                 )
             })?;
-            let request = rewrite_uri(request, &wire_target).map_err(|error| {
+            let mut request = rewrite_uri(request, &wire_target).map_err(|error| {
                 ProtocolError::new(
                     proxelar_proto::ErrorKind::MalformedMessage,
                     error.to_string(),
                 )
             })?;
+            super::prepare_upstream_protocol_request(&mut request, false)?;
             match upstream.send(request).await {
                 Ok(response) => Ok(handler.handle_response(&context, response).await),
                 Err(error) => {
@@ -584,6 +588,7 @@ mod tests {
             Box::pin(async move {
                 assert_eq!(request.head.version, http::Version::HTTP_3);
                 assert_eq!(request.head.uri.path(), "/through-proxy");
+                assert!(!request.head.headers.contains_key("proxy-authorization"));
                 let mut headers = proxyapi_models::HeaderBlock::new();
                 headers.add("x-upstream-protocol", "h3").unwrap();
                 Ok(ProxyResponse::new(
@@ -681,6 +686,7 @@ mod tests {
                     request.head.headers.get("sec-websocket-version"),
                     Some(b"13".as_slice())
                 );
+                assert!(!request.head.headers.contains_key("proxy-authorization"));
                 let (tunnel, outbound) =
                     proxelar_proto::http2::body_tunnel(request.body, 64 * 1024);
                 tokio::spawn(async move {
@@ -742,6 +748,10 @@ mod tests {
             cert_path,
             key_path,
         );
+        let mut headers = proxyapi_models::HeaderBlock::new();
+        headers
+            .add("proxy-authorization", "Basic reverse-secret")
+            .unwrap();
         let request = ProxyRequest::new(
             proxelar_proto::RequestHead::new(
                 http::Method::GET,
@@ -749,7 +759,7 @@ mod tests {
                     .parse()
                     .unwrap(),
                 http::Version::HTTP_3,
-                proxyapi_models::HeaderBlock::new(),
+                headers,
             ),
             proxelar_proto::ProxyBody::empty(),
         );
@@ -841,6 +851,9 @@ mod tests {
         headers.add(":protocol", "websocket").unwrap();
         headers.add("sec-websocket-version", "13").unwrap();
         headers.add("sec-websocket-protocol", "chat").unwrap();
+        headers
+            .add("proxy-authorization", "Basic reverse-secret")
+            .unwrap();
         let request = ProxyRequest::new(
             proxelar_proto::RequestHead::new(
                 http::Method::CONNECT,

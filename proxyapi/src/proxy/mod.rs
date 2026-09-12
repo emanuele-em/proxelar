@@ -225,7 +225,7 @@ impl Proxy {
         }
 
         let tls_config = Arc::new(tls::build_client_config(&self.config.upstream_tls)?);
-        let outbound = outbound::OutboundConnector::new(self.upstream_proxy.as_ref())?;
+        let outbound = outbound::OutboundConnector::new(self.upstream_proxy.as_ref());
         let native_route = self
             .upstream_proxy
             .as_ref()

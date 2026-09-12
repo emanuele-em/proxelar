@@ -497,6 +497,7 @@ async fn reverse_https_negotiates_h2_with_the_upstream() {
     let connection_task = tokio::spawn(connection);
     let request = Request::builder()
         .uri(format!("https://{proxy_addr}/h2"))
+        .header("proxy-authorization", "Basic reverse-secret")
         .body(Full::new(Bytes::new()))
         .unwrap();
     let response = sender.send_request(request).await.unwrap();
@@ -590,6 +591,7 @@ async fn reverse_https_proxies_rfc8441_to_an_h2_upstream() {
         .uri(format!("https://{proxy_addr}/chat"))
         .header("sec-websocket-version", "13")
         .header("sec-websocket-protocol", "chat")
+        .header("proxy-authorization", "Basic reverse-secret")
         .body(Full::new(Bytes::new()))
         .unwrap();
     request
@@ -1213,6 +1215,7 @@ impl proxelar_proto::HttpService for ReverseH2Upstream {
     ) -> proxelar_proto::BoxFuture<'_, Result<proxyapi::ProxyResponse, proxyapi::ProtocolError>>
     {
         Box::pin(async move {
+            assert!(!request.head.headers.contains_key("proxy-authorization"));
             if request.head.method == http::Method::CONNECT
                 && request.head.headers.get(":protocol") == Some(b"websocket".as_slice())
             {

@@ -489,6 +489,7 @@ where
             return;
         }
     };
+    let request_method = head.method.clone();
     let body = if read_fin {
         ProxyBody::empty()
     } else {
@@ -496,7 +497,7 @@ where
     };
     match service.call(ProxyRequest::new(head, body)).await {
         Ok(response) => {
-            if let Err(error) = send_response(send, response).await {
+            if let Err(error) = send_response(send, response, &request_method).await {
                 tracing::debug!("HTTP/3 response stream failed: {error}");
             }
         }
@@ -510,6 +511,7 @@ where
 async fn send_response(
     mut send: OutboundFrameSender,
     response: ProxyResponse,
+    request_method: &Method,
 ) -> Result<(), ProtocolError> {
     let (informational, head, body) = response.into_parts();
     for informational in informational {
@@ -530,7 +532,13 @@ async fn send_response(
     send.send(OutboundFrame::Headers(headers, None))
         .await
         .map_err(|error| protocol(ErrorKind::Io, error))?;
-    send_body(send, body).await
+    if proxelar_proto::response_body_is_forbidden(request_method, head.status) {
+        send.send(OutboundFrame::Body(Bytes::new(), true))
+            .await
+            .map_err(|error| protocol(ErrorKind::Io, error))
+    } else {
+        send_body(send, body).await
+    }
 }
 
 async fn send_body(
@@ -1070,6 +1078,38 @@ mod tests {
                 if headers[0].name() == b"x-checksum" && headers[0].value() == b"ok"
         ));
         send_task.await.unwrap().unwrap();
+    }
+
+    #[tokio::test]
+    async fn response_sender_suppresses_semantically_forbidden_bodies() {
+        for (method, status) in [
+            (Method::HEAD, StatusCode::OK),
+            (Method::GET, StatusCode::NO_CONTENT),
+            (Method::GET, StatusCode::RESET_CONTENT),
+            (Method::GET, StatusCode::NOT_MODIFIED),
+        ] {
+            let (sender, mut receiver) = mpsc::channel(4);
+            send_response(
+                PollSender::new(sender),
+                ProxyResponse::new(
+                    ResponseHead::new(status, Version::HTTP_3, HeaderBlock::new()),
+                    ProxyBody::full(Bytes::from_static(b"forbidden response body")),
+                ),
+                &method,
+            )
+            .await
+            .unwrap();
+
+            assert!(matches!(
+                receiver.recv().await,
+                Some(OutboundFrame::Headers(_, None))
+            ));
+            assert!(matches!(
+                receiver.recv().await,
+                Some(OutboundFrame::Body(data, true)) if data.is_empty()
+            ));
+            assert!(receiver.recv().await.is_none());
+        }
     }
 
     #[tokio::test]

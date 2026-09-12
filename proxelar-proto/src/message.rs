@@ -3,6 +3,19 @@ use proxyapi_models::HeaderBlock;
 
 use crate::ProxyBody;
 
+/// Return whether HTTP semantics forbid response content for this request.
+///
+/// Successful CONNECT responses are intentionally excluded: HTTP/2 and
+/// HTTP/3 carry tunnel bytes in DATA frames even though those bytes are not
+/// response content.
+pub fn response_body_is_forbidden(request_method: &Method, status: StatusCode) -> bool {
+    request_method == Method::HEAD
+        || status.is_informational()
+        || status == StatusCode::NO_CONTENT
+        || status == StatusCode::RESET_CONTENT
+        || status == StatusCode::NOT_MODIFIED
+}
+
 /// Transport-neutral request metadata.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct RequestHead {

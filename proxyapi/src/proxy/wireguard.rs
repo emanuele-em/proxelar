@@ -575,6 +575,23 @@ struct H3FlowHandle {
 }
 
 #[cfg(feature = "http3")]
+#[derive(Debug, Eq, PartialEq)]
+enum H3DatagramDispatch {
+    Queued,
+    Saturated,
+    Closed(Vec<u8>),
+}
+
+#[cfg(feature = "http3")]
+fn dispatch_h3_datagram(flow: &H3FlowHandle, datagram: Vec<u8>) -> H3DatagramDispatch {
+    match flow.datagrams.try_send(datagram) {
+        Ok(()) => H3DatagramDispatch::Queued,
+        Err(mpsc::error::TrySendError::Full(_)) => H3DatagramDispatch::Saturated,
+        Err(mpsc::error::TrySendError::Closed(datagram)) => H3DatagramDispatch::Closed(datagram),
+    }
+}
+
+#[cfg(feature = "http3")]
 struct H3FlowContext {
     handler: CapturingHandler,
     ca: Arc<Ssl>,
@@ -606,11 +623,18 @@ async fn udp_loop(socket: VirtualUdpSocket, config: UdpLoopConfig) -> io::Result
                 }
             }
             datagram = reader.next() => {
-                let Some((request, source, destination)) = datagram else { return Ok(()); };
+                let Some((mut request, source, destination)) = datagram else { return Ok(()); };
                 let key = UdpFlowKey { source, destination };
                 if let Some(flow) = h3_flows.get(&key) {
-                    if flow.datagrams.send(request.clone()).await.is_ok() {
-                        continue;
+                    match dispatch_h3_datagram(flow, request) {
+                        H3DatagramDispatch::Queued => continue,
+                        H3DatagramDispatch::Saturated => {
+                            tracing::trace!(
+                                "Dropping WireGuard HTTP/3 datagram for saturated flow {source} -> {destination}"
+                            );
+                            continue;
+                        }
+                        H3DatagramDispatch::Closed(datagram) => request = datagram,
                     }
                     h3_flows.remove(&key);
                 }
@@ -631,9 +655,18 @@ async fn udp_loop(socket: VirtualUdpSocket, config: UdpLoopConfig) -> io::Result
                         },
                     ).await {
                         Ok(flow) => {
-                            if flow.datagrams.send(request.clone()).await.is_ok() {
-                                h3_flows.insert(key, flow);
-                                continue;
+                            match dispatch_h3_datagram(&flow, request) {
+                                H3DatagramDispatch::Queued => {
+                                    h3_flows.insert(key, flow);
+                                    continue;
+                                }
+                                H3DatagramDispatch::Saturated => {
+                                    tracing::trace!(
+                                        "Dropping initial WireGuard HTTP/3 datagram for saturated flow {source} -> {destination}"
+                                    );
+                                    continue;
+                                }
+                                H3DatagramDispatch::Closed(datagram) => request = datagram,
                             }
                         }
                         Err(error) => tracing::debug!(
@@ -977,6 +1010,32 @@ mod tests {
         assert!(is_quic_initial(&initial));
         assert!(!is_quic_initial(&unsupported));
         assert!(!is_quic_initial(b"ordinary UDP"));
+    }
+
+    #[cfg(feature = "http3")]
+    #[tokio::test]
+    async fn saturated_h3_flow_queue_drops_without_waiting() {
+        let (datagrams, mut receiver) = mpsc::channel(1);
+        let flow = H3FlowHandle {
+            generation: 1,
+            datagrams,
+        };
+
+        assert_eq!(
+            dispatch_h3_datagram(&flow, vec![1]),
+            H3DatagramDispatch::Queued
+        );
+        assert_eq!(
+            dispatch_h3_datagram(&flow, vec![2]),
+            H3DatagramDispatch::Saturated
+        );
+        assert_eq!(receiver.recv().await, Some(vec![1]));
+
+        drop(receiver);
+        assert_eq!(
+            dispatch_h3_datagram(&flow, vec![3]),
+            H3DatagramDispatch::Closed(vec![3])
+        );
     }
 
     #[cfg(feature = "http3")]
