@@ -270,6 +270,14 @@ enum H2SendError {
 }
 
 impl H2Client {
+    /// Whether the connection has stopped accepting new streams, including
+    /// after GOAWAY. Existing streams may still finish on a draining connection.
+    pub fn is_closed(&self) -> bool {
+        let mut sender = self.sender.clone();
+        let mut context = Context::from_waker(std::task::Waker::noop());
+        matches!(sender.poll_ready(&mut context), Poll::Ready(Err(_)))
+    }
+
     pub async fn handshake<I>(io: I, config: ConnectionConfig) -> Result<Self, ProtocolError>
     where
         I: AsyncRead + AsyncWrite + Unpin + Send + 'static,

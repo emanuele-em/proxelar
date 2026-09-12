@@ -105,7 +105,7 @@ impl NegotiatedClient {
     fn is_closed(&self) -> bool {
         match self {
             Self::Http1 { client, .. } => client.is_closed(),
-            Self::Http2(_) => false,
+            Self::Http2(client) => client.is_closed(),
         }
     }
 }

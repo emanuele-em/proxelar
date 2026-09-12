@@ -195,6 +195,73 @@ async fn negotiated_http1_reconnects_after_idle_peer_close() {
 }
 
 #[tokio::test]
+async fn negotiated_http2_reconnects_after_goaway() {
+    let context = Context::new();
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let authority: Authority = listener.local_addr().unwrap().to_string().parse().unwrap();
+    let config = context.ca.gen_server_config(&authority).await.unwrap();
+    let (close_tx, mut close_rx) = tokio::sync::mpsc::channel(1);
+    let server = tokio::spawn(async move {
+        for _ in 0..2 {
+            let (stream, _) = listener.accept().await.unwrap();
+            let stream = tokio_rustls::TlsAcceptor::from(config.clone())
+                .accept(stream)
+                .await
+                .unwrap();
+            assert_eq!(stream.get_ref().1.alpn_protocol(), Some(b"h2".as_slice()));
+            let service = hyper::service::service_fn(|_| async {
+                Ok::<_, std::convert::Infallible>(http::Response::new(http_body_util::Full::new(
+                    Bytes::from_static(b"ok"),
+                )))
+            });
+            let builder =
+                hyper::server::conn::http2::Builder::new(hyper_util::rt::TokioExecutor::new());
+            let connection =
+                builder.serve_connection(hyper_util::rt::TokioIo::new(stream), service);
+            tokio::pin!(connection);
+            tokio::select! {
+                result = &mut connection => panic!("server closed before GOAWAY: {result:?}"),
+                signal = close_rx.recv() => { signal.unwrap(); }
+            }
+            connection.as_mut().graceful_shutdown();
+            connection.await.unwrap();
+        }
+    });
+    let upstream = NativeUpstream::negotiated(
+        OutboundConnector::new(None),
+        context.tls,
+        vec![b"h2".to_vec()],
+    );
+    for _ in 0..2 {
+        let result = tokio::time::timeout(
+            std::time::Duration::from_secs(2),
+            upstream.send(
+                request(Method::GET, &format!("https://{authority}/")),
+                false,
+            ),
+        )
+        .await
+        .unwrap()
+        .unwrap();
+        assert_eq!(result.response.head.version, Version::HTTP_2);
+        assert_eq!(result.response.body.collect().await.unwrap().data, "ok");
+        let NativeUpstream::Negotiated(state) = &upstream else {
+            unreachable!()
+        };
+        let cached = state.client.lock().await.as_ref().unwrap().clone();
+        close_tx.send(()).await.unwrap();
+        tokio::time::timeout(std::time::Duration::from_secs(2), async {
+            while !cached.is_closed() {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("negotiated HTTP/2 cache did not retire the GOAWAY connection");
+    }
+    server.await.unwrap();
+}
+
+#[tokio::test]
 async fn negotiated_http2_rejects_http1_upgrade_without_evicting_client() {
     let context = Context::new();
     let (io, peer) = tokio::io::duplex(65536);
