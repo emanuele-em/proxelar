@@ -613,3 +613,40 @@ async fn pool_keeps_connection_after_stream_reset() {
     server.abort();
     assert!(server.await.unwrap_err().is_cancelled());
 }
+
+#[tokio::test]
+async fn peer_reset_drops_pending_upload_and_keeps_other_streams_usable() {
+    let (client_io, server_io) = tokio::io::duplex(4096);
+    let server = tokio::spawn(async move {
+        let mut conn = h2::server::handshake(server_io).await.unwrap();
+        let (_request, mut respond) = conn.accept().await.unwrap().unwrap();
+        respond.send_reset(h2::Reason::CANCEL);
+        while let Some(accepted) = conn.accept().await {
+            let (_, mut respond) = accepted.unwrap();
+            respond
+                .send_response(http::Response::new(()), true)
+                .unwrap();
+        }
+    });
+    let client = H2Client::handshake(client_io, ConnectionConfig::default())
+        .await
+        .unwrap();
+    let (mut source, receiver) = tokio::sync::oneshot::channel::<Bytes>();
+    let body = ProxyBody::new(futures_util::stream::once(async {
+        Ok(BodyFrame::Data(receiver.await.unwrap()))
+    }));
+    let result = client.send_request(request("/reset", body)).await;
+    assert!(result.is_err());
+    timeout(Duration::from_secs(1), source.closed())
+        .await
+        .expect("reset stream retained its pending upload body");
+    let response = timeout(
+        Duration::from_secs(1),
+        client.send_request(request("/next", ProxyBody::empty())),
+    )
+    .await
+    .unwrap()
+    .unwrap();
+    response.body.collect().await.unwrap();
+    server.abort();
+}

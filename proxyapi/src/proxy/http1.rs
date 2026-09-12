@@ -55,8 +55,7 @@ impl Http1Connector for NativeConnector {
             let host = destination
                 .host()
                 .ok_or_else(|| malformed("TLS destination has no host"))?;
-            let server_name = ServerName::try_from(host.to_owned())
-                .map_err(|error| malformed(error.to_string()))?;
+            let server_name = tls_server_name(host)?;
             let stream = TlsConnector::from(tls)
                 .connect(server_name, stream)
                 .await
@@ -100,6 +99,15 @@ enum NegotiatedClient {
         authority: Authority,
     },
     Http2(H2Client),
+}
+
+impl NegotiatedClient {
+    fn is_closed(&self) -> bool {
+        match self {
+            Self::Http1 { client, .. } => client.is_closed(),
+            Self::Http2(_) => false,
+        }
+    }
 }
 
 fn should_evict(client: &NegotiatedClient, error: &ProtocolError) -> bool {
@@ -218,9 +226,10 @@ impl NegotiatedUpstream {
     ) -> Result<Http1ClientResponse, ProtocolError> {
         let client = {
             let mut state = self.client.lock().await;
-            if let Some(client) = state.as_ref() {
+            if let Some(client) = state.as_ref().filter(|client| !client.is_closed()) {
                 client.clone()
             } else {
+                *state = None;
                 let client = Arc::new(self.connect(authority.clone()).await?);
                 *state = Some(client.clone());
                 client
@@ -277,8 +286,7 @@ impl NegotiatedUpstream {
             .call(destination)
             .await
             .map_err(|error| io(error.to_string()))?;
-        let server_name = ServerName::try_from(authority.host().to_owned())
-            .map_err(|error| malformed(error.to_string()))?;
+        let server_name = tls_server_name(authority.host())?;
         let stream = TlsConnector::from(Arc::clone(&self.tls))
             .connect(server_name, stream)
             .await
@@ -308,9 +316,10 @@ impl NegotiatedUpstream {
     ) -> Result<NativeWebSocketResponse, ProtocolError> {
         let client = {
             let mut state = self.client.lock().await;
-            if let Some(client) = state.as_ref() {
+            if let Some(client) = state.as_ref().filter(|client| !client.is_closed()) {
                 client.clone()
             } else {
+                *state = None;
                 let client = Arc::new(self.connect(authority.clone()).await?);
                 *state = Some(client.clone());
                 client
@@ -409,6 +418,15 @@ fn prepare_http1_request(
         .map_err(|error| malformed(error.to_string()))?;
     request.head.version = Version::HTTP_11;
     Ok(())
+}
+
+fn tls_server_name(host: &str) -> Result<ServerName<'static>, ProtocolError> {
+    // URI authorities bracket IPv6 literals; rustls expects the bare address.
+    let host = host
+        .strip_prefix('[')
+        .and_then(|host| host.strip_suffix(']'))
+        .unwrap_or(host);
+    ServerName::try_from(host.to_owned()).map_err(|error| malformed(error.to_string()))
 }
 
 fn malformed(message: impl Into<String>) -> ProtocolError {

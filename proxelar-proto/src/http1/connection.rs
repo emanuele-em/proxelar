@@ -30,7 +30,9 @@ use super::{
 pub struct ConnectionConfig {
     pub read_timeout: Duration,
     pub write_timeout: Duration,
-    pub service_timeout: Duration,
+    /// Optional application deadline. Disabled by default so services can
+    /// manage their own deadlines, including time spent awaiting interception.
+    pub service_timeout: Option<Duration>,
     pub pipeline_capacity: usize,
     pub body_channel_capacity: usize,
     pub head_limits: HeadParserLimits,
@@ -42,7 +44,7 @@ impl Default for ConnectionConfig {
         Self {
             read_timeout: Duration::from_secs(30),
             write_timeout: Duration::from_secs(30),
-            service_timeout: Duration::from_secs(60),
+            service_timeout: None,
             pipeline_capacity: 16,
             body_channel_capacity: 1,
             head_limits: HeadParserLimits::default(),
@@ -139,9 +141,12 @@ where
             let method = inbound.request.head.method.clone();
             let version = inbound.request.head.version;
             let upgrade_decision = inbound.upgrade_decision;
-            let response = timeout(config.service_timeout, service.call(inbound.request))
-                .await
-                .map_err(|_| timeout_error("HTTP/1 service"))??;
+            let response = match config.service_timeout {
+                Some(duration) => timeout(duration, service.call(inbound.request))
+                    .await
+                    .map_err(|_| timeout_error("HTTP/1 service"))??,
+                None => service.call(inbound.request).await?,
+            };
             let status = response.head.status;
             let close = write_response(
                 &mut writer,
@@ -562,6 +567,11 @@ pub struct Http1Client {
 }
 
 impl Http1Client {
+    /// Whether the connection has stopped accepting requests.
+    pub fn is_closed(&self) -> bool {
+        self.command_tx.is_closed()
+    }
+
     pub fn new<I>(io: I, config: ConnectionConfig) -> Self
     where
         I: AsyncRead + AsyncWrite + Unpin + Send + 'static,
@@ -667,7 +677,24 @@ async fn run_client(
     availability: Arc<Semaphore>,
 ) {
     let mut buffer = BytesMut::with_capacity(8 * 1024);
-    while let Some(command) = command_rx.recv().await {
+    loop {
+        // A completed response must not leave unsolicited bytes behind. While
+        // idle, keep reading to detect EOF/errors before accepting another
+        // request. Prioritize the socket if both it and a command are ready;
+        // queued requests can then be returned as NotSent without replaying
+        // any request whose bytes may have reached the peer.
+        if !buffer.is_empty() {
+            break;
+        }
+        let mut idle_byte = [0_u8; 1];
+        let command = tokio::select! {
+            biased;
+            _ = io.read(&mut idle_byte) => break,
+            command = command_rx.recv() => match command {
+                Some(command) => command,
+                None => break,
+            },
+        };
         let ClientCommand {
             mut request,
             response_tx,
@@ -1127,6 +1154,7 @@ impl Default for PoolEntry {
 struct ClientReservation {
     client: Http1Client,
     permit: OwnedSemaphorePermit,
+    reused: bool,
 }
 
 enum PoolChoice {
@@ -1163,15 +1191,15 @@ where
         loop {
             let choice = self.acquire(&key).await?;
 
-            let (client, outcome) = match choice {
+            let (client, outcome, reused) = match choice {
                 PoolChoice::Reserved(reservation) => {
                     let client = reservation.client.clone();
                     let outcome = client.send_reserved(request, reservation.permit).await;
-                    (client, outcome)
+                    (client, outcome, reservation.reused)
                 }
                 PoolChoice::Wait(client) => {
                     let outcome = client.send_request_recoverable(request).await;
-                    (client, outcome)
+                    (client, outcome, true)
                 }
                 PoolChoice::Connect(_) => unreachable!("acquire resolves connection choices"),
             };
@@ -1184,6 +1212,14 @@ where
                 }
                 Err(ClientSendError::NotSent(returned_request)) => {
                     self.remove_if_current(&key, &client).await;
+                    // Only a stale pooled connection warrants a transparent
+                    // retry. Repeatedly retrying an immediately closed fresh
+                    // connection would create an unbounded reconnect loop.
+                    if !reused {
+                        return Err(
+                            ClientSendError::NotSent(returned_request).into_protocol_error()
+                        );
+                    }
                     request = *returned_request;
                 }
             }
@@ -1212,7 +1248,12 @@ where
         let client = Http1Client::new(io, self.config);
         let permit = Arc::clone(&client.availability)
             .try_acquire_owned()
-            .expect("new HTTP/1 client is available");
+            .map_err(|_| {
+                ProtocolError::new(
+                    ErrorKind::Io,
+                    "new HTTP/1 connection closed before accepting the request",
+                )
+            })?;
         self.entries
             .lock()
             .await
@@ -1220,7 +1261,11 @@ where
             .or_default()
             .clients
             .push(client.clone());
-        Ok(PoolChoice::Reserved(ClientReservation { client, permit }))
+        Ok(PoolChoice::Reserved(ClientReservation {
+            client,
+            permit,
+            reused: false,
+        }))
     }
 
     async fn remove_if_current(&self, key: &PoolKey, failed: &Http1Client) {
@@ -1251,9 +1296,7 @@ where
 }
 
 fn choose_pool_client(entry: &mut PoolEntry) -> PoolChoice {
-    entry
-        .clients
-        .retain(|client| !client.command_tx.is_closed());
+    entry.clients.retain(|client| !client.is_closed());
     if let Some(reservation) = entry.clients.iter().find_map(|client| {
         Arc::clone(&client.availability)
             .try_acquire_owned()
@@ -1261,6 +1304,7 @@ fn choose_pool_client(entry: &mut PoolEntry) -> PoolChoice {
             .map(|permit| ClientReservation {
                 client: client.clone(),
                 permit,
+                reused: true,
             })
     }) {
         return PoolChoice::Reserved(reservation);

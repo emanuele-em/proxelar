@@ -739,6 +739,19 @@ impl CapturingHandler {
         response_to_protocol(self.synthetic_response(status, headers, body))
     }
 
+    #[cfg(feature = "scripting")]
+    fn synthetic_ordered_response(
+        &mut self,
+        status: http::StatusCode,
+        headers: HeaderBlock,
+        body: Bytes,
+    ) -> Result<Response<ProxyBody>, crate::header::HeaderConversionError> {
+        let (mut parts, body) = synthetic_response_parts(status, http::HeaderMap::new(), body);
+        preserve_headers(&mut parts.headers, &mut parts.extensions, headers)?;
+        self.emit_response_snapshot(&parts, body.clone());
+        Ok(Response::from_parts(parts, body::full(body)))
+    }
+
     pub(crate) fn emit_synthetic_completion(
         &mut self,
         status: http::StatusCode,
@@ -1233,14 +1246,8 @@ impl CapturingHandler {
 
                     let status_code = http::StatusCode::from_u16(status)
                         .unwrap_or(http::StatusCode::INTERNAL_SERVER_ERROR);
-                    match crate::header::to_http(&headers) {
-                        Ok(headers) => {
-                            return CompatRequestOrResponse::Response(self.synthetic_response(
-                                status_code,
-                                headers,
-                                body,
-                            ));
-                        }
+                    match self.synthetic_ordered_response(status_code, headers, body) {
+                        Ok(response) => return CompatRequestOrResponse::Response(response),
                         Err(error) => tracing::warn!(
                             "Lua short-circuit produced headers unsupported by the temporary Hyper adapter (passing through): {error}"
                         ),
@@ -2255,6 +2262,47 @@ mod tests {
             let collected = request.body.collect().await.unwrap();
             assert_eq!(collected.data, expected_body);
             assert_eq!(collected.trailers, preserve_trailers.then_some(trailers));
+        }
+    }
+
+    #[cfg(feature = "scripting")]
+    #[tokio::test]
+    async fn scripting_short_circuit_preserves_ordered_headers_in_response_and_capture() {
+        let directory = tempfile::tempdir().unwrap();
+        let script = directory.path().join("response.lua");
+        std::fs::write(
+            &script,
+            "function on_request(req) return {status=200, headers=req.headers, body='ok'} end",
+        )
+        .unwrap();
+        let engine = Arc::new(crate::scripting::ScriptEngine::new(&script).unwrap());
+        let (events, mut receiver) = mpsc::channel(10);
+        let mut handler = CapturingHandler::new(events).with_script_engine(engine);
+        let mut headers = interleaved_headers();
+        headers.add("X-Binary", [0x80, 0xff]).unwrap();
+        let request = ProxyRequest::new(
+            RequestHead::new(
+                Method::GET,
+                "http://example.test/".parse().unwrap(),
+                Version::HTTP_11,
+                headers.clone(),
+            ),
+            ProxyBody::empty(),
+        );
+        let context = HttpContext {
+            remote_addr: "127.0.0.1:12345".parse().unwrap(),
+        };
+        let RequestOrResponse::Response(response) = handler.handle_request(&context, request).await
+        else {
+            panic!("expected short-circuit response");
+        };
+        assert_eq!(response.head.headers, headers);
+        assert_eq!(response.body.collect().await.unwrap().data, "ok");
+        loop {
+            if let ProxyEvent::RequestComplete { response, .. } = receiver.recv().await.unwrap() {
+                assert_eq!(response.headers(), &headers);
+                break;
+            }
         }
     }
 

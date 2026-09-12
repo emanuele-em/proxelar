@@ -427,6 +427,32 @@ async fn idle_read_timeout_is_reported() {
     assert_eq!(error.kind(), ErrorKind::Timeout);
 }
 
+#[tokio::test]
+async fn explicitly_configured_service_timeout_is_reported() {
+    struct PendingService;
+    impl HttpService for PendingService {
+        fn call(&mut self, _: ProxyRequest) -> BoxFuture<'_, Result<ProxyResponse, ProtocolError>> {
+            Box::pin(std::future::pending())
+        }
+    }
+    let (mut peer, io) = tokio::io::duplex(1024);
+    peer.write_all(b"GET / HTTP/1.1\r\nHost: example.test\r\n\r\n")
+        .await
+        .unwrap();
+    let error = serve_connection(
+        io,
+        PendingService,
+        ConnectionConfig {
+            service_timeout: Some(Duration::from_millis(10)),
+            ..ConnectionConfig::default()
+        },
+    )
+    .await
+    .unwrap_err();
+    assert_eq!(error.kind(), ErrorKind::Timeout);
+    assert!(error.message().contains("service"));
+}
+
 struct ConnectService;
 
 impl HttpService for ConnectService {
@@ -719,6 +745,73 @@ async fn pool_reuses_connections_by_destination_tls_and_route() {
         .unwrap();
     response.body.collect().await.unwrap();
     assert_eq!(connections.load(Ordering::SeqCst), 2);
+}
+
+struct ControlledConnector {
+    peers: tokio::sync::mpsc::UnboundedSender<DuplexStream>,
+}
+
+impl Http1Connector for ControlledConnector {
+    fn connect(&self, _: PoolKey) -> BoxFuture<'static, Result<BoxIo, ProtocolError>> {
+        let (client, peer) = tokio::io::duplex(4096);
+        self.peers.send(peer).unwrap();
+        Box::pin(async { Ok(Box::new(client) as BoxIo) })
+    }
+}
+
+#[tokio::test]
+async fn pool_reconnects_after_idle_eof_without_retrying_started_requests() {
+    let (peers_tx, mut peers) = tokio::sync::mpsc::unbounded_channel();
+    let pool = Arc::new(Http1Pool::new(
+        ControlledConnector { peers: peers_tx },
+        ConnectionConfig::default(),
+    ));
+    let key = PoolKey {
+        destination: "example.test:80".into(),
+        tls: false,
+        outbound_route: None,
+    };
+    for (response_expected, read_request) in
+        [(true, true), (true, true), (false, true), (false, false)]
+    {
+        let pool = pool.clone();
+        let key = key.clone();
+        let sending = tokio::spawn(async move {
+            let response = pool
+                .send(key, request(Method::POST, "/", ProxyBody::empty()))
+                .await?;
+            response.body.collect().await
+        });
+        let mut peer = tokio::time::timeout(Duration::from_secs(1), peers.recv())
+            .await
+            .expect("closed idle connection was reused")
+            .unwrap();
+        if read_request {
+            let mut head = Vec::new();
+            while !head.ends_with(b"\r\n\r\n") {
+                head.push(peer.read_u8().await.unwrap());
+            }
+        }
+        if response_expected {
+            peer.write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 2\r\n\r\nok")
+                .await
+                .unwrap();
+            assert_eq!(sending.await.unwrap().unwrap().data, "ok");
+            // Close only after the response is consumed, without Connection: close.
+            // The next command may race the idle driver's EOF notification.
+            drop(peer);
+        } else {
+            // Neither a sent POST nor an immediately closed fresh connection
+            // may trigger a retry.
+            drop(peer);
+            assert!(tokio::time::timeout(Duration::from_secs(1), sending)
+                .await
+                .unwrap()
+                .unwrap()
+                .is_err());
+            assert!(peers.try_recv().is_err());
+        }
+    }
 }
 
 #[tokio::test]

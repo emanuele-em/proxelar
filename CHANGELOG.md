@@ -25,6 +25,10 @@
 
 ### Fixed
 
+- Retire closed idle HTTP/1 upstream connections before reuse, including negotiated connections, without retrying requests whose bytes were already sent. Detect HTTP/2 stream resets while upload or response bodies await data so abandoned senders release their resources.
+- Remove IPv6 URI brackets before constructing the rustls server name for shared and negotiated HTTPS upstream connections.
+- Make the HTTP/1 application deadline opt-in so interactive interception retains its own 300-second deadline and can deliver its timeout response.
+- Preserve header order, casing, duplicate interleaving, and binary values in Lua short-circuit responses and their captured events.
 - Upgrade `h2` to 0.4.19 and require at least 0.4.16 to address RUSTSEC-2026-0258, which allowed undrained streams to queue unbounded empty DATA frames. Refresh the yanked `chacha20` 0.10.1 dependency to 0.10.2, update `event-listener` to 5.4.2 for RUSTSEC-2026-0221, and update `lru` to 0.18.4 for RUSTSEC-2026-0253.
 - Replace `tokio-quiche` with a direct Tokio driver for the maintained `quiche` crate, removing Foundations and its unmaintained YAML dependencies without advisory exceptions or version pins. Keep the dependency graph publishable using released crates.
 - Preserve received HTTP/3 informational responses and request/response trailers through the protocol adapters. The direct driver processes every HEADERS event, retains header byte values and interleaved duplicate order, and validates trailer and informational-response semantics.

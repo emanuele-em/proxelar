@@ -562,7 +562,21 @@ impl Stream for H2RecvBody {
 
 async fn send_body(send: &mut SendStream<Bytes>, mut body: ProxyBody) -> Result<(), ProtocolError> {
     let mut trailers_sent = false;
-    while let Some(frame) = body.next().await {
+    loop {
+        // A body may wait indefinitely for its next frame. Register for peer
+        // resets even in that state, just as when waiting for send capacity.
+        let frame = tokio::select! {
+            biased;
+            reset = poll_fn(|cx| send.poll_reset(cx)) => {
+                let reason = reset.map_err(map_h2_error)?;
+                return Err(ProtocolError::new(
+                    ErrorKind::Reset,
+                    format!("HTTP/2 stream reset: {reason}"),
+                ));
+            }
+            frame = body.next() => frame,
+        };
+        let Some(frame) = frame else { break };
         if trailers_sent {
             return Err(ProtocolError::new(
                 ErrorKind::ProtocolViolation,
