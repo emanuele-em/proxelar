@@ -85,5 +85,6 @@ coverage-html:
         --ignore-filename-regex '(^|/)(tests|target)/'
 
 # Run the built binary against the current build (TUI by default; pass args to select another mode)
+[positional-arguments]
 run *args:
-    cargo run -- {{ args }}
+    cargo run -- "$@"
