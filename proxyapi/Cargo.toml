@@ -16,7 +16,7 @@ keywords = ["proxy", "mitm", "http", "https", "lua"]
 [features]
 default = []
 scripting = ["dep:mlua", "dep:semver", "dep:sha2"]
-http3 = ["dep:boring", "dep:tempfile", "dep:tokio-quiche"]
+http3 = ["dep:boring", "dep:quiche", "moka/sync"]
 # Statically link a vendored Lua 5.4.
 vendored-lua = ["mlua?/vendored"]
 
@@ -57,12 +57,11 @@ boringtun = { version = "0.7.1", default-features = false }
 netstack-smoltcp = "0.2.4"
 proxyapi_models = { version = "0.5.1", path = "../proxyapi_models" }
 proxelar-proto = { version = "0.5.1", path = "../proxelar-proto" }
-tokio-quiche = { version = "0.19.1", default-features = false, optional = true }
+quiche = { version = "0.29.3", optional = true }
 boring = { version = "4.22", optional = true }
-tempfile = { version = "3", optional = true }
 
 [dev-dependencies]
-tokio = { version = "1.52", features = ["full"] }
+tokio = { version = "1.52", features = ["full", "test-util"] }
 hyper = { version = "1.10", features = ["http1", "http2", "server", "client"] }
 hyper-util = { version = "0.1", features = ["tokio", "http1", "http2"] }
 http-body-util = "0.1"

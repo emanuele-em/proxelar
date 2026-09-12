@@ -691,9 +691,8 @@ async fn udp_loop(socket: VirtualUdpSocket, config: UdpLoopConfig) -> io::Result
 #[cfg(feature = "http3")]
 fn is_quic_initial(datagram: &[u8]) -> bool {
     let mut packet = datagram.to_vec();
-    tokio_quiche::quiche::Header::from_slice(&mut packet, 0).is_ok_and(|header| {
-        header.ty == tokio_quiche::quiche::Type::Initial
-            && tokio_quiche::quiche::version_is_supported(header.version)
+    quiche::Header::from_slice(&mut packet, 0).is_ok_and(|header| {
+        header.ty == quiche::Type::Initial && quiche::version_is_supported(header.version)
     })
 }
 
@@ -703,10 +702,6 @@ async fn start_h3_flow(
     generation: u64,
     context: H3FlowContext,
 ) -> io::Result<H3FlowHandle> {
-    use tokio_quiche::metrics::DefaultMetrics;
-    use tokio_quiche::settings::{CertificateKind, Hooks, QuicSettings, TlsCertificatePaths};
-    use tokio_quiche::{listen, ConnectionParams};
-
     let H3FlowContext {
         handler,
         ca,
@@ -720,64 +715,22 @@ async fn start_h3_flow(
         .to_string()
         .parse::<Authority>()
         .map_err(|_| invalid_input("invalid WireGuard HTTP/3 destination"))?;
-    let certificate = ca
-        .gen_h3_certificate(&authority)
-        .await
-        .map_err(|error| io::Error::other(error.to_string()))?;
-    let tls_files = tempfile::tempdir()?;
-    let cert_path = tls_files.path().join("wireguard-h3-cert.pem");
-    let key_path = tls_files.path().join("wireguard-h3-key.pem");
-    std::fs::write(&cert_path, &certificate.certificate_pem)?;
-    std::fs::write(&key_path, &certificate.private_key_pem)?;
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::PermissionsExt as _;
-        std::fs::set_permissions(&key_path, std::fs::Permissions::from_mode(0o600))?;
-    }
-    let cert_path_str = cert_path
-        .to_str()
-        .ok_or_else(|| invalid_input("WireGuard HTTP/3 certificate path is not UTF-8"))?;
-    let key_path_str = key_path
-        .to_str()
-        .ok_or_else(|| invalid_input("WireGuard HTTP/3 key path is not UTF-8"))?;
-
-    let server_socket = UdpSocket::bind("127.0.0.1:0").await?;
-    let server_addr = server_socket.local_addr()?;
+    let config = super::http3::server_config(ca, authority, true)
+        .map_err(|e| io::Error::other(e.to_string()))?;
+    let listener =
+        super::http3::H3Listener::bind("127.0.0.1:0".parse().expect("loopback address"), config)
+            .await?;
     let relay_socket = UdpSocket::bind("127.0.0.1:0").await?;
-    relay_socket.connect(server_addr).await?;
-    let mut quic_settings = QuicSettings::default();
-    quic_settings.alpn = vec![b"h3".to_vec()];
-    quic_settings.enable_dgram = false;
-    quic_settings.enable_early_data = false;
-    let params = ConnectionParams::new_server(
-        quic_settings,
-        TlsCertificatePaths {
-            cert: cert_path_str,
-            private_key: key_path_str,
-            kind: CertificateKind::X509,
-        },
-        Hooks {
-            connection_hook: Some(Arc::new(super::http3::DynamicH3CertificateHook::new(
-                Arc::clone(&ca),
-                authority,
-            ))),
-        },
-    );
-    let connections = listen([server_socket], params, DefaultMetrics)?
-        .pop()
-        .ok_or_else(|| io::Error::other("WireGuard HTTP/3 listener was not created"))?;
+    relay_socket.connect(listener.local_addr()?).await?;
     let (datagram_tx, datagram_rx) = mpsc::channel(128);
     tokio::spawn(run_h3_flow(H3FlowRuntime {
         key,
         generation,
         relay_socket,
-        connections,
+        listener,
         datagrams: datagram_rx,
         handler,
         verifier,
-        cert_path,
-        key_path,
-        _tls_files: tls_files,
         response_tx,
         completed_tx,
         cancel,
@@ -793,13 +746,10 @@ struct H3FlowRuntime {
     key: UdpFlowKey,
     generation: u64,
     relay_socket: UdpSocket,
-    connections: tokio_quiche::QuicConnectionStream<tokio_quiche::metrics::DefaultMetrics>,
+    listener: super::http3::H3Listener,
     datagrams: mpsc::Receiver<Vec<u8>>,
     handler: CapturingHandler,
     verifier: Arc<dyn ServerCertVerifier>,
-    cert_path: PathBuf,
-    key_path: PathBuf,
-    _tls_files: tempfile::TempDir,
     response_tx: mpsc::Sender<(Vec<u8>, SocketAddr, SocketAddr)>,
     completed_tx: mpsc::Sender<(UdpFlowKey, u64)>,
     cancel: CancellationToken,
@@ -807,24 +757,27 @@ struct H3FlowRuntime {
 
 #[cfg(feature = "http3")]
 async fn run_h3_flow(runtime: H3FlowRuntime) {
-    use tokio_quiche::ServerH3Driver;
-
     let H3FlowRuntime {
         key,
         generation,
         relay_socket,
-        mut connections,
+        listener,
         mut datagrams,
         handler,
         verifier,
-        cert_path,
-        key_path,
-        _tls_files,
         response_tx,
         completed_tx,
         cancel,
     } = runtime;
     let upstreams = Arc::new(tokio::sync::Mutex::new(HashMap::new()));
+    let serving = listener.serve(move |_| WireGuardH3Service {
+        remote_addr: key.source,
+        destination: key.destination,
+        handler: handler.clone(),
+        verifier: Arc::clone(&verifier),
+        upstreams: Arc::clone(&upstreams),
+    });
+    tokio::pin!(serving);
     let mut buffer = vec![0_u8; MAX_PACKET_SIZE];
     let idle = tokio::time::sleep(H3_FLOW_IDLE_TIMEOUT);
     tokio::pin!(idle);
@@ -858,34 +811,9 @@ async fn run_h3_flow(runtime: H3FlowRuntime) {
                     }
                 }
             }
-            connection = connections.next() => {
-                let Some(connection) = connection else { break; };
-                match connection {
-                    Ok(initial) => {
-                        let (driver, controller) =
-                            ServerH3Driver::new(super::http3::default_http3_settings());
-                        let connection = initial.start(driver);
-                        let service = WireGuardH3Service {
-                            remote_addr: key.source,
-                            destination: key.destination,
-                            handler: handler.clone(),
-                            verifier: Arc::clone(&verifier),
-                            cert_path: cert_path.clone(),
-                            key_path: key_path.clone(),
-                            upstreams: Arc::clone(&upstreams),
-                        };
-                        tokio::spawn(async move {
-                            if let Err(error) = super::http3::serve_connection(
-                                connection,
-                                controller,
-                                service,
-                            ).await {
-                                tracing::debug!("WireGuard HTTP/3 connection failed: {error}");
-                            }
-                        });
-                    }
-                    Err(error) => tracing::debug!("Rejected WireGuard HTTP/3 initial packet: {error}"),
-                }
+            result = &mut serving => {
+                if let Err(error) = result { tracing::debug!("WireGuard HTTP/3 listener failed: {error}"); }
+                break;
             }
         }
     }
@@ -899,8 +827,6 @@ struct WireGuardH3Service {
     destination: SocketAddr,
     handler: CapturingHandler,
     verifier: Arc<dyn ServerCertVerifier>,
-    cert_path: PathBuf,
-    key_path: PathBuf,
     upstreams: Arc<tokio::sync::Mutex<HashMap<Authority, super::http3::ReverseH3Upstream>>>,
 }
 
@@ -914,16 +840,12 @@ impl HttpService for WireGuardH3Service {
         let remote_addr = self.remote_addr;
         let destination = self.destination;
         let verifier = Arc::clone(&self.verifier);
-        let cert_path = self.cert_path.clone();
-        let key_path = self.key_path.clone();
         let upstreams = Arc::clone(&self.upstreams);
         Box::pin(async move {
             let context = crate::HttpContext { remote_addr };
             if super::http3::is_extended_websocket(&request) {
                 let websocket_upstreams = Arc::clone(&upstreams);
                 let websocket_verifier = Arc::clone(&verifier);
-                let websocket_cert_path = cert_path.clone();
-                let websocket_key_path = key_path.clone();
                 return super::http3::handle_extended_websocket(
                     request,
                     handler,
@@ -944,8 +866,6 @@ impl HttpService for WireGuardH3Service {
                                     super::http3::ReverseH3Upstream::new_with_remote(
                                         request.head.uri.clone(),
                                         websocket_verifier,
-                                        websocket_cert_path,
-                                        websocket_key_path,
                                         destination,
                                     )
                                 })
@@ -975,8 +895,6 @@ impl HttpService for WireGuardH3Service {
                         super::http3::ReverseH3Upstream::new_with_remote(
                             request.head.uri.clone(),
                             verifier,
-                            cert_path,
-                            key_path,
                             destination,
                         )
                     })
@@ -1066,50 +984,22 @@ mod tests {
     }
 
     #[cfg(feature = "http3")]
-    async fn spawn_wireguard_test_h3_upstream() -> (
-        SocketAddr,
-        tokio::task::JoinHandle<()>,
-        tempfile::TempDir,
-        PathBuf,
-        PathBuf,
-    ) {
-        use tokio_quiche::metrics::DefaultMetrics;
-        use tokio_quiche::settings::{CertificateKind, Hooks, QuicSettings, TlsCertificatePaths};
-        use tokio_quiche::{listen, ConnectionParams, ServerH3Driver};
-
+    async fn spawn_wireguard_test_h3_upstream() -> (SocketAddr, tokio::task::JoinHandle<()>) {
+        let _ = rustls::crypto::ring::default_provider().install_default();
         let ca_dir = tempfile::tempdir().unwrap();
-        let ca = Ssl::load_or_generate(ca_dir.path()).unwrap();
-        let authority: Authority = "127.0.0.1:443".parse().unwrap();
-        let certificate = ca.gen_h3_certificate(&authority).await.unwrap();
-        let tls_dir = tempfile::tempdir().unwrap();
-        let cert_path = tls_dir.path().join("cert.pem");
-        let key_path = tls_dir.path().join("key.pem");
-        std::fs::write(&cert_path, &certificate.certificate_pem).unwrap();
-        std::fs::write(&key_path, &certificate.private_key_pem).unwrap();
-        let socket = UdpSocket::bind("127.0.0.1:0").await.unwrap();
-        let address = socket.local_addr().unwrap();
-        let mut quic_settings = QuicSettings::default();
-        quic_settings.alpn = vec![b"h3".to_vec()];
-        let params = ConnectionParams::new_server(
-            quic_settings,
-            TlsCertificatePaths {
-                cert: cert_path.to_str().unwrap(),
-                private_key: key_path.to_str().unwrap(),
-                kind: CertificateKind::X509,
-            },
-            Hooks::default(),
-        );
-        let mut connections = listen([socket], params, DefaultMetrics).unwrap().remove(0);
-        let task = tokio::spawn(async move {
-            let initial = connections.next().await.unwrap().unwrap();
-            let (driver, controller) =
-                ServerH3Driver::new(super::super::http3::default_http3_settings());
-            let connection = initial.start(driver);
-            super::super::http3::serve_connection(connection, controller, WireGuardTestH3Service)
+        let ca = Arc::new(Ssl::load_or_generate(ca_dir.path()).unwrap());
+        let config =
+            super::super::http3::server_config(ca, "127.0.0.1:443".parse().unwrap(), false)
+                .unwrap();
+        let listener =
+            super::super::http3::H3Listener::bind("127.0.0.1:0".parse().unwrap(), config)
                 .await
                 .unwrap();
+        let address = listener.local_addr().unwrap();
+        let task = tokio::spawn(async move {
+            listener.serve(|_| WireGuardTestH3Service).await.unwrap();
         });
-        (address, task, tls_dir, cert_path, key_path)
+        (address, task)
     }
 
     #[cfg(feature = "http3")]
@@ -1120,8 +1010,7 @@ mod tests {
         use proxelar_proto::{ProxyBody, RequestHead};
 
         let _ = rustls::crypto::ring::default_provider().install_default();
-        let (upstream_addr, upstream_task, upstream_tls_dir, cert_path, key_path) =
-            spawn_wireguard_test_h3_upstream().await;
+        let (upstream_addr, upstream_task) = spawn_wireguard_test_h3_upstream().await;
         let proxy_ca_dir = tempfile::tempdir().unwrap();
         let proxy_ca = Arc::new(Ssl::load_or_generate(proxy_ca_dir.path()).unwrap());
         let proxy_ca_file = tempfile::NamedTempFile::new().unwrap();
@@ -1140,7 +1029,7 @@ mod tests {
             destination: upstream_addr,
         };
         let (response_tx, mut response_rx) = mpsc::channel(128);
-        let (completed_tx, _completed_rx) = mpsc::channel(8);
+        let (completed_tx, mut completed_rx) = mpsc::channel(8);
         let cancel = CancellationToken::new();
         let flow = start_h3_flow(
             flow_key,
@@ -1191,8 +1080,6 @@ mod tests {
         let client = super::super::http3::ReverseH3Upstream::new_with_remote(
             target,
             client_verifier,
-            cert_path,
-            key_path,
             bridge_addr,
         );
         let request = ProxyRequest::new(
@@ -1230,9 +1117,14 @@ mod tests {
         ));
 
         cancel.cancel();
+        assert_eq!(
+            tokio::time::timeout(Duration::from_secs(5), completed_rx.recv())
+                .await
+                .unwrap(),
+            Some((flow_key, 1))
+        );
         bridge_task.abort();
         upstream_task.abort();
-        drop(upstream_tls_dir);
     }
 
     #[test]
@@ -1600,3 +1492,7 @@ mod tests {
             .unwrap();
     }
 }
+
+#[cfg(all(test, feature = "http3"))]
+#[path = "tests/wireguard.rs"]
+mod protocol_tests;

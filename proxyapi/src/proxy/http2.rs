@@ -594,3 +594,7 @@ async fn handle_connect_tunnel(
 fn malformed(message: impl Into<String>) -> ProtocolError {
     ProtocolError::new(ErrorKind::MalformedMessage, message)
 }
+
+#[cfg(test)]
+#[path = "tests/http2.rs"]
+mod tests;

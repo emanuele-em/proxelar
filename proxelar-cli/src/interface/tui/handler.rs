@@ -379,7 +379,9 @@ fn parse_edited_http_request(
     }
     let decoded = compact
         .as_bytes()
-        .chunks_exact(2)
+        .as_chunks::<2>()
+        .0
+        .iter()
         .map(|pair| {
             let pair = std::str::from_utf8(pair).map_err(|_| "Invalid hex body")?;
             u8::from_str_radix(pair, 16).map_err(|_| "Invalid hex body")
