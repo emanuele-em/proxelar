@@ -197,13 +197,12 @@ async fn serve_tcp_stream<I>(
 
 #[cfg(feature = "http3")]
 pub(super) struct ReverseH3Server {
-    connections: tokio_quiche::QuicConnectionStream<tokio_quiche::metrics::DefaultMetrics>,
+    listener: super::http3::H3Listener,
     target: Uri,
     handler: CapturingHandler,
     upstream: super::http3::ReverseH3Upstream,
     #[cfg(test)]
     local_addr: SocketAddr,
-    _tls_files: tempfile::TempDir,
 }
 
 #[cfg(feature = "http3")]
@@ -215,68 +214,24 @@ impl ReverseH3Server {
         ca: Arc<Ssl>,
         upstream_tls: &super::UpstreamTlsConfig,
     ) -> Result<Self, crate::Error> {
-        use tokio::net::UdpSocket;
-        use tokio_quiche::metrics::DefaultMetrics;
-        use tokio_quiche::settings::{CertificateKind, Hooks, QuicSettings, TlsCertificatePaths};
-        use tokio_quiche::{listen, ConnectionParams};
-
-        let authority = target.authority().ok_or_else(|| {
-            crate::Error::Other("reverse HTTP/3 target has no authority".to_owned())
-        })?;
-        let certificate = ca.gen_h3_certificate(authority).await?;
-        let tls_files = tempfile::tempdir()?;
-        let cert_path = tls_files.path().join("reverse-h3-cert.pem");
-        let key_path = tls_files.path().join("reverse-h3-key.pem");
-        std::fs::write(&cert_path, &certificate.certificate_pem)?;
-        std::fs::write(&key_path, &certificate.private_key_pem)?;
-        #[cfg(unix)]
-        {
-            use std::os::unix::fs::PermissionsExt as _;
-            std::fs::set_permissions(&key_path, std::fs::Permissions::from_mode(0o600))?;
-        }
-
-        let cert_path_str = cert_path.to_str().ok_or_else(|| {
-            crate::Error::Other("HTTP/3 certificate path is not UTF-8".to_owned())
-        })?;
-        let key_path_str = key_path
-            .to_str()
-            .ok_or_else(|| crate::Error::Other("HTTP/3 key path is not UTF-8".to_owned()))?;
-        let socket = UdpSocket::bind(address).await?;
-        let local_addr = socket.local_addr()?;
-        let mut quic_settings = QuicSettings::default();
-        quic_settings.alpn = vec![b"h3".to_vec()];
-        quic_settings.enable_dgram = false;
-        quic_settings.enable_early_data = false;
-        let params = ConnectionParams::new_server(
-            quic_settings,
-            TlsCertificatePaths {
-                cert: cert_path_str,
-                private_key: key_path_str,
-                kind: CertificateKind::X509,
-            },
-            Hooks::default(),
-        );
-        let connections = listen([socket], params, DefaultMetrics)?
-            .pop()
-            .ok_or_else(|| crate::Error::Other("HTTP/3 listener was not created".to_owned()))?;
+        let authority = target
+            .authority()
+            .ok_or_else(|| crate::Error::Other("reverse HTTP/3 target has no authority".into()))?;
+        let config = super::http3::server_config(ca, authority.clone(), false)
+            .map_err(|e| crate::Error::Other(e.to_string()))?;
+        let listener = super::http3::H3Listener::bind(address, config).await?;
+        let local_addr = listener.local_addr()?;
         let verifier = super::tls::h3_server_verifier(upstream_tls)?;
-        let wire_target = h3_wire_target(&target)?;
-        let upstream = super::http3::ReverseH3Upstream::new(
-            wire_target,
-            verifier,
-            cert_path.clone(),
-            key_path.clone(),
-        );
+        let upstream = super::http3::ReverseH3Upstream::new(h3_wire_target(&target)?, verifier);
         tracing::info!("Reverse HTTP/3 proxy listening on {local_addr}");
 
         Ok(Self {
-            connections,
+            listener,
             target,
             handler,
             upstream,
             #[cfg(test)]
             local_addr,
-            _tls_files: tls_files,
         })
     }
 
@@ -285,36 +240,16 @@ impl ReverseH3Server {
         self.local_addr
     }
 
-    pub(super) async fn serve(mut self) -> Result<(), crate::Error> {
-        use futures_util::StreamExt as _;
-        use tokio_quiche::ServerH3Driver;
-
-        while let Some(result) = self.connections.next().await {
-            let initial = match result {
-                Ok(connection) => connection,
-                Err(error) => {
-                    tracing::debug!("Rejected HTTP/3 initial packet: {error}");
-                    continue;
-                }
-            };
-            let remote_addr = initial.peer_addr();
-            let (driver, controller) = ServerH3Driver::new(super::http3::default_http3_settings());
-            let connection = initial.start(driver);
-            let service = ReverseH3Service {
+    pub(super) async fn serve(self) -> Result<(), crate::Error> {
+        self.listener
+            .serve(move |remote_addr| ReverseH3Service {
                 remote_addr,
                 handler: self.handler.clone(),
                 target: self.target.clone(),
                 upstream: self.upstream.clone(),
-            };
-            tokio::spawn(async move {
-                if let Err(error) =
-                    super::http3::serve_connection(connection, controller, service).await
-                {
-                    tracing::debug!("Reverse HTTP/3 connection error: {error}");
-                }
-            });
-        }
-        Ok(())
+            })
+            .await
+            .map_err(|e| crate::Error::Other(e.to_string()))
     }
 }
 
@@ -606,63 +541,29 @@ mod tests {
     #[cfg(feature = "http3")]
     async fn spawn_test_h3_upstream_with_service<S>(
         service: S,
-    ) -> (
-        SocketAddr,
-        tokio::task::JoinHandle<()>,
-        tempfile::TempDir,
-        std::path::PathBuf,
-        std::path::PathBuf,
-    )
+    ) -> (SocketAddr, tokio::task::JoinHandle<()>)
     where
         S: HttpService + Clone + Send + 'static,
     {
-        use futures_util::StreamExt as _;
-        use tokio_quiche::metrics::DefaultMetrics;
-        use tokio_quiche::settings::{CertificateKind, Hooks, QuicSettings, TlsCertificatePaths};
-        use tokio_quiche::{listen, ConnectionParams, ServerH3Driver};
-
+        let _ = rustls::crypto::ring::default_provider().install_default();
         let ca_dir = tempfile::tempdir().unwrap();
-        let ca = Ssl::load_or_generate(ca_dir.path()).unwrap();
-        let authority: http::uri::Authority = "127.0.0.1:443".parse().unwrap();
-        let certificate = ca.gen_h3_certificate(&authority).await.unwrap();
-        let tls_dir = tempfile::tempdir().unwrap();
-        let cert_path = tls_dir.path().join("cert.pem");
-        let key_path = tls_dir.path().join("key.pem");
-        std::fs::write(&cert_path, &certificate.certificate_pem).unwrap();
-        std::fs::write(&key_path, &certificate.private_key_pem).unwrap();
-
-        let socket = tokio::net::UdpSocket::bind("127.0.0.1:0").await.unwrap();
-        let address = socket.local_addr().unwrap();
-        let params = ConnectionParams::new_server(
-            QuicSettings::default(),
-            TlsCertificatePaths {
-                cert: cert_path.to_str().unwrap(),
-                private_key: key_path.to_str().unwrap(),
-                kind: CertificateKind::X509,
-            },
-            Hooks::default(),
-        );
-        let mut connections = listen([socket], params, DefaultMetrics).unwrap().remove(0);
-        let task = tokio::spawn(async move {
-            let initial = connections.next().await.unwrap().unwrap();
-            let (driver, controller) =
-                ServerH3Driver::new(super::super::http3::default_http3_settings());
-            let connection = initial.start(driver);
-            super::super::http3::serve_connection(connection, controller, service)
+        let ca = Arc::new(Ssl::load_or_generate(ca_dir.path()).unwrap());
+        let config =
+            super::super::http3::server_config(ca, "127.0.0.1:443".parse().unwrap(), false)
+                .unwrap();
+        let listener =
+            super::super::http3::H3Listener::bind("127.0.0.1:0".parse().unwrap(), config)
                 .await
                 .unwrap();
+        let address = listener.local_addr().unwrap();
+        let task = tokio::spawn(async move {
+            listener.serve(move |_| service.clone()).await.unwrap();
         });
-        (address, task, tls_dir, cert_path, key_path)
+        (address, task)
     }
 
     #[cfg(feature = "http3")]
-    async fn spawn_test_h3_upstream() -> (
-        SocketAddr,
-        tokio::task::JoinHandle<()>,
-        tempfile::TempDir,
-        std::path::PathBuf,
-        std::path::PathBuf,
-    ) {
+    async fn spawn_test_h3_upstream() -> (SocketAddr, tokio::task::JoinHandle<()>) {
         spawn_test_h3_upstream_with_service(StaticH3Service).await
     }
 
@@ -722,8 +623,7 @@ mod tests {
         use crate::handler::DEFAULT_BODY_CAPTURE_LIMIT;
         use crate::proxy::UpstreamTlsConfig;
 
-        let (upstream_addr, upstream_task, tls_dir, cert_path, key_path) =
-            spawn_test_h3_upstream().await;
+        let (upstream_addr, upstream_task) = spawn_test_h3_upstream().await;
         let ca_dir = tempfile::tempdir().unwrap();
         let ca = Arc::new(Ssl::load_or_generate(ca_dir.path()).unwrap());
         let (event_tx, mut event_rx) = tokio::sync::mpsc::channel(8);
@@ -745,8 +645,6 @@ mod tests {
         let client = super::super::http3::ReverseH3Upstream::new(
             format!("https://{proxy_addr}").parse().unwrap(),
             verifier,
-            cert_path,
-            key_path,
         );
         let mut headers = proxyapi_models::HeaderBlock::new();
         headers
@@ -782,7 +680,6 @@ mod tests {
 
         proxy_task.abort();
         upstream_task.abort();
-        drop(tls_dir);
     }
 
     #[cfg(feature = "http3")]
@@ -799,7 +696,7 @@ mod tests {
         use crate::handler::DEFAULT_BODY_CAPTURE_LIMIT;
         use crate::proxy::UpstreamTlsConfig;
 
-        let (upstream_addr, upstream_task, tls_dir, cert_path, key_path) =
+        let (upstream_addr, upstream_task) =
             spawn_test_h3_upstream_with_service(WebSocketH3Service).await;
         let ca_dir = tempfile::tempdir().unwrap();
         let ca = Arc::new(Ssl::load_or_generate(ca_dir.path()).unwrap());
@@ -842,8 +739,6 @@ mod tests {
         let client = super::super::http3::ReverseH3Upstream::new(
             format!("https://{proxy_addr}").parse().unwrap(),
             verifier,
-            cert_path,
-            key_path,
         );
         let (tunnel, request_body, response_body) =
             proxelar_proto::http2::websocket_body_tunnel(64 * 1024);
@@ -946,8 +841,11 @@ mod tests {
 
         proxy_task.abort();
         upstream_task.abort();
-        drop(tls_dir);
         #[cfg(feature = "scripting")]
         drop(script_file);
     }
 }
+
+#[cfg(test)]
+#[path = "tests/reverse.rs"]
+mod protocol_tests;

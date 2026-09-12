@@ -1204,3 +1204,7 @@ mod tests {
         }
     }
 }
+
+#[cfg(test)]
+#[path = "tests/forward.rs"]
+mod protocol_tests;

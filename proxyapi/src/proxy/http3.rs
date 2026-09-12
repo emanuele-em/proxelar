@@ -1,10 +1,7 @@
-use std::collections::HashMap;
 use std::future::Future;
 use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr};
-use std::path::PathBuf;
 use std::pin::Pin;
-use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::{Arc, Mutex};
+use std::sync::Arc;
 use std::task::{Context, Poll};
 use std::time::Duration;
 
@@ -17,21 +14,19 @@ use proxelar_proto::{
     ProxyRequest, ProxyResponse,
 };
 use proxyapi_models::{HeaderBlock, ProxiedResponse};
+use quiche::h3::{Header, NameValue as _};
 use rustls::client::danger::ServerCertVerifier;
 use rustls::pki_types::{CertificateDer, ServerName, UnixTime};
 use tokio::net::UdpSocket;
+use tokio::sync::mpsc;
 use tokio::sync::{oneshot, Mutex as AsyncMutex};
-use tokio_quiche::http3::driver::{
-    ClientH3Controller, ClientH3Event, H3Event, InboundFrame, InboundFrameStream,
-    IncomingH3Headers, NewClientRequest, OutboundFrame, OutboundFrameSender, ServerH3Controller,
-    ServerH3Event,
-};
-use tokio_quiche::http3::settings::Http3Settings;
-use tokio_quiche::quic::{connect_with_config, ConnectionHook};
-use tokio_quiche::quiche::h3::{Header, NameValue as _};
-use tokio_quiche::settings::{CertificateKind, Hooks, QuicSettings, TlsCertificatePaths};
-use tokio_quiche::socket::Socket;
-use tokio_quiche::{ClientH3Driver, ConnectionParams, QuicConnection};
+use tokio_util::sync::PollSender;
+
+mod driver;
+pub(super) use driver::H3Listener;
+use driver::{InboundFrame, IncomingH3Headers, OutboundFrame};
+type OutboundFrameSender = PollSender<OutboundFrame>;
+type InboundFrameStream = mpsc::Receiver<InboundFrame>;
 
 use crate::HttpHandler as _;
 
@@ -42,15 +37,13 @@ const DEFAULT_MAX_REQUESTS_PER_CONNECTION: u64 = 1_000;
 const DEFAULT_HANDSHAKE_TIMEOUT: Duration = Duration::from_secs(10);
 const WEBSOCKET_TUNNEL_CAPACITY: usize = 64 * 1024;
 
-pub(super) fn default_http3_settings() -> Http3Settings {
-    Http3Settings {
-        max_requests_per_connection: Some(DEFAULT_MAX_REQUESTS_PER_CONNECTION),
-        max_header_list_size: Some(DEFAULT_MAX_HEADER_LIST_SIZE),
-        qpack_max_table_capacity: Some(DEFAULT_QPACK_TABLE_CAPACITY),
-        qpack_blocked_streams: Some(DEFAULT_QPACK_BLOCKED_STREAMS),
-        post_accept_timeout: Some(Duration::from_secs(10)),
-        enable_extended_connect: true,
-    }
+fn default_http3_settings() -> Result<quiche::h3::Config, ProtocolError> {
+    let mut config = quiche::h3::Config::new().map_err(|e| protocol(ErrorKind::Io, e))?;
+    config.set_max_field_section_size(DEFAULT_MAX_HEADER_LIST_SIZE);
+    config.set_qpack_max_table_capacity(DEFAULT_QPACK_TABLE_CAPACITY);
+    config.set_qpack_blocked_streams(DEFAULT_QPACK_BLOCKED_STREAMS);
+    config.enable_extended_connect(true);
+    Ok(config)
 }
 
 #[derive(Clone)]
@@ -62,8 +55,6 @@ struct ReverseH3UpstreamInner {
     target: http::Uri,
     remote_addr: Option<SocketAddr>,
     verifier: Arc<dyn ServerCertVerifier>,
-    tls_cert_path: PathBuf,
-    tls_key_path: PathBuf,
     client: AsyncMutex<Option<Arc<H3Client>>>,
 }
 
@@ -84,36 +75,21 @@ fn clear_if_current<T>(cached: &mut Option<Arc<T>>, failed: &Arc<T>) {
 }
 
 impl ReverseH3Upstream {
-    pub(super) fn new(
-        target: http::Uri,
-        verifier: Arc<dyn ServerCertVerifier>,
-        tls_cert_path: PathBuf,
-        tls_key_path: PathBuf,
-    ) -> Self {
-        Self::with_remote_addr(target, verifier, tls_cert_path, tls_key_path, None)
+    pub(super) fn new(target: http::Uri, verifier: Arc<dyn ServerCertVerifier>) -> Self {
+        Self::with_remote_addr(target, verifier, None)
     }
 
     pub(super) fn new_with_remote(
         target: http::Uri,
         verifier: Arc<dyn ServerCertVerifier>,
-        tls_cert_path: PathBuf,
-        tls_key_path: PathBuf,
         remote_addr: SocketAddr,
     ) -> Self {
-        Self::with_remote_addr(
-            target,
-            verifier,
-            tls_cert_path,
-            tls_key_path,
-            Some(remote_addr),
-        )
+        Self::with_remote_addr(target, verifier, Some(remote_addr))
     }
 
     fn with_remote_addr(
         target: http::Uri,
         verifier: Arc<dyn ServerCertVerifier>,
-        tls_cert_path: PathBuf,
-        tls_key_path: PathBuf,
         remote_addr: Option<SocketAddr>,
     ) -> Self {
         Self {
@@ -121,8 +97,6 @@ impl ReverseH3Upstream {
                 target,
                 remote_addr,
                 verifier,
-                tls_cert_path,
-                tls_key_path,
                 client: AsyncMutex::new(None),
             }),
         }
@@ -131,7 +105,7 @@ impl ReverseH3Upstream {
     pub(super) async fn send(&self, request: ProxyRequest) -> Result<ProxyResponse, ProtocolError> {
         let client = {
             let mut state = self.inner.client.lock().await;
-            if let Some(client) = state.as_ref() {
+            if let Some(client) = state.as_ref().filter(|client| !client.requests.is_closed()) {
                 client.clone()
             } else {
                 let client = Arc::new(self.connect().await?);
@@ -157,6 +131,10 @@ impl ReverseH3Upstream {
             .authority()
             .ok_or_else(|| malformed("HTTP/3 upstream target has no authority"))?;
         let host = authority.host();
+        let host = host
+            .strip_prefix('[')
+            .and_then(|host| host.strip_suffix(']'))
+            .unwrap_or(host);
         let port = authority.port_u16().unwrap_or(443);
         let remote_addrs = match self.inner.remote_addr {
             Some(remote_addr) => vec![remote_addr],
@@ -166,47 +144,8 @@ impl ReverseH3Upstream {
                 .collect(),
         };
 
-        let server_name =
-            ServerName::try_from(host.to_owned()).map_err(|error| malformed(error.to_string()))?;
-        let hook = RustlsVerificationHook {
-            verifier: Arc::clone(&self.inner.verifier),
-            server_name,
-        };
-        let mut quic_settings = QuicSettings::default();
-        // QUIC can only carry HTTP/3 here. Keeping this explicit also makes
-        // the propagated client ALPN offer deterministic.
-        quic_settings.alpn = vec![b"h3".to_vec()];
-        quic_settings.enable_dgram = false;
-        quic_settings.handshake_timeout = Some(DEFAULT_HANDSHAKE_TIMEOUT);
-        // The custom callback below applies the same rustls trust policy used
-        // by TCP upstreams, including hostname verification.
-        quic_settings.verify_peer = false;
-        let cert_path = self
-            .inner
-            .tls_cert_path
-            .to_str()
-            .ok_or_else(|| malformed("HTTP/3 TLS certificate path is not UTF-8"))?;
-        let key_path = self
-            .inner
-            .tls_key_path
-            .to_str()
-            .ok_or_else(|| malformed("HTTP/3 TLS key path is not UTF-8"))?;
-        let params = ConnectionParams::new_client(
-            quic_settings,
-            // tokio-quiche invokes a custom TLS hook only when this optional
-            // field is present. The hook supplies the client context and does
-            // not load these server credentials as a client certificate.
-            Some(TlsCertificatePaths {
-                cert: cert_path,
-                private_key: key_path,
-                kind: CertificateKind::X509,
-            }),
-            Hooks {
-                connection_hook: Some(Arc::new(hook)),
-            },
-        );
         connect_h3_candidates(remote_addrs, |remote_addr| {
-            connect_h3_candidate(remote_addr, host, &params)
+            connect_h3_candidate(remote_addr, host, Arc::clone(&self.inner.verifier))
         })
         .await
     }
@@ -234,120 +173,85 @@ where
 async fn connect_h3_candidate(
     remote_addr: SocketAddr,
     host: &str,
-    params: &ConnectionParams<'_>,
+    verifier: Arc<dyn ServerCertVerifier>,
 ) -> Result<H3Client, ProtocolError> {
+    use boring::ssl::{SslAlert, SslContextBuilder, SslMethod, SslVerifyError, SslVerifyMode};
     let bind_addr = match remote_addr.ip() {
         IpAddr::V4(_) => (IpAddr::V4(Ipv4Addr::UNSPECIFIED), 0),
         IpAddr::V6(_) => (IpAddr::V6(Ipv6Addr::UNSPECIFIED), 0),
     };
     let socket = UdpSocket::bind(bind_addr)
         .await
-        .map_err(|error| h3_connect_error(remote_addr, error))?;
-    socket
-        .connect(remote_addr)
-        .await
-        .map_err(|error| h3_connect_error(remote_addr, error))?;
-    let socket = Socket::try_from(socket).map_err(|error| h3_connect_error(remote_addr, error))?;
-    let (driver, controller) = ClientH3Driver::new(default_http3_settings());
-    let connection = connect_with_config(socket, Some(host), params, driver)
-        .await
-        .map_err(|error| h3_connect_error(remote_addr, error))?;
-    Ok(H3Client::new(connection, controller))
-}
-
-fn h3_connect_error(remote_addr: SocketAddr, error: impl std::fmt::Display) -> ProtocolError {
-    ProtocolError::new(
-        ErrorKind::Io,
-        format!("HTTP/3 connection to {remote_addr} failed: {error}"),
+        .map_err(|e| protocol(ErrorKind::Io, e))?;
+    let server_name =
+        ServerName::try_from(host.to_owned()).map_err(|e| malformed(e.to_string()))?;
+    let mut tls =
+        SslContextBuilder::new(SslMethod::tls_client()).map_err(|e| protocol(ErrorKind::Io, e))?;
+    tls.set_custom_verify_callback(SslVerifyMode::PEER, move |ssl| {
+        verify_boring_peer_with_rustls(ssl, verifier.as_ref(), &server_name).map_err(|error| {
+            tracing::debug!("HTTP/3 upstream certificate verification failed: {error}");
+            SslVerifyError::Invalid(SslAlert::BAD_CERTIFICATE)
+        })
+    });
+    let mut config = driver::transport_config(tls)?;
+    let id = driver::connection_id()?;
+    let connection = quiche::connect(
+        Some(host),
+        &id,
+        socket
+            .local_addr()
+            .map_err(|e| protocol(ErrorKind::Io, e))?,
+        remote_addr,
+        &mut config,
     )
+    .map_err(|e| protocol(ErrorKind::Io, e))?;
+    driver::connect(socket, connection).await
 }
 
-pub(super) struct DynamicH3CertificateHook {
+pub(super) fn server_config(
     ca: Arc<crate::ca::Ssl>,
-    fallback_authority: Authority,
-}
-
-impl DynamicH3CertificateHook {
-    pub(super) fn new(ca: Arc<crate::ca::Ssl>, fallback_authority: Authority) -> Self {
-        Self {
-            ca,
-            fallback_authority,
-        }
-    }
-}
-
-impl ConnectionHook for DynamicH3CertificateHook {
-    fn create_custom_ssl_context_builder(
-        &self,
-        _settings: TlsCertificatePaths<'_>,
-    ) -> Option<boring::ssl::SslContextBuilder> {
-        use boring::ssl::{
-            AsyncSelectCertError, BoxSelectCertFinish, NameType, SslContextBuilder, SslMethod,
-        };
-
-        let mut builder = SslContextBuilder::new(SslMethod::tls_server()).ok()?;
-        let ca = Arc::clone(&self.ca);
-        let fallback_authority = self.fallback_authority.clone();
-        builder.set_async_select_certificate_callback(move |client_hello| {
-            let authority = client_hello
+    authority: Authority,
+    dynamic: bool,
+) -> Result<quiche::Config, ProtocolError> {
+    use boring::ssl::{NameType, SelectCertError, SslContextBuilder, SslMethod};
+    let mut tls =
+        SslContextBuilder::new(SslMethod::tls_server()).map_err(|e| protocol(ErrorKind::Io, e))?;
+    let material = ca
+        .gen_h3_certificate(&authority)
+        .map_err(|e| protocol(ErrorKind::Io, e))?;
+    let certificate = boring::x509::X509::from_pem(&material.certificate_pem)
+        .map_err(|e| protocol(ErrorKind::Io, e))?;
+    let key = boring::pkey::PKey::private_key_from_pem(&material.private_key_pem)
+        .map_err(|e| protocol(ErrorKind::Io, e))?;
+    tls.set_certificate(&certificate)
+        .map_err(|e| protocol(ErrorKind::Io, e))?;
+    tls.set_private_key(&key)
+        .map_err(|e| protocol(ErrorKind::Io, e))?;
+    if dynamic {
+        tls.set_select_certificate_callback(move |mut hello| {
+            let authority = hello
                 .servername(NameType::HOST_NAME)
-                .and_then(|server_name| server_name.parse::<Authority>().ok())
-                .unwrap_or_else(|| fallback_authority.clone());
-            let ca = Arc::clone(&ca);
-            Ok(Box::pin(async move {
-                let material = ca.gen_h3_certificate(&authority).await.map_err(|error| {
-                    tracing::debug!(
-                        "HTTP/3 dynamic certificate generation failed for {authority}: {error}"
-                    );
-                    AsyncSelectCertError
-                })?;
-                let certificate = boring::x509::X509::from_pem(&material.certificate_pem)
-                    .map_err(|_| AsyncSelectCertError)?;
-                let private_key =
-                    boring::pkey::PKey::private_key_from_pem(&material.private_key_pem)
-                        .map_err(|_| AsyncSelectCertError)?;
-                Ok(
-                    Box::new(move |mut client_hello: boring::ssl::ClientHello<'_>| {
-                        client_hello
-                            .ssl_mut()
-                            .set_certificate(&certificate)
-                            .map_err(|_| AsyncSelectCertError)?;
-                        client_hello
-                            .ssl_mut()
-                            .set_private_key(&private_key)
-                            .map_err(|_| AsyncSelectCertError)
-                    }) as BoxSelectCertFinish,
-                )
-            }))
+                .and_then(|name| name.parse::<Authority>().ok())
+                .unwrap_or_else(|| authority.clone());
+            let material = ca.gen_h3_certificate(&authority).map_err(|error| {
+                tracing::debug!("HTTP/3 certificate generation failed for {authority}: {error}");
+                SelectCertError::ERROR
+            })?;
+            let certificate = boring::x509::X509::from_pem(&material.certificate_pem)
+                .map_err(|_| SelectCertError::ERROR)?;
+            let key = boring::pkey::PKey::private_key_from_pem(&material.private_key_pem)
+                .map_err(|_| SelectCertError::ERROR)?;
+            hello
+                .ssl_mut()
+                .set_certificate(&certificate)
+                .map_err(|_| SelectCertError::ERROR)?;
+            hello
+                .ssl_mut()
+                .set_private_key(&key)
+                .map_err(|_| SelectCertError::ERROR)
         });
-        Some(builder)
     }
-}
-
-#[derive(Debug)]
-struct RustlsVerificationHook {
-    verifier: Arc<dyn ServerCertVerifier>,
-    server_name: ServerName<'static>,
-}
-
-impl ConnectionHook for RustlsVerificationHook {
-    fn create_custom_ssl_context_builder(
-        &self,
-        _settings: TlsCertificatePaths<'_>,
-    ) -> Option<boring::ssl::SslContextBuilder> {
-        use boring::ssl::{SslAlert, SslContextBuilder, SslMethod, SslVerifyError, SslVerifyMode};
-
-        let mut builder = SslContextBuilder::new(SslMethod::tls_client()).ok()?;
-        let verifier = Arc::clone(&self.verifier);
-        let server_name = self.server_name.clone();
-        builder.set_custom_verify_callback(SslVerifyMode::PEER, move |ssl| {
-            verify_boring_peer_with_rustls(ssl, verifier.as_ref(), &server_name).map_err(|error| {
-                tracing::debug!("HTTP/3 upstream certificate verification failed: {error}");
-                SslVerifyError::Invalid(SslAlert::BAD_CERTIFICATE)
-            })
-        });
-        Some(builder)
-    }
+    driver::transport_config(tls)
 }
 
 fn verify_boring_peer_with_rustls(
@@ -440,36 +344,6 @@ fn to_quiche_headers(headers: &HeaderBlock) -> Vec<Header> {
         .collect()
 }
 
-pub(super) async fn serve_connection<S>(
-    _connection: QuicConnection,
-    mut controller: ServerH3Controller,
-    service: S,
-) -> Result<(), ProtocolError>
-where
-    S: HttpService + Clone + 'static,
-{
-    while let Some(event) = controller.event_receiver_mut().recv().await {
-        match event {
-            ServerH3Event::Headers {
-                incoming_headers, ..
-            } => {
-                let request_service = service.clone();
-                tokio::spawn(async move {
-                    handle_server_request(request_service, incoming_headers).await;
-                });
-            }
-            ServerH3Event::Core(H3Event::ConnectionError(error)) => {
-                return Err(protocol(ErrorKind::ProtocolViolation, error));
-            }
-            ServerH3Event::Core(H3Event::ConnectionShutdown(error)) => {
-                return error.map_or(Ok(()), |error| Err(protocol(ErrorKind::Io, error)));
-            }
-            ServerH3Event::Core(_) => {}
-        }
-    }
-    Ok(())
-}
-
 async fn handle_server_request<S>(mut service: S, incoming: IncomingH3Headers)
 where
     S: HttpService,
@@ -478,7 +352,6 @@ where
         headers,
         send,
         recv,
-        read_fin,
         ..
     } = incoming;
     let head = match decode_request_headers(&headers) {
@@ -490,11 +363,7 @@ where
         }
     };
     let request_method = head.method.clone();
-    let body = if read_fin {
-        ProxyBody::empty()
-    } else {
-        inbound_body(recv)
-    };
+    let body = inbound_body(recv);
     match service.call(ProxyRequest::new(head, body)).await {
         Ok(response) => {
             if let Err(error) = send_response(send, response, &request_method).await {
@@ -524,12 +393,12 @@ async fn send_response(
             ));
         }
         let headers = encode_response_headers(&informational)?;
-        send.send(OutboundFrame::Headers(headers, None))
+        send.send(OutboundFrame::Headers(headers))
             .await
             .map_err(|error| protocol(ErrorKind::Io, error))?;
     }
     let headers = encode_response_headers(&head)?;
-    send.send(OutboundFrame::Headers(headers, None))
+    send.send(OutboundFrame::Headers(headers))
         .await
         .map_err(|error| protocol(ErrorKind::Io, error))?;
     if proxelar_proto::response_body_is_forbidden(request_method, head.status) {
@@ -553,7 +422,7 @@ async fn send_body(
                 .map_err(|error| protocol(ErrorKind::Io, error))?,
             BodyFrame::Trailers(trailers) => {
                 let trailers = encode_trailers(&trailers)?;
-                send.send(OutboundFrame::Trailers(trailers, None))
+                send.send(OutboundFrame::Trailers(trailers))
                     .await
                     .map_err(|error| protocol(ErrorKind::Io, error))?;
                 return Ok(());
@@ -587,15 +456,15 @@ impl Stream for H3BodyStream {
                 if data.is_empty() && fin {
                     Poll::Ready(None)
                 } else {
-                    Poll::Ready(Some(Ok(BodyFrame::Data(data.freeze()))))
+                    Poll::Ready(Some(Ok(BodyFrame::Data(data))))
                 }
             }
-            Poll::Ready(Some(InboundFrame::Datagram(_))) => {
+            Poll::Ready(Some(InboundFrame::Trailers(trailers))) => {
+                Poll::Ready(Some(Ok(BodyFrame::Trailers(trailers))))
+            }
+            Poll::Ready(Some(InboundFrame::Error(error))) => {
                 self.finished = true;
-                Poll::Ready(Some(Err(ProtocolError::new(
-                    ErrorKind::ProtocolViolation,
-                    "HTTP/3 DATAGRAM arrived on an HTTP body stream",
-                ))))
+                Poll::Ready(Some(Err(error)))
             }
             Poll::Ready(None) => {
                 self.finished = true;
@@ -614,7 +483,6 @@ fn inbound_body(recv: InboundFrameStream) -> ProxyBody {
         recv,
         finished: false,
     })
-    .with_trailer_hint(false)
 }
 
 pub(super) fn is_extended_websocket(request: &ProxyRequest) -> bool {
@@ -744,82 +612,24 @@ fn set_header(
         .map_err(|error| malformed(error.to_string()))
 }
 
-type ResponseSender = oneshot::Sender<Result<ProxyResponse, ProtocolError>>;
-
-#[derive(Default)]
-struct ClientState {
-    pending: HashMap<u64, ResponseSender>,
-    streams: HashMap<u64, u64>,
-}
-
 #[derive(Clone)]
 pub(super) struct H3Client {
-    _connection: Arc<QuicConnection>,
-    request_sender: tokio_quiche::http3::driver::ClientRequestSender,
-    state: Arc<Mutex<ClientState>>,
-    next_request_id: Arc<AtomicU64>,
+    requests: mpsc::Sender<driver::ClientRequest>,
 }
 
 impl H3Client {
-    pub(super) fn new(connection: QuicConnection, controller: ClientH3Controller) -> Self {
-        let request_sender = controller.request_sender();
-        let state = Arc::new(Mutex::new(ClientState::default()));
-        tokio::spawn(dispatch_client_events(controller, Arc::clone(&state)));
-        Self {
-            _connection: Arc::new(connection),
-            request_sender,
-            state,
-            next_request_id: Arc::new(AtomicU64::new(1)),
-        }
-    }
-
     pub(super) async fn request(
         &self,
         request: ProxyRequest,
     ) -> Result<ProxyResponse, ProtocolError> {
-        let request_id = self.next_request_id.fetch_add(1, Ordering::Relaxed);
-        let (head, body) = request.into_parts();
-        let headers = encode_request_headers(&head)?;
-        let body_is_empty = body.exact_length() == Some(0) && !body.may_have_trailers();
-        let (body_writer, body_receiver) = if body_is_empty {
-            (None, None)
-        } else {
-            let (writer, receiver) = oneshot::channel();
-            (Some(writer), Some(receiver))
-        };
-        let (response_sender, response_receiver) = oneshot::channel();
-        self.state
-            .lock()
-            .unwrap_or_else(|error| error.into_inner())
-            .pending
-            .insert(request_id, response_sender);
-
-        if let Err(error) = self.request_sender.send(NewClientRequest {
-            request_id,
-            headers,
-            body_writer,
-        }) {
-            self.state
-                .lock()
-                .unwrap_or_else(|poisoned| poisoned.into_inner())
-                .pending
-                .remove(&request_id);
-            return Err(protocol(ErrorKind::Io, error));
-        }
-
-        if let Some(body_receiver) = body_receiver {
-            tokio::spawn(async move {
-                if let Ok(send) = body_receiver.await {
-                    if let Err(error) = send_body(send, body).await {
-                        tracing::debug!("HTTP/3 request body stream failed: {error}");
-                    }
-                }
-            });
-        }
-
-        response_receiver
+        let (response, received) = oneshot::channel();
+        self.requests
+            .send(driver::ClientRequest { request, response })
             .await
-            .map_err(|error| protocol(ErrorKind::Io, error))?
+            .map_err(|_| protocol(ErrorKind::Io, "HTTP/3 driver stopped"))?;
+        received
+            .await
+            .map_err(|_| protocol(ErrorKind::Io, "HTTP/3 connection closed"))?
     }
 }
 
@@ -829,110 +639,6 @@ impl HttpClient for H3Client {
         request: ProxyRequest,
     ) -> BoxFuture<'_, Result<ProxyResponse, ProtocolError>> {
         Box::pin(self.request(request))
-    }
-}
-
-async fn dispatch_client_events(
-    mut controller: ClientH3Controller,
-    state: Arc<Mutex<ClientState>>,
-) {
-    while let Some(event) = controller.event_receiver_mut().recv().await {
-        match event {
-            ClientH3Event::NewOutboundRequest {
-                stream_id,
-                request_id,
-            } => {
-                state
-                    .lock()
-                    .unwrap_or_else(|error| error.into_inner())
-                    .streams
-                    .insert(stream_id, request_id);
-            }
-            ClientH3Event::Core(H3Event::IncomingHeaders(incoming)) => {
-                dispatch_response(&state, incoming);
-            }
-            ClientH3Event::Core(H3Event::ResetStream { stream_id }) => {
-                fail_stream(&state, stream_id, "HTTP/3 stream was reset");
-            }
-            ClientH3Event::Core(H3Event::StreamClosed { stream_id }) => {
-                fail_stream(
-                    &state,
-                    stream_id,
-                    "HTTP/3 stream closed before response headers",
-                );
-            }
-            ClientH3Event::Core(H3Event::ConnectionError(error)) => {
-                fail_all(&state, format!("HTTP/3 connection error: {error}"));
-                return;
-            }
-            ClientH3Event::Core(H3Event::ConnectionShutdown(error)) => {
-                fail_all(
-                    &state,
-                    error.map_or_else(
-                        || "HTTP/3 connection closed".to_owned(),
-                        |error| format!("HTTP/3 connection closed: {error}"),
-                    ),
-                );
-                return;
-            }
-            ClientH3Event::Core(_) => {}
-        }
-    }
-    fail_all(&state, "HTTP/3 driver stopped".to_owned());
-}
-
-fn dispatch_response(state: &Arc<Mutex<ClientState>>, incoming: IncomingH3Headers) {
-    let request_id = {
-        let mut state = state.lock().unwrap_or_else(|error| error.into_inner());
-        state.streams.remove(&incoming.stream_id)
-    };
-    let Some(request_id) = request_id else {
-        return;
-    };
-    let sender = state
-        .lock()
-        .unwrap_or_else(|error| error.into_inner())
-        .pending
-        .remove(&request_id);
-    let Some(sender) = sender else {
-        return;
-    };
-    let result = decode_response_headers(&incoming.headers).map(|head| {
-        let body = if incoming.read_fin {
-            ProxyBody::empty()
-        } else {
-            inbound_body(incoming.recv)
-        };
-        ProxyResponse::new(head, body)
-    });
-    let _ = sender.send(result);
-}
-
-fn fail_stream(state: &Arc<Mutex<ClientState>>, stream_id: u64, message: &'static str) {
-    let sender = {
-        let mut state = state.lock().unwrap_or_else(|error| error.into_inner());
-        state
-            .streams
-            .remove(&stream_id)
-            .and_then(|request_id| state.pending.remove(&request_id))
-    };
-    if let Some(sender) = sender {
-        let _ = sender.send(Err(ProtocolError::new(ErrorKind::Reset, message)));
-    }
-}
-
-fn fail_all(state: &Arc<Mutex<ClientState>>, message: String) {
-    let pending = {
-        let mut state = state.lock().unwrap_or_else(|error| error.into_inner());
-        state.streams.clear();
-        state
-            .pending
-            .drain()
-            .map(|(_, sender)| sender)
-            .collect::<Vec<_>>()
-    };
-    for sender in pending {
-        let _ = sender.send(Err(ProtocolError::new(ErrorKind::Io, message.clone())));
     }
 }
 
@@ -948,6 +654,7 @@ fn malformed(message: impl Into<String>) -> ProtocolError {
 mod tests {
     use super::*;
     use proxelar_proto::{RequestHead, ResponseHead};
+    use std::sync::Mutex;
     use tokio::sync::mpsc;
     use tokio_util::sync::PollSender;
 
@@ -1039,7 +746,7 @@ mod tests {
     }
 
     #[test]
-    fn response_headers_and_qpack_limits_are_strict() {
+    fn response_headers_roundtrip_ordered_duplicates() {
         let mut headers = HeaderBlock::new();
         headers.add("set-cookie", "a=1").unwrap();
         headers.add("set-cookie", "b=2").unwrap();
@@ -1048,12 +755,6 @@ mod tests {
         let decoded = decode_response_headers(&encode_response_headers(&head).unwrap()).unwrap();
         assert_eq!(decoded.version, http::Version::HTTP_3);
         assert_eq!(decoded.headers.get_all("set-cookie").count(), 2);
-
-        let settings = default_http3_settings();
-        assert_eq!(settings.max_header_list_size, Some(64 * 1024));
-        assert_eq!(settings.qpack_max_table_capacity, Some(4 * 1024));
-        assert_eq!(settings.qpack_blocked_streams, Some(16));
-        assert!(settings.enable_extended_connect);
     }
 
     #[tokio::test]
@@ -1074,7 +775,7 @@ mod tests {
         ));
         assert!(matches!(
             receiver.recv().await,
-            Some(OutboundFrame::Trailers(headers, None))
+            Some(OutboundFrame::Trailers(headers))
                 if headers[0].name() == b"x-checksum" && headers[0].value() == b"ok"
         ));
         send_task.await.unwrap().unwrap();
@@ -1102,7 +803,7 @@ mod tests {
 
             assert!(matches!(
                 receiver.recv().await,
-                Some(OutboundFrame::Headers(_, None))
+                Some(OutboundFrame::Headers(_))
             ));
             assert!(matches!(
                 receiver.recv().await,
@@ -1155,3 +856,7 @@ mod tests {
         assert!(body.next().await.is_none());
     }
 }
+
+#[cfg(test)]
+#[path = "tests/http3.rs"]
+mod failure_tests;

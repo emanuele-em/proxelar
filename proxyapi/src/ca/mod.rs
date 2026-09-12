@@ -50,7 +50,7 @@ pub struct Ssl {
     ca_cert_pem: Bytes,
     cache: Cache<Authority, Arc<ServerConfig>>,
     #[cfg(feature = "http3")]
-    h3_cache: Cache<Authority, Arc<H3Certificate>>,
+    h3_cache: moka::sync::Cache<Authority, Arc<H3Certificate>>,
 }
 
 impl Ssl {
@@ -96,7 +96,7 @@ impl Ssl {
                 .time_to_live(Duration::from_secs(CACHE_TTL))
                 .build(),
             #[cfg(feature = "http3")]
-            h3_cache: Cache::builder()
+            h3_cache: moka::sync::Cache::builder()
                 .max_capacity(1_000)
                 .time_to_live(Duration::from_secs(CACHE_TTL))
                 .build(),
@@ -109,6 +109,10 @@ impl Ssl {
 
     fn gen_cert(&self, authority: &Authority) -> Result<GeneratedCertificate, crate::error::Error> {
         let host = authority.host();
+        let host = host
+            .strip_prefix('[')
+            .and_then(|host| host.strip_suffix(']'))
+            .unwrap_or(host);
         let mut params = CertificateParams::new(vec![host.to_owned()])?;
         params.distinguished_name.push(DnType::CommonName, host);
         params.use_authority_key_identifier_extension = true;
@@ -141,11 +145,11 @@ impl Ssl {
     }
 
     #[cfg(feature = "http3")]
-    pub(crate) async fn gen_h3_certificate(
+    pub(crate) fn gen_h3_certificate(
         &self,
         authority: &Authority,
     ) -> Result<Arc<H3Certificate>, crate::error::Error> {
-        if let Some(certificate) = self.h3_cache.get(authority).await {
+        if let Some(certificate) = self.h3_cache.get(authority) {
             return Ok(certificate);
         }
 
@@ -155,8 +159,7 @@ impl Ssl {
             private_key_pem: generated.private_key_pem,
         });
         self.h3_cache
-            .insert(authority.clone(), Arc::clone(&certificate))
-            .await;
+            .insert(authority.clone(), Arc::clone(&certificate));
         Ok(certificate)
     }
 }
@@ -286,8 +289,8 @@ mod tests {
         let ssl = Ssl::load_or_generate(directory.path()).unwrap();
         let authority: Authority = "api.example.test:443".parse().unwrap();
 
-        let first = ssl.gen_h3_certificate(&authority).await.unwrap();
-        let second = ssl.gen_h3_certificate(&authority).await.unwrap();
+        let first = ssl.gen_h3_certificate(&authority).unwrap();
+        let second = ssl.gen_h3_certificate(&authority).unwrap();
 
         assert!(Arc::ptr_eq(&first, &second));
         assert!(first

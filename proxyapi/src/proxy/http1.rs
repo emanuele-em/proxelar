@@ -457,3 +457,7 @@ mod tests {
         assert!(cached.is_none());
     }
 }
+
+#[cfg(test)]
+#[path = "tests/http1.rs"]
+mod protocol_tests;

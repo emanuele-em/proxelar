@@ -695,3 +695,7 @@ mod tests {
         assert!(reverse_listener_plan("quic").is_err());
     }
 }
+
+#[cfg(test)]
+#[path = "tests/support.rs"]
+mod test_support;
