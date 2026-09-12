@@ -7,8 +7,16 @@ use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
 #[tokio::test]
 async fn shared_https_connector_uses_http1_and_normalizes_wire_headers() {
+    for address in ["127.0.0.1:0", "[::1]:0"] {
+        for negotiated in [false, true] {
+            https_connector_roundtrip(address, negotiated).await;
+        }
+    }
+}
+
+async fn https_connector_roundtrip(address: &str, negotiated: bool) {
     let context = Context::new();
-    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let listener = tokio::net::TcpListener::bind(address).await.unwrap();
     let authority: Authority = listener.local_addr().unwrap().to_string().parse().unwrap();
     let config = context.ca.gen_server_config(&authority).await.unwrap();
     let server = tokio::spawn(async move {
@@ -34,7 +42,15 @@ async fn shared_https_connector_uses_http1_and_normalizes_wire_headers() {
             .await
             .unwrap();
     });
-    let upstream = NativeUpstream::shared(context.pool(), None);
+    let upstream = if negotiated {
+        NativeUpstream::negotiated(
+            OutboundConnector::new(None),
+            context.tls.clone(),
+            vec![b"http/1.1".to_vec()],
+        )
+    } else {
+        NativeUpstream::shared(context.pool(), None)
+    };
     let mut req = request(Method::GET, &format!("https://{authority}/path?q=1"));
     req.head.headers.add("cookie", "a=1").unwrap();
     req.head.headers.add("cookie", "b=2").unwrap();
@@ -117,6 +133,65 @@ async fn closed_negotiated_http1_client_is_evicted() {
         .await
         .is_err());
     assert!(upstream.client.lock().await.is_none());
+}
+
+#[tokio::test]
+async fn negotiated_http1_reconnects_after_idle_peer_close() {
+    let context = Context::new();
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let authority: Authority = listener.local_addr().unwrap().to_string().parse().unwrap();
+    let config = context.ca.gen_server_config(&authority).await.unwrap();
+    let (close_tx, mut close_rx) = tokio::sync::mpsc::channel(1);
+    let server = tokio::spawn(async move {
+        for _ in 0..2 {
+            let (stream, _) = listener.accept().await.unwrap();
+            let mut stream = tokio_rustls::TlsAcceptor::from(config.clone())
+                .accept(stream)
+                .await
+                .unwrap();
+            let mut head = Vec::new();
+            while !head.ends_with(b"\r\n\r\n") {
+                head.push(stream.read_u8().await.unwrap());
+            }
+            stream
+                .write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 2\r\n\r\nok")
+                .await
+                .unwrap();
+            stream.flush().await.unwrap();
+            close_rx.recv().await.unwrap();
+        }
+    });
+    let upstream = NativeUpstream::negotiated(
+        OutboundConnector::new(None),
+        context.tls,
+        vec![b"http/1.1".to_vec()],
+    );
+    for _ in 0..2 {
+        let result = tokio::time::timeout(
+            std::time::Duration::from_secs(2),
+            upstream.send(
+                request(Method::GET, &format!("https://{authority}/")),
+                false,
+            ),
+        )
+        .await
+        .unwrap()
+        .unwrap();
+        assert_eq!(result.response.body.collect().await.unwrap().data, "ok");
+        let NativeUpstream::Negotiated(state) = &upstream else {
+            unreachable!()
+        };
+        let cached = state.client.lock().await.as_ref().unwrap().clone();
+        close_tx.send(()).await.unwrap();
+        tokio::time::timeout(std::time::Duration::from_secs(2), async {
+            while !cached.is_closed() {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("idle close was not detected");
+    }
+    server.await.unwrap();
 }
 
 #[tokio::test]
