@@ -742,8 +742,6 @@ fn build_response_lines(response: &proxyapi_models::ProxiedResponse) -> Vec<Line
     lines
 }
 
-/// One `Line` per source line: a `Line` is a single terminal row, so embedded
-/// newlines in the rendered body would otherwise collapse into one wrapped row.
 fn render_body_lines(headers: &http::HeaderMap, body: &[u8]) -> Vec<Line<'static>> {
     let text = match proxyapi::content::content_view(headers, body) {
         Ok(view) => view.text,
@@ -1414,7 +1412,6 @@ mod tests {
         );
         let lines = build_response_lines(&res);
 
-        // A `Line` is one terminal row, so no row may carry an embedded newline.
         assert!(lines.iter().all(|line| !line.to_string().contains('\n')));
 
         let body_rows = lines
