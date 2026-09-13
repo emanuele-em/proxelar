@@ -3,6 +3,14 @@ name: Release
 on:
   push:
     tags: ["v*"]
+  pull_request:
+    paths: [".github/workflows/release.yml"]
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: "Existing release tag to publish (for example, v0.6.0)"
+        required: true
+        type: string
 
 permissions:
   contents: read
@@ -11,6 +19,7 @@ env:
   CARGO_INCREMENTAL: 0
   CARGO_TERM_COLOR: always
   PROXELAR_RUST_VERSION: "1.97.1"
+  RELEASE_TAG: ${{ inputs.tag || (github.event_name == 'pull_request' && format('pr-{0}', github.event.number)) || github.ref_name }}
 
 jobs:
   build:
@@ -22,28 +31,25 @@ jobs:
         include:
           - target: x86_64-unknown-linux-gnu
             runner: ubuntu-latest
-            cross: false
             archive: tar.gz
             deb: true
           - target: aarch64-unknown-linux-gnu
-            runner: ubuntu-latest
-            cross: true
+            runner: ubuntu-24.04-arm
             archive: tar.gz
             deb: true
           - target: x86_64-apple-darwin
             runner: macos-latest
-            cross: false
             archive: tar.gz
           - target: aarch64-apple-darwin
             runner: macos-latest
-            cross: false
             archive: tar.gz
           - target: x86_64-pc-windows-msvc
             runner: windows-latest
-            cross: false
             archive: zip
     steps:
       - uses: actions/checkout@v7
+        with:
+          ref: ${{ inputs.tag && format('refs/tags/{0}', inputs.tag) || github.sha }}
 
       - uses: dtolnay/rust-toolchain@master
         with:
@@ -54,23 +60,20 @@ jobs:
         with:
           key: ${{ matrix.target }}
 
-      - name: Install cross
-        if: matrix.cross
-        run: cargo install cross --locked
+      - name: Install ARM64 build dependencies
+        if: matrix.target == 'aarch64-unknown-linux-gnu'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y cmake clang libclang-dev perl
 
-      - name: Build (cross)
-        if: matrix.cross
-        run: cross build -p proxelar --release --locked --features http3 --target ${{ matrix.target }}
-
-      - name: Build (native)
-        if: "!matrix.cross"
+      - name: Build
         run: cargo build -p proxelar --release --locked --features http3 --target ${{ matrix.target }}
 
       - name: Package (unix)
         if: matrix.archive == 'tar.gz'
         run: |
           cd target/${{ matrix.target }}/release
-          tar czf ../../../proxelar-${{ github.ref_name }}-${{ matrix.target }}.tar.gz proxelar
+          tar czf "../../../proxelar-${RELEASE_TAG}-${{ matrix.target }}.tar.gz" proxelar
           cd ../../..
 
       - name: Install cargo-deb
@@ -79,26 +82,26 @@ jobs:
 
       - name: Package (deb)
         if: matrix.deb
-        # --no-build reuses the binary produced above. --no-strip because the
-        # runner's strip cannot process the cross-built aarch64 ELF.
+        # Reuse the binary produced above and keep it intact in the package.
         run: |
           cargo deb -p proxelar --target ${{ matrix.target }} --no-build --no-strip \
-            --output proxelar-${{ github.ref_name }}-${{ matrix.target }}.deb
+            --output "proxelar-${RELEASE_TAG}-${{ matrix.target }}.deb"
 
       - name: Package (windows)
         if: matrix.archive == 'zip'
         shell: pwsh
         run: |
-          Compress-Archive -Path "target/${{ matrix.target }}/release/proxelar.exe" -DestinationPath "proxelar-${{ github.ref_name }}-${{ matrix.target }}.zip"
+          Compress-Archive -Path "target/${{ matrix.target }}/release/proxelar.exe" -DestinationPath "proxelar-${env:RELEASE_TAG}-${{ matrix.target }}.zip"
 
       - name: Upload artifact
         uses: actions/upload-artifact@v7
         with:
           name: proxelar-${{ matrix.target }}
-          path: proxelar-${{ github.ref_name }}-${{ matrix.target }}.*
+          path: proxelar-${{ env.RELEASE_TAG }}-${{ matrix.target }}.*
 
   release:
     name: Create release
+    if: github.event_name != 'pull_request'
     needs: [build]
     runs-on: ubuntu-latest
     permissions:
@@ -109,13 +112,14 @@ jobs:
     steps:
       - uses: actions/checkout@v7
         with:
+          ref: ${{ inputs.tag && format('refs/tags/{0}', inputs.tag) || github.sha }}
           fetch-depth: 0
 
       - name: Read release notes from changelog
         id: release-notes
         shell: bash
         run: |
-          version="${GITHUB_REF_NAME#v}"
+          version="${RELEASE_TAG#v}"
           notes="$(
             awk -v heading="## [$version]" '
               index($0, heading) == 1 { in_release = 1; next }
@@ -124,7 +128,7 @@ jobs:
             ' CHANGELOG.md
           )"
           if [[ -z "${notes//[[:space:]]/}" ]]; then
-            echo "No CHANGELOG.md section found for $GITHUB_REF_NAME" >&2
+            echo "No CHANGELOG.md section found for $RELEASE_TAG" >&2
             exit 1
           fi
           {
@@ -143,13 +147,13 @@ jobs:
         with:
           path: .
           format: spdx-json
-          output-file: artifacts/proxelar-${{ github.ref_name }}.spdx.json
+          output-file: artifacts/proxelar-${{ env.RELEASE_TAG }}.spdx.json
           upload-artifact: false
           upload-release-assets: false
 
       - name: Generate SHA-256 checksums
         working-directory: artifacts
-        run: sha256sum * > SHA256SUMS
+        run: sha256sum -- * > SHA256SUMS
 
       - name: Attest release artifacts
         uses: actions/attest@v4.2.2
@@ -159,9 +163,10 @@ jobs:
       - name: Create GitHub Release
         uses: softprops/action-gh-release@v3
         with:
+          tag_name: ${{ env.RELEASE_TAG }}
           body: ${{ steps.release-notes.outputs.content }}
           files: artifacts/*
-          prerelease: ${{ contains(github.ref_name, '-') }}
+          prerelease: ${{ contains(inputs.tag || github.ref_name, '-') }}
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
@@ -171,6 +176,8 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v7
+        with:
+          ref: ${{ inputs.tag && format('refs/tags/{0}', inputs.tag) || github.sha }}
 
       - uses: dtolnay/rust-toolchain@master
         with:
@@ -201,13 +208,14 @@ jobs:
     name: Bump Homebrew formula
     needs: release
     runs-on: ubuntu-latest
-    if: "!contains(github.ref_name, '-')"
+    if: "!contains(inputs.tag || github.ref_name, '-')"
     steps:
       - uses: mislav/bump-homebrew-formula-action@v4.2
         with:
+          tag-name: ${{ env.RELEASE_TAG }}
           formula-name: proxelar
           homebrew-tap: Homebrew/homebrew-core
-          download-url: https://github.com/emanuele-em/proxelar/archive/refs/tags/${{ github.ref_name }}.tar.gz
+          download-url: https://github.com/emanuele-em/proxelar/archive/refs/tags/${{ env.RELEASE_TAG }}.tar.gz
           create-pullrequest: true
         env:
           COMMITTER_TOKEN: ${{ secrets.HOMEBREW_CORE_TOKEN }}
@@ -223,6 +231,8 @@ jobs:
       packages: write
     steps:
       - uses: actions/checkout@v7
+        with:
+          ref: ${{ inputs.tag && format('refs/tags/{0}', inputs.tag) || github.sha }}
 
       - uses: docker/setup-buildx-action@v4
 
@@ -239,9 +249,9 @@ jobs:
         with:
           images: ghcr.io/${{ github.repository }}
           tags: |
-            type=semver,pattern={{version}}
-            type=semver,pattern={{major}}.{{minor}}
-            type=raw,value=latest,enable=${{ !contains(github.ref_name, '-') }}
+            type=semver,pattern={{version}},value=${{ env.RELEASE_TAG }}
+            type=semver,pattern={{major}}.{{minor}},value=${{ env.RELEASE_TAG }}
+            type=raw,value=latest,enable=${{ !contains(inputs.tag || github.ref_name, '-') }}
 
       # linux/amd64 only for now: the Dockerfile compiles the workspace from
       # source, and building vendored OpenSSL and Lua for arm64 under QEMU
