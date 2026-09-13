@@ -1,6 +1,6 @@
 [package]
 name = "proxelar-proto"
-version = "0.5.1"
+version = "0.6.0"
 edition = "2021"
 rust-version.workspace = true
 authors = ["Emanuele Micheletti <micheletti.emanuele@hotmail.com>"]
@@ -16,7 +16,7 @@ futures-util = { version = "0.3", default-features = false, features = ["alloc"]
 h2 = "0.4.16"
 http = "1.4"
 httparse = "1.10"
-proxyapi_models = { version = "0.5.1", path = "../proxyapi_models" }
+proxyapi_models = { version = "0.6.0", path = "../proxyapi_models" }
 tokio = { version = "1.52", features = ["io-util", "macros", "rt", "sync", "time"] }
 
 [dev-dependencies]

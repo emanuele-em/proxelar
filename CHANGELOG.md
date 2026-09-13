@@ -7,6 +7,8 @@
 
 ## [Unreleased]
 
+## [0.6.0] - 2026-09-13
+
 ### Added
 
 - Add a native transport-neutral HTTP core with custom HTTP/1, direct HTTP/2, and ordered byte-safe headers across capture, replay, REST, and Lua. ([#182](https://github.com/emanuele-em/proxelar/pull/182) by @emanuele-em)
