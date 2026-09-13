@@ -139,3 +139,15 @@ xh --proxy http:http://127.0.0.1:8080 GET http://127.0.0.1:8080
 ## Reporting Issues
 
 If you're unsure about a change, feel free to [open an issue](https://github.com/emanuele-em/proxelar/issues) first to discuss it.
+
+## Release recovery
+
+Release tags trigger `.github/workflows/release.yml`. If a build fails before
+publication and the workflow needs a fix, merge and validate that fix, then run
+`gh workflow run release.yml --ref main -f tag=vX.Y.Z` with the existing release
+tag. The workflow checks out that tag for builds, release notes, crates, and the
+container; the tag does not need to move. Pull requests changing the release
+workflow build the platform artifacts without publishing them.
+
+If publication has already started, inspect the completed jobs before retrying;
+crates.io versions cannot be published twice.
