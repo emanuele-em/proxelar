@@ -9,7 +9,7 @@
 
 ### Fixed
 
-- Install Git in the container builder for BoringSSL patch setup, test container builds in pull requests, and allow independent container release recovery.
+- Install Git in the container builder for BoringSSL patch setup, test container builds in pull requests, and allow independent container release recovery. ([#188](https://github.com/emanuele-em/proxelar/pull/188) by @emanuele-em)
 
 - Build Linux ARM64 release artifacts on a native runner with a supported libclang, validate release builds in workflow pull requests, and allow release recovery against an existing tag. ([#186](https://github.com/emanuele-em/proxelar/pull/186) by @emanuele-em)
 
