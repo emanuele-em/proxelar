@@ -2720,7 +2720,7 @@ dependencies = [
 
 [[package]]
 name = "proxelar"
-version = "0.5.1"
+version = "0.6.0"
 dependencies = [
  "axum",
  "bytes",
@@ -2747,7 +2747,7 @@ dependencies = [
 
 [[package]]
 name = "proxelar-proto"
-version = "0.5.1"
+version = "0.6.0"
 dependencies = [
  "bytes",
  "futures-core",
@@ -2762,7 +2762,7 @@ dependencies = [
 
 [[package]]
 name = "proxyapi"
-version = "0.5.1"
+version = "0.6.0"
 dependencies = [
  "async-trait",
  "base64 0.23.1",
@@ -2812,7 +2812,7 @@ dependencies = [
 
 [[package]]
 name = "proxyapi_models"
-version = "0.5.1"
+version = "0.6.0"
 dependencies = [
  "base64 0.23.1",
  "bytes",
