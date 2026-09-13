@@ -33,6 +33,13 @@ If you have [`just`](https://github.com/casey/just) installed (`brew install jus
 4. Run the relevant checks from the testing section below
 5. Submit a pull request
 
+Add user-visible changes to `CHANGELOG.md` under `[Unreleased]`. After a merge,
+CI opens a separate pull request adding the original PR reference and author to
+the new entries; it does not push directly to protected `main`. Merge that
+attribution PR before preparing the release notes. The automation explicitly
+dispatches CI for its branch; GitHub may also show an approval prompt for the
+ordinary PR-triggered workflows.
+
 ## Testing
 
 Every patch should have a test story. For bug fixes, add a regression test that fails before the fix. For new proxy behavior, prefer an integration test that starts local client/server sockets and asserts what the client receives and what `ProxyEvent`s are emitted.

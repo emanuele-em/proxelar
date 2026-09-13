@@ -7,6 +7,8 @@ on:
 
 permissions:
   contents: write
+  pull-requests: write
+  actions: write
 
 jobs:
   add-pr-ref:
@@ -15,6 +17,8 @@ jobs:
 
     steps:
       - uses: actions/checkout@v7
+        with:
+          fetch-depth: 2
 
       - name: Get PR info for this commit
         id: pr
@@ -26,10 +30,12 @@ jobs:
             echo "skip=true" >> "$GITHUB_OUTPUT"
             exit 0
           fi
-          echo "skip=false" >> "$GITHUB_OUTPUT"
-          echo "number=$(echo "$PR_JSON" | jq -r '.number')" >> "$GITHUB_OUTPUT"
-          echo "author=$(echo "$PR_JSON" | jq -r '.user.login')" >> "$GITHUB_OUTPUT"
-          echo "url=$(echo "$PR_JSON" | jq -r '.html_url')" >> "$GITHUB_OUTPUT"
+          {
+            echo "skip=false"
+            echo "number=$(echo "$PR_JSON" | jq -r '.number')"
+            echo "author=$(echo "$PR_JSON" | jq -r '.user.login')"
+            echo "url=$(echo "$PR_JSON" | jq -r '.html_url')"
+          } >> "$GITHUB_OUTPUT"
 
       - name: Add PR reference to changelog entries
         if: steps.pr.outputs.skip != 'true'
@@ -38,22 +44,43 @@ jobs:
           PR_AUTHOR: ${{ steps.pr.outputs.author }}
           PR_URL: ${{ steps.pr.outputs.url }}
         run: |
-          # Find bullet points in [Unreleased] that don't already have a PR ref
+          # Attribute only entries introduced by this merge, not older pending entries.
+          git diff --unified=0 "${GITHUB_SHA}^1" "$GITHUB_SHA" -- CHANGELOG.md \
+            | sed -n 's/^+\(- .*\)/\1/p' > added-changelog-entries.txt
           awk -v pr_num="$PR_NUMBER" -v pr_url="$PR_URL" -v pr_author="$PR_AUTHOR" '
+            FILENAME == ARGV[1] { added[$0] = 1; next }
             /^## \[Unreleased\]/ { in_unreleased=1 }
             /^## \[/ && !/\[Unreleased\]/ { in_unreleased=0 }
-            in_unreleased && /^- / && !/\(#[0-9]/ && !/\[#[0-9]/ {
+            in_unreleased && ($0 in added) && /^- / && !/\(#[0-9]/ && !/\[#[0-9]/ {
               sub(/[[:space:]]*$/, "")
               $0 = $0 " ([#" pr_num "](" pr_url ") by @" pr_author ")"
             }
             { print }
-          ' CHANGELOG.md > CHANGELOG.tmp && mv CHANGELOG.tmp CHANGELOG.md
+          ' added-changelog-entries.txt CHANGELOG.md > CHANGELOG.tmp && mv CHANGELOG.tmp CHANGELOG.md
 
-      - name: Commit if changed
+      - name: Open attribution pull request
+        id: attribution
         if: steps.pr.outputs.skip != 'true'
-        run: |
-          git config user.name "github-actions[bot]"
-          git config user.email "github-actions[bot]@users.noreply.github.com"
-          git add CHANGELOG.md
-          git diff --cached --quiet || git commit -m "docs: add PR reference to changelog"
-          git push
+        uses: peter-evans/create-pull-request@v8.1.1
+        with:
+          add-paths: CHANGELOG.md
+          base: main
+          branch: automation/changelog-${{ steps.pr.outputs.number }}
+          commit-message: "docs: attribute changelog entries to #${{ steps.pr.outputs.number }}"
+          title: "docs: attribute changelog entries to #${{ steps.pr.outputs.number }}"
+          body: |
+            Add attribution for changelog entries introduced by #${{ steps.pr.outputs.number }}.
+
+            ## Changelog
+            - [x] Updated the existing entries under `[Unreleased]`.
+
+            ## Tests
+            - [x] Attribution only; no runtime behavior changes.
+
+      - name: Run CI for attribution branch
+        if: steps.attribution.outputs.pull-request-operation == 'created' || steps.attribution.outputs.pull-request-operation == 'updated'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          ATTRIBUTION_BRANCH: ${{ steps.attribution.outputs.pull-request-branch }}
+        # workflow_dispatch runs automatically for GITHUB_TOKEN-created changes.
+        run: gh workflow run autofix.yml --ref "$ATTRIBUTION_BRANCH"
