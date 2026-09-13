@@ -1,0 +1,89 @@
+{
+  "schema_version": 1,
+  "generated_at_unix_ms": 1787113972615,
+  "git_commit": "02cfeb21c88886f605c71ec0f0e3c3e931b04768",
+  "rustc": "rustc 1.97.1 (8bab26f4f 2026-07-14)",
+  "target": "aarch64-apple-darwin",
+  "iterations": 20000,
+  "warmup": 2000,
+  "results": [
+    {
+      "name": "h1_plain_sequential",
+      "protocol": "http1",
+      "tls": false,
+      "concurrency": 1,
+      "response_chunks": 1,
+      "complex_headers": false,
+      "throughput_requests_per_second": 36174.315910857935,
+      "p50_latency_us": 28,
+      "p99_latency_us": 31,
+      "allocations_per_request": 35.00005,
+      "allocated_bytes_per_request": 19106.0
+    },
+    {
+      "name": "h1_tls_sequential",
+      "protocol": "http1",
+      "tls": true,
+      "concurrency": 1,
+      "response_chunks": 1,
+      "complex_headers": false,
+      "throughput_requests_per_second": 35081.05697470612,
+      "p50_latency_us": 28,
+      "p99_latency_us": 32,
+      "allocations_per_request": 41.00005,
+      "allocated_bytes_per_request": 19872.0
+    },
+    {
+      "name": "h1_plain_streaming",
+      "protocol": "http1",
+      "tls": false,
+      "concurrency": 1,
+      "response_chunks": 16,
+      "complex_headers": false,
+      "throughput_requests_per_second": 4586.634531335265,
+      "p50_latency_us": 220,
+      "p99_latency_us": 240,
+      "allocations_per_request": 65.00025,
+      "allocated_bytes_per_request": 20450.0058
+    },
+    {
+      "name": "h1_plain_complex_headers",
+      "protocol": "http1",
+      "tls": false,
+      "concurrency": 1,
+      "response_chunks": 1,
+      "complex_headers": true,
+      "throughput_requests_per_second": 30148.140440161915,
+      "p50_latency_us": 33,
+      "p99_latency_us": 37,
+      "allocations_per_request": 137.0001,
+      "allocated_bytes_per_request": 37466.00145
+    },
+    {
+      "name": "h2_plain_concurrent",
+      "protocol": "http2",
+      "tls": false,
+      "concurrency": 32,
+      "response_chunks": 1,
+      "complex_headers": false,
+      "throughput_requests_per_second": 198799.1695204453,
+      "p50_latency_us": 160,
+      "p99_latency_us": 174,
+      "allocations_per_request": 29.16395,
+      "allocated_bytes_per_request": 8278.7892
+    },
+    {
+      "name": "h2_tls_concurrent",
+      "protocol": "http2",
+      "tls": true,
+      "concurrency": 32,
+      "response_chunks": 1,
+      "complex_headers": false,
+      "throughput_requests_per_second": 196479.49803732208,
+      "p50_latency_us": 162,
+      "p99_latency_us": 174,
+      "allocations_per_request": 29.35145,
+      "allocated_bytes_per_request": 8600.853
+    }
+  ]
+}

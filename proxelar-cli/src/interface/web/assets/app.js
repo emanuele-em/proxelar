@@ -400,15 +400,9 @@
 
         // Populate headers
         headersBody.innerHTML = '';
-        if (request.headers) {
-            for (const [k, v] of Object.entries(request.headers)) {
-                if (Array.isArray(v)) {
-                    v.forEach(function(value) { addHeaderRow(k, value); });
-                } else {
-                    addHeaderRow(k, v);
-                }
-            }
-        }
+        headerEntries(request.headers).forEach(function(field) {
+            addHeaderRow(field.name, field.value, field.value_base64);
+        });
 
         // Populate body
         setBodyEditor(request.body, request._editor);
@@ -418,7 +412,7 @@
         editUri.focus();
     }
 
-    function addHeaderRow(name, value) {
+    function addHeaderRow(name, value, valueBase64) {
         const tr = document.createElement('tr');
 
         const tdName = document.createElement('td');
@@ -430,7 +424,18 @@
         const tdValue = document.createElement('td');
         const inputValue = document.createElement('input');
         inputValue.className = 'header-value';
-        inputValue.value = value;
+        const binaryMarker = valueBase64 ? '<base64:' + valueBase64 + '>' : '';
+        inputValue.value = valueBase64 ? binaryMarker : value;
+        if (valueBase64) {
+            inputValue.dataset.valueBase64 = valueBase64;
+            inputValue.dataset.binaryMarker = binaryMarker;
+            inputValue.addEventListener('input', function() {
+                if (inputValue.value !== inputValue.dataset.binaryMarker) {
+                    delete inputValue.dataset.valueBase64;
+                    delete inputValue.dataset.binaryMarker;
+                }
+            });
+        }
         tdValue.appendChild(inputValue);
 
         const tdBtn = document.createElement('td');
@@ -545,7 +550,12 @@
         headersBody.querySelectorAll('tr').forEach(function(tr) {
             const k = tr.querySelector('.header-name').value.trim();
             const v = tr.querySelector('.header-value').value;
-            if (k) headers.push({ name: k, value: v });
+            if (k) {
+                const valueBase64 = tr.querySelector('.header-value').dataset.valueBase64;
+                headers.push(valueBase64
+                    ? { name: k, value_base64: valueBase64 }
+                    : { name: k, value: v });
+            }
         });
         const body = editedBody();
         if (body === null) return null;
@@ -872,19 +882,15 @@
         let side = activeTab === 'request' ? 'request' : 'response';
         if (activeTab === 'request') {
             content = (r.request.method || '') + ' ' + (r.request.uri || '') + '\n\n';
-            if (r.request.headers) {
-                for (const [key, val] of Object.entries(r.request.headers)) {
-                    content += key + ': ' + val + '\n';
-                }
-            }
+            headerEntries(r.request.headers).forEach(function(field) {
+                content += field.name + ': ' + headerDisplayValue(field) + '\n';
+            });
             body = r.request.body;
         } else {
             content = (r.response.status || '') + '\n\n';
-            if (r.response.headers) {
-                for (const [key, val] of Object.entries(r.response.headers)) {
-                    content += key + ': ' + val + '\n';
-                }
-            }
+            headerEntries(r.response.headers).forEach(function(field) {
+                content += field.name + ': ' + headerDisplayValue(field) + '\n';
+            });
             body = r.response.body;
         }
         detailContent.textContent = content;
@@ -1127,9 +1133,38 @@
 
     function getContentType(headers) {
         if (!headers) return '[no content]';
-        const ct = headers['content-type'];
+        const field = headerEntries(headers).find(function(candidate) {
+            return candidate.name.toLowerCase() === 'content-type';
+        });
+        const ct = field ? field.value : null;
         if (!ct) return '[no content]';
         return ct.split(';')[0].trim();
+    }
+
+    function headerEntries(headers) {
+        if (!headers) return [];
+        if (Array.isArray(headers)) {
+            return headers.map(function(field) {
+                return {
+                    name: String(field.name || ''),
+                    value: typeof field.value === 'string' ? field.value : '',
+                    value_base64: typeof field.value_base64 === 'string' ? field.value_base64 : null,
+                };
+            });
+        }
+        const fields = [];
+        Object.entries(headers).forEach(function(entry) {
+            const name = entry[0];
+            const values = Array.isArray(entry[1]) ? entry[1] : [entry[1]];
+            values.forEach(function(value) {
+                fields.push({ name: name, value: String(value), value_base64: null });
+            });
+        });
+        return fields;
+    }
+
+    function headerDisplayValue(field) {
+        return field.value_base64 ? '<base64:' + field.value_base64 + '>' : field.value;
     }
 
     // ── Semantic category helpers ─────────────────────────────────────────

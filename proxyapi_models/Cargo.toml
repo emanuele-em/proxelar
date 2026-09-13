@@ -18,6 +18,9 @@ serde = { version = "1.0", features = ["derive"] }
 bytes = { version = "1.9", features = ["serde"] }
 http-serde = "2.1"
 http = "1.4"
+base64 = "0.23"
+smallvec = { version = "1.15", features = ["const_new", "serde"] }
 
 [dev-dependencies]
 serde_json = "1.0"
+proptest = "1.9"

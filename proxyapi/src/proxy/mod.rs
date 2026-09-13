@@ -1,5 +1,9 @@
 mod dns;
 pub(crate) mod forward;
+mod http1;
+mod http2;
+#[cfg(feature = "http3")]
+mod http3;
 mod outbound;
 mod raw;
 pub(crate) mod reverse;
@@ -10,21 +14,11 @@ mod wireguard;
 
 use std::{error::Error as StdError, future::Future, net::SocketAddr, path::PathBuf, sync::Arc};
 
-use hyper::body::{Body as HttpBody, Incoming};
-use hyper::header::{
-    HeaderName, CONNECTION, COOKIE, HOST, PROXY_AUTHENTICATE, PROXY_AUTHORIZATION, TE,
-    TRANSFER_ENCODING, UPGRADE,
-};
-use hyper::rt::{Read, Write};
-use hyper::service::Service;
-use hyper::{HeaderMap, Request, Response, Uri};
-use hyper_util::rt::TokioExecutor;
-use hyper_util::server::conn::auto;
+use http::Uri;
 use proxyapi_models::ProxiedRequest;
-use tokio::net::TcpListener;
+use tokio::net::{TcpListener, TcpStream};
 use tokio::sync::mpsc;
 
-use crate::body::ProxyBody;
 use crate::ca::Ssl;
 use crate::error::Error;
 use crate::event::ProxyEvent;
@@ -38,122 +32,76 @@ pub use outbound::UpstreamProxyConfig;
 pub use tls::UpstreamTlsConfig;
 pub use wireguard::WireGuardConfig;
 
-/// Shared HTTP(S) client type used by both forward and reverse proxy.
-pub(crate) type Client = hyper_util::client::legacy::Client<
-    hyper_rustls::HttpsConnector<outbound::OutboundConnector>,
-    ProxyBody,
->;
 pub(crate) type BoxError = Box<dyn StdError + Send + Sync>;
-
-const KEEP_ALIVE: HeaderName = HeaderName::from_static("keep-alive");
-const PROXY_CONNECTION: HeaderName = HeaderName::from_static("proxy-connection");
 
 /// Check if an error is a benign "shutting down" or "connection closed" error.
 ///
-/// hyper emits these when the client closes the connection before the server
-/// finishes its shutdown handshake. They are not actionable.
+/// Protocol engines can report these when the peer closes during shutdown.
 pub(crate) fn is_benign_shutdown_error(e: &dyn std::error::Error) -> bool {
     let msg = e.to_string();
     msg.contains("shutting down") || msg.contains("connection was not closed cleanly")
 }
 
-/// Serve an HTTP connection using Hyper's protocol auto-detection.
-///
-/// The upgrade-capable path is required for HTTP/1 CONNECT, WebSocket upgrades,
-/// and Hyper's HTTP/2 CONNECT upgrade adapter.
-pub(crate) async fn serve_auto_connection<I, S, B>(io: I, service: S) -> Result<(), BoxError>
-where
-    I: Read + Write + Unpin + Send + 'static,
-    S: Service<Request<Incoming>, Response = Response<B>>,
-    S::Future: 'static,
-    S::Error: Into<BoxError>,
-    B: HttpBody + 'static,
-    B::Error: Into<BoxError>,
-    TokioExecutor: auto::HttpServerConnExec<S::Future, B>,
-{
-    let builder = auto::Builder::new(TokioExecutor::new())
-        .preserve_header_case(true)
-        .title_case_headers(true);
-
-    builder.serve_connection_with_upgrades(io, service).await
-}
-
-/// Prepare a captured request for the upstream HTTP/1.1 client.
-///
-/// This centralizes the proxy's existing invariants and strips hop-by-hop
-/// metadata that must not be forwarded across protocol boundaries.
-pub(crate) fn prepare_upstream_request(mut req: Request<ProxyBody>) -> Request<ProxyBody> {
-    strip_hop_by_hop_headers(req.headers_mut());
-    req.headers_mut().remove(HOST);
-    req.headers_mut().remove(PROXY_AUTHORIZATION);
-    req.headers_mut().remove(TE);
-    join_cookie_headers(req.headers_mut());
-    *req.version_mut() = hyper::Version::HTTP_11;
-    req
-}
-
-/// Prepare an HTTP/1.1 protocol-upgrade request for the upstream client.
-///
-/// Upgrade handshakes intentionally keep `Connection` and `Upgrade`; stripping
-/// them would turn WebSocket forwarding into an ordinary HTTP request.
-pub(crate) fn prepare_upstream_upgrade_request(mut req: Request<ProxyBody>) -> Request<ProxyBody> {
-    req.headers_mut().remove(HOST);
-    req.headers_mut().remove(PROXY_AUTHORIZATION);
-    join_cookie_headers(req.headers_mut());
-    *req.version_mut() = hyper::Version::HTTP_11;
-    req
-}
-
-/// Remove response headers that are illegal on HTTP/2 connections.
-fn sanitize_response_for_http2<B>(res: &mut Response<B>) {
-    strip_hop_by_hop_headers(res.headers_mut());
-    res.headers_mut().remove(PROXY_AUTHENTICATE);
-    res.headers_mut().remove(TE);
-}
-
-pub(crate) fn sanitize_response_for_client<B>(res: &mut Response<B>, version: hyper::Version) {
-    if version == hyper::Version::HTTP_2 {
-        sanitize_response_for_http2(res);
-    }
-}
-
-fn join_cookie_headers(headers: &mut HeaderMap) {
-    if let http::header::Entry::Occupied(mut cookies) = headers.entry(COOKIE) {
-        let joined_cookies = bstr::join(b"; ", cookies.iter());
-        match joined_cookies.try_into() {
-            Ok(value) => {
-                cookies.insert(value);
-            }
-            Err(e) => {
-                tracing::warn!("Failed to join cookies, removing header: {e}");
-                cookies.remove();
-            }
+/// Normalize a transport-neutral request for the native HTTP/1 client. The
+/// client adds the destination Host field only at serialization time.
+pub(crate) fn prepare_upstream_protocol_request(
+    req: &mut crate::ProxyRequest,
+    preserve_upgrade: bool,
+) -> Result<(), proxelar_proto::ProtocolError> {
+    if !preserve_upgrade {
+        let connection_tokens = req
+            .head
+            .headers
+            .get_all("connection")
+            .flat_map(|value| value.split(|byte| *byte == b','))
+            .map(trim_header_ows)
+            .filter(|token| !token.is_empty())
+            .map(<[u8]>::to_vec)
+            .collect::<Vec<_>>();
+        req.head.headers.remove("connection");
+        for token in connection_tokens {
+            req.head.headers.remove(token);
+        }
+        for name in [
+            b"keep-alive".as_slice(),
+            b"proxy-connection".as_slice(),
+            b"transfer-encoding".as_slice(),
+            b"upgrade".as_slice(),
+        ] {
+            req.head.headers.remove(name);
         }
     }
-}
+    req.head.headers.remove("host");
+    req.head.headers.remove("proxy-authorization");
+    req.head.headers.remove("te");
 
-fn strip_hop_by_hop_headers(headers: &mut HeaderMap) {
-    let connection_tokens = connection_tokens(headers);
-    headers.remove(CONNECTION);
-
-    for name in connection_tokens {
-        headers.remove(name);
+    let cookies = req
+        .head
+        .headers
+        .get_all("cookie")
+        .map(<[u8]>::to_vec)
+        .collect::<Vec<_>>();
+    if !cookies.is_empty() {
+        let joined = bstr::join(b"; ", cookies);
+        req.head.headers.set("cookie", joined).map_err(|error| {
+            proxelar_proto::ProtocolError::new(
+                proxelar_proto::ErrorKind::MalformedMessage,
+                error.to_string(),
+            )
+        })?;
     }
-
-    headers.remove(KEEP_ALIVE);
-    headers.remove(PROXY_CONNECTION);
-    headers.remove(TRANSFER_ENCODING);
-    headers.remove(UPGRADE);
+    req.head.version = http::Version::HTTP_11;
+    Ok(())
 }
 
-fn connection_tokens(headers: &HeaderMap) -> Vec<HeaderName> {
-    headers
-        .get_all(CONNECTION)
-        .iter()
-        .filter_map(|value| value.to_str().ok())
-        .flat_map(|value| value.split(','))
-        .filter_map(|token| HeaderName::from_bytes(token.trim().as_bytes()).ok())
-        .collect()
+fn trim_header_ows(mut value: &[u8]) -> &[u8] {
+    while matches!(value.first(), Some(b' ' | b'\t')) {
+        value = &value[1..];
+    }
+    while matches!(value.last(), Some(b' ' | b'\t')) {
+        value = &value[..value.len() - 1];
+    }
+    value
 }
 
 /// Configuration for creating a [`Proxy`].
@@ -277,16 +225,12 @@ impl Proxy {
         }
 
         let tls_config = Arc::new(tls::build_client_config(&self.config.upstream_tls)?);
-        let outbound = outbound::OutboundConnector::new(self.upstream_proxy.as_ref())?;
-        let https = hyper_rustls::HttpsConnectorBuilder::new()
-            .with_tls_config((*tls_config).clone())
-            .https_or_http()
-            .enable_http1()
-            .wrap_connector(outbound.clone());
-
-        let client = Arc::new(
-            hyper_util::client::legacy::Client::builder(TokioExecutor::new()).build(https),
-        );
+        let outbound = outbound::OutboundConnector::new(self.upstream_proxy.as_ref());
+        let native_route = self
+            .upstream_proxy
+            .as_ref()
+            .map(|proxy| proxy.destination().to_string());
+        let native_pool = Arc::new(http1::new_pool(outbound.clone(), Arc::clone(&tls_config)));
         let mut replay_rx = self.config.replay_rx;
 
         if let ProxyMode::WireGuard { config } = &self.config.mode {
@@ -307,7 +251,9 @@ impl Proxy {
                 config.clone(),
                 handler,
                 ca,
-                client,
+                native_pool,
+                native_route,
+                self.config.upstream_tls.clone(),
                 self.config.event_tx.clone(),
                 replay_rx,
                 shutdown,
@@ -316,14 +262,77 @@ impl Proxy {
             .map_err(Error::Io);
         }
 
-        let listener = TcpListener::bind(self.config.addr).await?;
-        tracing::info!("Proxy listening on {}", self.config.addr);
+        let reverse_scheme = match &self.config.mode {
+            ProxyMode::Reverse { target } => target.scheme_str(),
+            _ => None,
+        };
+        let listener_plan = match reverse_scheme {
+            Some(scheme) => reverse_listener_plan(scheme)?,
+            None => ReverseListenerPlan::tcp_only(),
+        };
+        #[cfg(feature = "http3")]
+        if listener_plan.http3 && self.upstream_proxy.is_some() {
+            return Err(Error::Other(
+                "reverse HTTP/3 cannot use a TCP-only upstream proxy".to_owned(),
+            ));
+        }
+
+        let listener = if listener_plan.tcp {
+            Some(TcpListener::bind(self.config.addr).await?)
+        } else {
+            None
+        };
+        let listen_addr = match listener.as_ref() {
+            Some(listener) => {
+                let address = listener.local_addr()?;
+                tracing::info!("Proxy listening on {address}");
+                address
+            }
+            None => self.config.addr,
+        };
+
+        #[cfg(feature = "http3")]
+        let mut h3_server = if listener_plan.http3 {
+            let ProxyMode::Reverse { target } = &self.config.mode else {
+                unreachable!("HTTP/3 listener is reverse-only")
+            };
+            let mut handler = CapturingHandler::new(self.config.event_tx.clone())
+                .with_body_capture_limit(self.config.body_capture_limit);
+            if let Some(ref intercept) = self.config.intercept {
+                handler = handler.with_intercept(Arc::clone(intercept));
+            }
+            if let Some(ref rules) = self.route_rules {
+                handler = handler.with_route_rules(Arc::clone(rules));
+            }
+            #[cfg(feature = "scripting")]
+            if let Some(ref engine) = script_engine {
+                handler = handler.with_script_engine(Arc::clone(engine));
+            }
+            let address = if listener_plan.tcp {
+                listen_addr
+            } else {
+                self.config.addr
+            };
+            let server = reverse::ReverseH3Server::bind(
+                address,
+                target.clone(),
+                handler,
+                Arc::clone(&ca),
+                &self.config.upstream_tls,
+            )
+            .await?;
+            Some(Box::pin(server.serve()) as H3ServerFuture)
+        } else {
+            None
+        };
+        #[cfg(not(feature = "http3"))]
+        let mut h3_server: Option<()> = None;
 
         tokio::pin!(shutdown);
 
         loop {
             tokio::select! {
-                result = listener.accept() => {
+                result = accept_tcp(listener.as_ref()) => {
                     let (stream, remote_addr) = match result {
                         Ok(conn) => conn,
                         Err(e) => {
@@ -344,21 +353,37 @@ impl Proxy {
                         handler = handler.with_script_engine(Arc::clone(engine));
                     }
                     let ca = Arc::clone(&ca);
-                    let client = Arc::clone(&client);
                     let outbound = outbound.clone();
                     let upstream_tls = Arc::clone(&tls_config);
+                    let native_pool = Arc::clone(&native_pool);
+                    let native_route = native_route.clone();
 
                     match &self.config.mode {
                         ProxyMode::Forward => {
-                            let listen_addr = self.config.addr;
                             tokio::spawn(forward::handle_connection(
-                                stream, remote_addr, handler, ca, client, listen_addr,
+                                stream,
+                                remote_addr,
+                                handler,
+                                ca,
+                                native_pool,
+                                native_route,
+                                listen_addr,
                             ));
                         }
                         ProxyMode::Reverse { target } => {
-                            let target = target.clone();
+                            let config = reverse::ReverseConnectionConfig::new(
+                                target.clone(),
+                                ca,
+                                native_pool,
+                                native_route,
+                                outbound,
+                                upstream_tls,
+                            );
                             tokio::spawn(reverse::handle_connection(
-                                stream, remote_addr, handler, target, client,
+                                stream,
+                                remote_addr,
+                                handler,
+                                config,
                             ));
                         }
                         ProxyMode::Socks5 => {
@@ -379,6 +404,9 @@ impl Proxy {
                         }
                     }
                 }
+                result = poll_h3_server(&mut h3_server) => {
+                    return result;
+                }
                 Some(req) = recv_replay(&mut replay_rx) => {
                     let mut handler = CapturingHandler::new(self.config.event_tx.clone())
                         .with_body_capture_limit(self.config.body_capture_limit);
@@ -392,7 +420,12 @@ impl Proxy {
                     if let Some(ref engine) = script_engine {
                         handler = handler.with_script_engine(Arc::clone(engine));
                     }
-                    tokio::spawn(forward::handle_replay(req, handler, Arc::clone(&client)));
+                    tokio::spawn(forward::handle_replay(
+                        req,
+                        handler,
+                        Arc::clone(&native_pool),
+                        native_route.clone(),
+                    ));
                 }
                 () = &mut shutdown => {
                     tracing::info!("Proxy shutting down");
@@ -403,6 +436,75 @@ impl Proxy {
 
         Ok(())
     }
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+struct ReverseListenerPlan {
+    tcp: bool,
+    #[cfg(feature = "http3")]
+    http3: bool,
+}
+
+impl ReverseListenerPlan {
+    const fn tcp_only() -> Self {
+        Self {
+            tcp: true,
+            #[cfg(feature = "http3")]
+            http3: false,
+        }
+    }
+}
+
+fn reverse_listener_plan(scheme: &str) -> Result<ReverseListenerPlan, Error> {
+    match scheme {
+        "http" => Ok(ReverseListenerPlan::tcp_only()),
+        "https" => Ok(ReverseListenerPlan {
+            tcp: true,
+            #[cfg(feature = "http3")]
+            http3: true,
+        }),
+        "http3" => {
+            #[cfg(feature = "http3")]
+            {
+                Ok(ReverseListenerPlan {
+                    tcp: false,
+                    http3: true,
+                })
+            }
+            #[cfg(not(feature = "http3"))]
+            {
+                Err(Error::Other(
+                    "reverse:http3 requires the proxyapi/http3 feature".to_owned(),
+                ))
+            }
+        }
+        _ => Err(Error::Other(
+            "reverse target scheme must be http, https, or http3".to_owned(),
+        )),
+    }
+}
+
+async fn accept_tcp(listener: Option<&TcpListener>) -> std::io::Result<(TcpStream, SocketAddr)> {
+    match listener {
+        Some(listener) => listener.accept().await,
+        None => std::future::pending().await,
+    }
+}
+
+#[cfg(feature = "http3")]
+type H3ServerFuture = std::pin::Pin<Box<dyn Future<Output = Result<(), Error>> + Send + 'static>>;
+
+#[cfg(feature = "http3")]
+async fn poll_h3_server(server: &mut Option<H3ServerFuture>) -> Result<(), Error> {
+    match server {
+        Some(server) => server.await,
+        None => std::future::pending().await,
+    }
+}
+
+#[cfg(not(feature = "http3"))]
+async fn poll_h3_server(_server: &mut Option<()>) -> Result<(), Error> {
+    std::future::pending().await
 }
 
 /// Receive the next replay request, or wait forever when no channel is present.
@@ -421,7 +523,7 @@ mod tests {
     use super::*;
     use crate::handler::DEFAULT_BODY_CAPTURE_LIMIT;
     use bytes::Bytes;
-    use http::{HeaderMap, Method, Version};
+    use http::{Method, Version};
     use std::io;
 
     #[test]
@@ -466,7 +568,7 @@ mod tests {
             Method::GET,
             "http://example.test/replay".parse().unwrap(),
             Version::HTTP_11,
-            HeaderMap::new(),
+            proxyapi_models::HeaderBlock::new(),
             Bytes::new(),
             1,
         );
@@ -488,101 +590,112 @@ mod tests {
     }
 
     #[test]
-    fn prepare_upstream_request_preserves_invariants_and_strips_hop_by_hop_headers() {
-        let req = Request::builder()
-            .method(Method::GET)
-            .uri("http://upstream.test/path")
-            .version(Version::HTTP_2)
-            .header(HOST, "wrong-host.test")
-            .header(COOKIE, "a=1")
-            .header(COOKIE, "b=2")
-            .header(CONNECTION, "x-remove, keep-alive")
-            .header("x-remove", "yes")
-            .header(KEEP_ALIVE, "timeout=5")
-            .header(PROXY_CONNECTION, "keep-alive")
-            .header(TRANSFER_ENCODING, "chunked")
-            .header(UPGRADE, "websocket")
-            .header(PROXY_AUTHORIZATION, "Basic secret")
-            .header(TE, "trailers")
-            .body(crate::body::empty())
-            .unwrap();
-
-        let req = prepare_upstream_request(req);
-
-        assert_eq!(req.version(), Version::HTTP_11);
-        assert!(!req.headers().contains_key(HOST));
-        assert!(!req.headers().contains_key(CONNECTION));
-        assert!(!req.headers().contains_key("x-remove"));
-        assert!(!req.headers().contains_key(KEEP_ALIVE));
-        assert!(!req.headers().contains_key(PROXY_CONNECTION));
-        assert!(!req.headers().contains_key(TRANSFER_ENCODING));
-        assert!(!req.headers().contains_key(UPGRADE));
-        assert!(!req.headers().contains_key(PROXY_AUTHORIZATION));
-        assert!(!req.headers().contains_key(TE));
-        assert_eq!(
-            req.headers().get_all(COOKIE).iter().count(),
-            1,
-            "duplicate Cookie headers should be collapsed"
+    fn protocol_normalizer_preserves_ordered_header_invariants() {
+        let mut headers = proxyapi_models::HeaderBlock::new();
+        for (name, value) in [
+            ("Host", "wrong-host.test"),
+            ("Cookie", "a=1"),
+            ("X-Keep", "first"),
+            ("cookie", "b=2"),
+            ("Connection", "x-remove, keep-alive"),
+            ("X-Remove", "yes"),
+            ("Keep-Alive", "timeout=5"),
+            ("Transfer-Encoding", "chunked"),
+            ("Upgrade", "websocket"),
+        ] {
+            headers.add(name, value).unwrap();
+        }
+        let mut request = crate::ProxyRequest::new(
+            crate::RequestHead::new(
+                Method::GET,
+                "http://upstream.test/path".parse().unwrap(),
+                Version::HTTP_2,
+                headers,
+            ),
+            crate::ProxyBody::empty(),
         );
-        assert_eq!(req.headers()[COOKIE], "a=1; b=2");
+
+        prepare_upstream_protocol_request(&mut request, false).unwrap();
+
+        assert_eq!(request.head.version, Version::HTTP_11);
+        for removed in [
+            "host",
+            "connection",
+            "x-remove",
+            "keep-alive",
+            "transfer-encoding",
+            "upgrade",
+        ] {
+            assert!(!request.head.headers.contains_key(removed), "{removed}");
+        }
+        assert_eq!(
+            request.head.headers.get("cookie"),
+            Some(b"a=1; b=2".as_slice())
+        );
+        assert_eq!(
+            request.head.headers.get("x-keep"),
+            Some(b"first".as_slice())
+        );
     }
 
     #[test]
     fn prepare_upstream_upgrade_request_preserves_upgrade_headers() {
-        let req = Request::builder()
-            .method(Method::GET)
-            .uri("http://upstream.test/ws")
-            .version(Version::HTTP_2)
-            .header(HOST, "wrong-host.test")
-            .header(CONNECTION, "Upgrade")
-            .header(UPGRADE, "websocket")
-            .header(PROXY_AUTHORIZATION, "Basic secret")
-            .body(crate::body::empty())
-            .unwrap();
+        let mut headers = proxyapi_models::HeaderBlock::new();
+        for (name, value) in [
+            ("Host", "wrong-host.test"),
+            ("Connection", "Upgrade"),
+            ("Upgrade", "websocket"),
+            ("Proxy-Authorization", "Basic secret"),
+        ] {
+            headers.add(name, value).unwrap();
+        }
+        let mut request = crate::ProxyRequest::new(
+            crate::RequestHead::new(
+                Method::GET,
+                "http://upstream.test/ws".parse().unwrap(),
+                Version::HTTP_2,
+                headers,
+            ),
+            crate::ProxyBody::empty(),
+        );
 
-        let req = prepare_upstream_upgrade_request(req);
+        prepare_upstream_protocol_request(&mut request, true).unwrap();
 
-        assert_eq!(req.version(), Version::HTTP_11);
-        assert!(!req.headers().contains_key(HOST));
-        assert!(!req.headers().contains_key(PROXY_AUTHORIZATION));
-        assert_eq!(req.headers()[CONNECTION], "Upgrade");
-        assert_eq!(req.headers()[UPGRADE], "websocket");
+        assert_eq!(request.head.version, Version::HTTP_11);
+        assert!(!request.head.headers.contains_key("host"));
+        assert!(!request.head.headers.contains_key("proxy-authorization"));
+        assert_eq!(
+            request.head.headers.get("connection"),
+            Some(b"Upgrade".as_slice())
+        );
+        assert_eq!(
+            request.head.headers.get("upgrade"),
+            Some(b"websocket".as_slice())
+        );
     }
 
     #[test]
-    fn sanitize_response_for_http2_strips_connection_metadata() {
-        let mut response = Response::builder()
-            .status(http::StatusCode::OK)
-            .header(CONNECTION, "x-remove, upgrade")
-            .header("x-remove", "yes")
-            .header(KEEP_ALIVE, "timeout=5")
-            .header(PROXY_CONNECTION, "keep-alive")
-            .header(TRANSFER_ENCODING, "chunked")
-            .header(UPGRADE, "websocket")
-            .header(PROXY_AUTHENTICATE, "Basic")
-            .header(TE, "trailers")
-            .body(crate::body::empty())
-            .unwrap();
+    fn reverse_listener_selection_is_scheme_driven() {
+        assert!(reverse_listener_plan("http").unwrap().tcp);
 
-        sanitize_response_for_http2(&mut response);
+        let https = reverse_listener_plan("https").unwrap();
+        assert!(https.tcp);
+        #[cfg(feature = "http3")]
+        assert!(https.http3);
 
-        assert!(!response.headers().contains_key(CONNECTION));
-        assert!(!response.headers().contains_key("x-remove"));
-        assert!(!response.headers().contains_key(KEEP_ALIVE));
-        assert!(!response.headers().contains_key(PROXY_CONNECTION));
-        assert!(!response.headers().contains_key(TRANSFER_ENCODING));
-        assert!(!response.headers().contains_key(UPGRADE));
-        assert!(!response.headers().contains_key(PROXY_AUTHENTICATE));
-        assert!(!response.headers().contains_key(TE));
-    }
+        #[cfg(feature = "http3")]
+        {
+            let http3 = reverse_listener_plan("http3").unwrap();
+            assert!(!http3.tcp);
+            assert!(http3.http3);
+        }
+        #[cfg(not(feature = "http3"))]
+        assert!(reverse_listener_plan("http3").is_err());
 
-    #[test]
-    fn connection_tokens_ignores_invalid_header_names() {
-        let mut headers = HeaderMap::new();
-        headers.insert(CONNECTION, "x-valid, bad header".parse().unwrap());
-
-        let tokens = connection_tokens(&headers);
-
-        assert_eq!(tokens, vec![HeaderName::from_static("x-valid")]);
+        assert!(reverse_listener_plan("quic").is_err());
     }
 }
+
+#[cfg(test)]
+#[path = "tests/support.rs"]
+mod test_support;

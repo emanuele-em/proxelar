@@ -1,18 +1,21 @@
 use std::future::Future;
+use std::net::IpAddr;
 use std::pin::Pin;
 use std::str::FromStr;
 use std::task::{Context, Poll};
 
 use base64::Engine as _;
 use http::uri::Authority;
-use http::{HeaderValue, Uri};
-use hyper_util::client::legacy::connect::proxy::{SocksV5, Tunnel};
-use hyper_util::client::legacy::connect::HttpConnector;
-use hyper_util::rt::TokioIo;
+use http::Uri;
+use tokio::io::{AsyncReadExt as _, AsyncWriteExt as _};
 use tokio::net::TcpStream;
 use tower_service::Service;
 
+use crate::rewind::Rewind;
+
 use super::BoxError;
+
+const MAX_CONNECT_RESPONSE_HEAD: usize = 16 * 1024;
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 enum ProxyKind {
@@ -77,71 +80,226 @@ impl FromStr for UpstreamProxyConfig {
 
 #[derive(Clone)]
 pub(crate) enum OutboundConnector {
-    Direct(HttpConnector),
-    Http(Tunnel<HttpConnector>),
-    Socks5(SocksV5<HttpConnector>),
+    Direct,
+    Http(UpstreamProxyConfig),
+    Socks5(UpstreamProxyConfig),
 }
 
 impl OutboundConnector {
-    pub(crate) fn new(proxy: Option<&UpstreamProxyConfig>) -> Result<Self, crate::Error> {
-        let mut connector = HttpConnector::new();
-        connector.enforce_http(false);
+    pub(crate) fn new(proxy: Option<&UpstreamProxyConfig>) -> Self {
         match proxy {
-            None => Ok(Self::Direct(connector)),
-            Some(config) if config.kind == ProxyKind::Http => {
-                let mut tunnel = Tunnel::new(config.destination.clone(), connector);
-                if let Some(username) = &config.username {
-                    let password = config.password.as_deref().unwrap_or("");
-                    let encoded = base64::engine::general_purpose::STANDARD
-                        .encode(format!("{username}:{password}"));
-                    let auth = HeaderValue::from_str(&format!("Basic {encoded}"))?;
-                    tunnel = tunnel.with_auth(auth);
-                }
-                Ok(Self::Http(tunnel))
-            }
-            Some(config) => {
-                let mut socks = SocksV5::new(config.destination.clone(), connector);
-                if let Some(username) = &config.username {
-                    socks = socks.with_auth(
-                        username.clone(),
-                        config.password.clone().unwrap_or_default(),
-                    );
-                }
-                Ok(Self::Socks5(socks))
-            }
+            None => Self::Direct,
+            Some(config) if config.kind == ProxyKind::Http => Self::Http(config.clone()),
+            Some(config) => Self::Socks5(config.clone()),
         }
     }
 }
 
 impl Service<Uri> for OutboundConnector {
-    type Response = TokioIo<TcpStream>;
+    type Response = Rewind<TcpStream>;
     type Error = BoxError;
     type Future = Pin<Box<dyn Future<Output = Result<Self::Response, Self::Error>> + Send>>;
 
-    fn poll_ready(&mut self, context: &mut Context<'_>) -> Poll<Result<(), Self::Error>> {
-        match self {
-            Self::Direct(connector) => connector.poll_ready(context).map_err(box_error),
-            Self::Http(connector) => connector.poll_ready(context).map_err(box_error),
-            Self::Socks5(connector) => connector.poll_ready(context).map_err(box_error),
-        }
+    fn poll_ready(&mut self, _context: &mut Context<'_>) -> Poll<Result<(), Self::Error>> {
+        Poll::Ready(Ok(()))
     }
 
     fn call(&mut self, destination: Uri) -> Self::Future {
-        match self {
-            Self::Direct(connector) => {
-                let future = connector.call(destination);
-                Box::pin(async move { future.await.map_err(box_error) })
+        let connector = self.clone();
+        Box::pin(async move {
+            let destination = with_default_port(destination);
+            let authority = destination
+                .authority()
+                .cloned()
+                .ok_or_else(|| invalid_input("outbound destination has no authority"))?;
+            match connector {
+                Self::Direct => {
+                    let stream = TcpStream::connect(authority.as_str()).await?;
+                    Ok(Rewind::new(stream))
+                }
+                Self::Http(proxy) => connect_http_proxy(proxy, authority).await,
+                Self::Socks5(proxy) => connect_socks5_proxy(proxy, authority).await,
             }
-            Self::Http(connector) => {
-                let future = connector.call(with_default_port(destination));
-                Box::pin(async move { future.await.map_err(box_error) })
-            }
-            Self::Socks5(connector) => {
-                let future = connector.call(with_default_port(destination));
-                Box::pin(async move { future.await.map_err(box_error) })
-            }
+        })
+    }
+}
+
+async fn connect_http_proxy(
+    proxy: UpstreamProxyConfig,
+    destination: Authority,
+) -> Result<Rewind<TcpStream>, BoxError> {
+    let proxy_authority = proxy
+        .destination
+        .authority()
+        .ok_or_else(|| invalid_input("HTTP proxy has no authority"))?;
+    let mut stream = TcpStream::connect(proxy_authority.as_str()).await?;
+    let mut request = format!(
+        "CONNECT {destination} HTTP/1.1\r\nHost: {destination}\r\nProxy-Connection: keep-alive\r\n"
+    );
+    if let Some(username) = proxy.username {
+        let password = proxy.password.as_deref().unwrap_or("");
+        let encoded =
+            base64::engine::general_purpose::STANDARD.encode(format!("{username}:{password}"));
+        request.push_str(&format!("Proxy-Authorization: Basic {encoded}\r\n"));
+    }
+    request.push_str("\r\n");
+    stream.write_all(request.as_bytes()).await?;
+    stream.flush().await?;
+
+    let mut response = Vec::with_capacity(1024);
+    loop {
+        if response.len() >= MAX_CONNECT_RESPONSE_HEAD {
+            return Err(invalid_data(
+                "HTTP proxy CONNECT response head is too large",
+            ));
+        }
+        let mut buffer = [0_u8; 1024];
+        let read = stream.read(&mut buffer).await?;
+        if read == 0 {
+            return Err(invalid_data("HTTP proxy closed during CONNECT response"));
+        }
+        response.extend_from_slice(&buffer[..read]);
+        if let Some(end) = response.windows(4).position(|window| window == b"\r\n\r\n") {
+            let consumed = end + 4;
+            validate_connect_response(&response[..consumed])?;
+            return Ok(Rewind::new_buffered(
+                stream,
+                response[consumed..].to_vec().into(),
+            ));
         }
     }
+}
+
+fn validate_connect_response(response: &[u8]) -> Result<(), BoxError> {
+    let line_end = response
+        .windows(2)
+        .position(|window| window == b"\r\n")
+        .ok_or_else(|| invalid_data("HTTP proxy response has no status line"))?;
+    let line = std::str::from_utf8(&response[..line_end])
+        .map_err(|_| invalid_data("HTTP proxy response status is not ASCII"))?;
+    let mut parts = line.split_whitespace();
+    let version = parts.next().unwrap_or_default();
+    let status = parts.next().unwrap_or_default();
+    if !matches!(version, "HTTP/1.0" | "HTTP/1.1") || status != "200" {
+        return Err(invalid_data(format!(
+            "HTTP proxy CONNECT failed with {line}"
+        )));
+    }
+    Ok(())
+}
+
+async fn connect_socks5_proxy(
+    proxy: UpstreamProxyConfig,
+    destination: Authority,
+) -> Result<Rewind<TcpStream>, BoxError> {
+    let proxy_authority = proxy
+        .destination
+        .authority()
+        .ok_or_else(|| invalid_input("SOCKS5 proxy has no authority"))?;
+    let mut stream = TcpStream::connect(proxy_authority.as_str()).await?;
+    let authenticated = proxy.username.is_some();
+    if authenticated {
+        stream.write_all(&[5, 2, 0, 2]).await?;
+    } else {
+        stream.write_all(&[5, 1, 0]).await?;
+    }
+    let mut selection = [0_u8; 2];
+    stream.read_exact(&mut selection).await?;
+    if selection[0] != 5 || selection[1] == 0xff {
+        return Err(invalid_data("SOCKS5 proxy rejected authentication methods"));
+    }
+    match selection[1] {
+        0 => {}
+        2 if authenticated => authenticate_socks5(&mut stream, &proxy).await?,
+        _ => return Err(invalid_data("SOCKS5 proxy selected an unsupported method")),
+    }
+
+    let port = destination
+        .port_u16()
+        .ok_or_else(|| invalid_input("SOCKS5 destination has no port"))?;
+    let mut request = vec![5, 1, 0];
+    let host = destination.host();
+    let host = host
+        .strip_prefix('[')
+        .and_then(|host| host.strip_suffix(']'))
+        .unwrap_or(host);
+    if let Ok(address) = host.parse::<IpAddr>() {
+        match address {
+            IpAddr::V4(address) => {
+                request.push(1);
+                request.extend_from_slice(&address.octets());
+            }
+            IpAddr::V6(address) => {
+                request.push(4);
+                request.extend_from_slice(&address.octets());
+            }
+        }
+    } else {
+        let host = host.as_bytes();
+        let length = u8::try_from(host.len())
+            .map_err(|_| invalid_input("SOCKS5 destination name exceeds 255 bytes"))?;
+        request.extend_from_slice(&[3, length]);
+        request.extend_from_slice(host);
+    }
+    request.extend_from_slice(&port.to_be_bytes());
+    stream.write_all(&request).await?;
+
+    let mut response = [0_u8; 4];
+    stream.read_exact(&mut response).await?;
+    if response[0] != 5 || response[1] != 0 || response[2] != 0 {
+        return Err(invalid_data(format!(
+            "SOCKS5 CONNECT failed with status {}",
+            response[1]
+        )));
+    }
+    match response[3] {
+        1 => {
+            let mut ignored = [0_u8; 4];
+            stream.read_exact(&mut ignored).await?;
+        }
+        3 => {
+            let length = stream.read_u8().await?;
+            let mut ignored = vec![0_u8; usize::from(length)];
+            stream.read_exact(&mut ignored).await?;
+        }
+        4 => {
+            let mut ignored = [0_u8; 16];
+            stream.read_exact(&mut ignored).await?;
+        }
+        _ => {
+            return Err(invalid_data(
+                "SOCKS5 proxy returned an invalid address type",
+            ))
+        }
+    }
+    let _ = stream.read_u16().await?;
+    Ok(Rewind::new(stream))
+}
+
+async fn authenticate_socks5(
+    stream: &mut TcpStream,
+    proxy: &UpstreamProxyConfig,
+) -> Result<(), BoxError> {
+    let username = proxy.username.as_deref().unwrap_or("").as_bytes();
+    let password = proxy.password.as_deref().unwrap_or("").as_bytes();
+    let username_length = u8::try_from(username.len())
+        .map_err(|_| invalid_input("SOCKS5 username exceeds 255 bytes"))?;
+    let password_length = u8::try_from(password.len())
+        .map_err(|_| invalid_input("SOCKS5 password exceeds 255 bytes"))?;
+    let mut request = Vec::with_capacity(username.len() + password.len() + 3);
+    request.extend_from_slice(&[1, username_length]);
+    request.extend_from_slice(username);
+    request.push(password_length);
+    request.extend_from_slice(password);
+    stream.write_all(&request).await?;
+    let mut response = [0_u8; 2];
+    stream.read_exact(&mut response).await?;
+    if response != [1, 0] {
+        return Err(invalid_data(
+            "SOCKS5 username/password authentication failed",
+        ));
+    }
+    Ok(())
 }
 
 fn with_default_port(destination: Uri) -> Uri {
@@ -167,8 +325,18 @@ fn with_default_port(destination: Uri) -> Uri {
     Uri::from_parts(parts).unwrap_or(destination)
 }
 
-fn box_error(error: impl std::error::Error + Send + Sync + 'static) -> BoxError {
-    Box::new(error)
+fn invalid_input(message: impl Into<String>) -> BoxError {
+    Box::new(std::io::Error::new(
+        std::io::ErrorKind::InvalidInput,
+        message.into(),
+    ))
+}
+
+fn invalid_data(message: impl Into<String>) -> BoxError {
+    Box::new(std::io::Error::new(
+        std::io::ErrorKind::InvalidData,
+        message.into(),
+    ))
 }
 
 #[cfg(test)]
@@ -215,6 +383,50 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn socks5_encodes_domain_ipv4_and_ipv6_destinations() {
+        for (destination, address) in [
+            (
+                "http://example.test:443/",
+                [vec![3, 12], b"example.test".to_vec()].concat(),
+            ),
+            ("http://127.0.0.1:443/", vec![1, 127, 0, 0, 1]),
+            (
+                "http://[::1]:443/",
+                [vec![4], std::net::Ipv6Addr::LOCALHOST.octets().to_vec()].concat(),
+            ),
+        ] {
+            let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+            let proxy: UpstreamProxyConfig = format!("socks5://{}", listener.local_addr().unwrap())
+                .parse()
+                .unwrap();
+            let server = tokio::spawn(async move {
+                let (mut stream, _) = listener.accept().await.unwrap();
+                let mut greeting = [0; 3];
+                stream.read_exact(&mut greeting).await.unwrap();
+                assert_eq!(greeting, [5, 1, 0]);
+                stream.write_all(&[5, 0]).await.unwrap();
+
+                let expected = [vec![5, 1, 0], address, 443_u16.to_be_bytes().to_vec()].concat();
+                let mut request = vec![0; expected.len()];
+                stream.read_exact(&mut request).await.unwrap();
+                assert_eq!(request, expected);
+                stream
+                    .write_all(&[5, 0, 0, 1, 127, 0, 0, 1, 0, 0])
+                    .await
+                    .unwrap();
+            });
+            tokio::time::timeout(
+                std::time::Duration::from_secs(5),
+                OutboundConnector::new(Some(&proxy)).call(destination.parse().unwrap()),
+            )
+            .await
+            .expect("SOCKS5 handshake did not complete")
+            .unwrap();
+            server.await.unwrap();
+        }
+    }
+
+    #[tokio::test]
     async fn constructs_and_calls_each_connector_kind() {
         use std::future::poll_fn;
         use tokio::io::{AsyncReadExt as _, AsyncWriteExt as _};
@@ -225,7 +437,7 @@ mod tests {
         let direct_server = tokio::spawn(async move {
             let (_stream, _) = direct_listener.accept().await.unwrap();
         });
-        let mut direct = OutboundConnector::new(None).unwrap();
+        let mut direct = OutboundConnector::new(None);
         poll_fn(|context| direct.poll_ready(context)).await.unwrap();
         direct
             .call(format!("http://{direct_address}/").parse().unwrap())
@@ -237,11 +449,18 @@ mod tests {
         let http_address = http_listener.local_addr().unwrap();
         let http_server = tokio::spawn(async move {
             let (mut stream, _) = http_listener.accept().await.unwrap();
-            let mut request = vec![0_u8; 1_024];
-            let length = stream.read(&mut request).await.unwrap();
-            assert!(String::from_utf8_lossy(&request[..length]).starts_with("CONNECT "));
+            let mut request = Vec::new();
+            while !request.windows(4).any(|window| window == b"\r\n\r\n") {
+                let mut chunk = [0_u8; 128];
+                let length = stream.read(&mut chunk).await.unwrap();
+                assert_ne!(length, 0);
+                request.extend_from_slice(&chunk[..length]);
+            }
+            let request = String::from_utf8_lossy(&request);
+            assert!(request.starts_with("CONNECT example.test:80 HTTP/1.1\r\n"));
+            assert!(request.contains("Proxy-Authorization: Basic dXNlcjpwYXNzd29yZA==\r\n"));
             stream
-                .write_all(b"HTTP/1.1 200 Connection Established\r\n\r\n")
+                .write_all(b"HTTP/1.1 200 Connection Established\r\n\r\nprefetched")
                 .await
                 .unwrap();
         });
@@ -249,12 +468,16 @@ mod tests {
         let authenticated = http_config.clone().with_auth("user", "password");
         assert_eq!(authenticated.username.as_deref(), Some("user"));
         assert_eq!(authenticated.password.as_deref(), Some("password"));
-        let mut http = OutboundConnector::new(Some(&authenticated)).unwrap();
+        let mut http = OutboundConnector::new(Some(&authenticated));
         assert!(matches!(http, OutboundConnector::Http(_)));
         poll_fn(|context| http.poll_ready(context)).await.unwrap();
-        http.call("http://example.test/".parse().unwrap())
+        let mut tunneled = http
+            .call("http://example.test/".parse().unwrap())
             .await
             .unwrap();
+        let mut prefetched = [0_u8; 10];
+        tunneled.read_exact(&mut prefetched).await.unwrap();
+        assert_eq!(&prefetched, b"prefetched");
         http_server.await.unwrap();
 
         let socks_listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
@@ -291,7 +514,7 @@ mod tests {
         });
         let socks_config: UpstreamProxyConfig =
             format!("socks5://{socks_address}").parse().unwrap();
-        let mut socks = OutboundConnector::new(Some(&socks_config)).unwrap();
+        let mut socks = OutboundConnector::new(Some(&socks_config));
         assert!(matches!(socks, OutboundConnector::Socks5(_)));
         poll_fn(|context| socks.poll_ready(context)).await.unwrap();
         socks
@@ -300,10 +523,51 @@ mod tests {
             .unwrap();
         socks_server.await.unwrap();
 
-        let authenticated_socks = socks_config.with_auth("user", "password");
-        assert!(matches!(
-            OutboundConnector::new(Some(&authenticated_socks)).unwrap(),
-            OutboundConnector::Socks5(_)
-        ));
+        let authenticated_listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let authenticated_address = authenticated_listener.local_addr().unwrap();
+        let authenticated_server = tokio::spawn(async move {
+            let (mut stream, _) = authenticated_listener.accept().await.unwrap();
+            let mut greeting = [0_u8; 4];
+            stream.read_exact(&mut greeting).await.unwrap();
+            assert_eq!(greeting, [5, 2, 0, 2]);
+            stream.write_all(&[5, 2]).await.unwrap();
+
+            let mut auth_prefix = [0_u8; 2];
+            stream.read_exact(&mut auth_prefix).await.unwrap();
+            assert_eq!(auth_prefix, [1, 4]);
+            let mut username = [0_u8; 4];
+            stream.read_exact(&mut username).await.unwrap();
+            assert_eq!(&username, b"user");
+            assert_eq!(stream.read_u8().await.unwrap(), 8);
+            let mut password = [0_u8; 8];
+            stream.read_exact(&mut password).await.unwrap();
+            assert_eq!(&password, b"password");
+            stream.write_all(&[1, 0]).await.unwrap();
+
+            let mut request = [0_u8; 4];
+            stream.read_exact(&mut request).await.unwrap();
+            assert_eq!(&request, &[5, 1, 0, 3]);
+            let length = stream.read_u8().await.unwrap();
+            let mut destination = vec![0_u8; usize::from(length) + 2];
+            stream.read_exact(&mut destination).await.unwrap();
+            assert_eq!(&destination[..usize::from(length)], b"example.test");
+            assert_eq!(
+                &destination[usize::from(length)..],
+                80_u16.to_be_bytes().as_slice()
+            );
+            stream
+                .write_all(&[5, 0, 0, 1, 127, 0, 0, 1, 0, 0])
+                .await
+                .unwrap();
+        });
+        let authenticated_config: UpstreamProxyConfig =
+            format!("socks5://{authenticated_address}").parse().unwrap();
+        let authenticated_socks = authenticated_config.with_auth("user", "password");
+        let mut authenticated = OutboundConnector::new(Some(&authenticated_socks));
+        authenticated
+            .call("http://example.test/".parse().unwrap())
+            .await
+            .unwrap();
+        authenticated_server.await.unwrap();
     }
 }

@@ -42,7 +42,10 @@ content-type: application/json
 - **`d`** — drop
 - **Esc** (again, when not typing) — discard your edits
 
-> **Binary bodies** — if the original body is not valid UTF-8 the editor shows a ⚠ warning. The content is displayed lossily; edits may corrupt binary data.
+> **Binary bodies** — bodies that are not valid UTF-8 open after an
+> `@proxelar:hex` marker as hexadecimal byte pairs. Edit the pairs directly;
+> Proxelar validates and decodes them without lossy text conversion when the
+> request is forwarded.
 
 ## Web GUI
 

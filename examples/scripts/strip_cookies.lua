@@ -6,7 +6,7 @@
 local tracking_cookies = { "fbp", "_ga", "_gid", "fr", "datr" }
 
 function on_request(request)
-    local cookie = request.headers["cookie"]
+    local cookie = request.headers:get("cookie")
     if not cookie then return end
 
     local parts = {}
@@ -26,9 +26,9 @@ function on_request(request)
     end
 
     if #parts > 0 then
-        request.headers["cookie"] = table.concat(parts, "; ")
+        request.headers:set("cookie", table.concat(parts, "; "))
     else
-        request.headers["cookie"] = nil
+        request.headers:remove("cookie")
     end
     return request
 end

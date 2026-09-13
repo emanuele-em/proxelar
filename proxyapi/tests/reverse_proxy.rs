@@ -1,4 +1,5 @@
 use bytes::Bytes;
+use futures_util::{SinkExt as _, StreamExt as _};
 use http_body_util::{BodyExt, Full};
 use hyper::body::Incoming;
 use hyper::service::service_fn;
@@ -12,6 +13,8 @@ use std::net::SocketAddr;
 use std::sync::Arc;
 use tokio::net::TcpListener;
 use tokio::sync::mpsc;
+use tokio_tungstenite::tungstenite::{protocol::Role, Message};
+use tokio_tungstenite::WebSocketStream;
 
 const EVENT_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(10);
 
@@ -114,9 +117,15 @@ async fn reverse_proxy_forwards_http_and_emits_request_complete() {
         } => {
             assert_eq!(request.uri().path(), "/hello");
             assert_eq!(request.uri().query(), Some("name=proxelar"));
-            assert_eq!(request.headers()["x-client-test"], "roundtrip");
+            assert_eq!(
+                request.headers().get("x-client-test"),
+                Some(b"roundtrip".as_slice())
+            );
             assert_eq!(response.status(), http::StatusCode::CREATED);
-            assert_eq!(response.headers()["x-upstream-path"], "/hello");
+            assert_eq!(
+                response.headers().get("x-upstream-path"),
+                Some(b"/hello".as_slice())
+            );
             assert_eq!(response.body().as_ref(), b"upstream response");
         }
         other => panic!("expected RequestComplete event, got {other:?}"),
@@ -199,7 +208,10 @@ async fn reverse_proxy_forwards_h2c_post_and_emits_http2_capture() {
             assert_eq!(request.method(), http::Method::POST);
             assert_eq!(request.uri().path(), "/echo");
             assert_eq!(request.uri().query(), Some("via=h2c"));
-            assert_eq!(request.headers()["x-client-test"], "reverse-h2c");
+            assert_eq!(
+                request.headers().get("x-client-test"),
+                Some(b"reverse-h2c".as_slice())
+            );
             assert_eq!(request.body().as_ref(), b"reverse h2 body");
             assert_eq!(response.status(), http::StatusCode::CREATED);
             assert_eq!(response.body().as_ref(), b"reverse h2 body");
@@ -277,7 +289,8 @@ async fn reverse_proxy_returns_502_when_target_is_unreachable() {
 #[tokio::test]
 async fn reverse_proxy_default_upstream_tls_rejects_private_ca() {
     let _ = rustls::crypto::ring::default_provider().install_default();
-    let (upstream_addr, upstream_shutdown, _ca_pem) = start_private_ca_https_upstream().await;
+    let (upstream_addr, upstream_shutdown, _ca_pem, _) =
+        start_private_ca_https_upstream(false).await;
 
     let (status, body) =
         request_private_ca_https_upstream(upstream_addr, UpstreamTlsConfig::Default).await;
@@ -291,7 +304,8 @@ async fn reverse_proxy_default_upstream_tls_rejects_private_ca() {
 #[tokio::test]
 async fn reverse_proxy_default_with_ca_file_trusts_private_ca() {
     let _ = rustls::crypto::ring::default_provider().install_default();
-    let (upstream_addr, upstream_shutdown, ca_pem) = start_private_ca_https_upstream().await;
+    let (upstream_addr, upstream_shutdown, ca_pem, _) =
+        start_private_ca_https_upstream(false).await;
     let ca_file = tempfile::NamedTempFile::new().unwrap();
     std::fs::write(ca_file.path(), ca_pem).unwrap();
 
@@ -310,7 +324,8 @@ async fn reverse_proxy_default_with_ca_file_trusts_private_ca() {
 #[tokio::test]
 async fn reverse_proxy_ca_file_only_trusts_private_ca() {
     let _ = rustls::crypto::ring::default_provider().install_default();
-    let (upstream_addr, upstream_shutdown, ca_pem) = start_private_ca_https_upstream().await;
+    let (upstream_addr, upstream_shutdown, ca_pem, _) =
+        start_private_ca_https_upstream(false).await;
     let ca_file = tempfile::NamedTempFile::new().unwrap();
     std::fs::write(ca_file.path(), ca_pem).unwrap();
 
@@ -329,7 +344,8 @@ async fn reverse_proxy_ca_file_only_trusts_private_ca() {
 #[tokio::test]
 async fn reverse_proxy_insecure_upstream_tls_accepts_private_ca() {
     let _ = rustls::crypto::ring::default_provider().install_default();
-    let (upstream_addr, upstream_shutdown, _ca_pem) = start_private_ca_https_upstream().await;
+    let (upstream_addr, upstream_shutdown, _ca_pem, _) =
+        start_private_ca_https_upstream(false).await;
 
     let (status, body) =
         request_private_ca_https_upstream(upstream_addr, UpstreamTlsConfig::Insecure).await;
@@ -338,6 +354,299 @@ async fn reverse_proxy_insecure_upstream_tls_accepts_private_ca() {
     assert_eq!(body, "upstream response");
 
     let _ = upstream_shutdown.send(());
+}
+
+#[tokio::test]
+async fn reverse_https_propagates_client_alpn_offers_upstream_in_order() {
+    use rustls::pki_types::pem::PemObject as _;
+    use rustls::pki_types::{CertificateDer, ServerName};
+    use tokio::io::{AsyncReadExt as _, AsyncWriteExt as _};
+    use tokio_rustls::TlsConnector;
+
+    let _ = rustls::crypto::ring::default_provider().install_default();
+    let (upstream_addr, upstream_shutdown, _ca_pem, upstream_offers) =
+        start_private_ca_https_upstream(false).await;
+    let proxy_addr = reserve_loopback_addr().await;
+    let ca_dir = tempfile::tempdir().unwrap();
+    let (event_tx, _event_rx) = mpsc::channel::<ProxyEvent>(16);
+    let proxy = Proxy::new(ProxyConfig {
+        addr: proxy_addr,
+        mode: ProxyMode::Reverse {
+            target: format!("https://{upstream_addr}").parse().unwrap(),
+        },
+        event_tx,
+        ca_dir: ca_dir.path().to_path_buf(),
+        upstream_tls: UpstreamTlsConfig::Insecure,
+        intercept: None,
+        body_capture_limit: DEFAULT_BODY_CAPTURE_LIMIT,
+        #[cfg(feature = "scripting")]
+        script_path: None,
+        replay_rx: None,
+    });
+    let (shutdown_tx, shutdown_rx) = tokio::sync::oneshot::channel();
+    let proxy_task = tokio::spawn(async move {
+        proxy
+            .start(async {
+                shutdown_rx.await.ok();
+            })
+            .await
+    });
+    wait_for_tcp(proxy_addr).await;
+
+    let proxy_ca = std::fs::read(ca_dir.path().join("proxelar-ca.pem")).unwrap();
+    let mut roots = rustls::RootCertStore::empty();
+    roots
+        .add(CertificateDer::from_pem_slice(&proxy_ca).unwrap())
+        .unwrap();
+    let mut client_config = rustls::ClientConfig::builder()
+        .with_root_certificates(roots)
+        .with_no_client_auth();
+    let expected_offers = vec![b"x-proxelar-test".to_vec(), b"http/1.1".to_vec()];
+    client_config.alpn_protocols = expected_offers.clone();
+    let tcp = tokio::net::TcpStream::connect(proxy_addr).await.unwrap();
+    let mut tls = TlsConnector::from(Arc::new(client_config))
+        .connect(ServerName::try_from("127.0.0.1").unwrap(), tcp)
+        .await
+        .unwrap();
+    tls.write_all(
+        format!("GET /alpn HTTP/1.1\r\nHost: {proxy_addr}\r\nConnection: close\r\n\r\n").as_bytes(),
+    )
+    .await
+    .unwrap();
+    let mut response = Vec::new();
+    let mut buffer = [0_u8; 1024];
+    loop {
+        match tls.read(&mut buffer).await {
+            Ok(0) => break,
+            Ok(length) => response.extend_from_slice(&buffer[..length]),
+            Err(error) if error.kind() == std::io::ErrorKind::UnexpectedEof => break,
+            Err(error) => panic!("failed to read reverse TLS response: {error}"),
+        }
+    }
+
+    assert!(response.starts_with(b"HTTP/1.1 201"));
+    assert_eq!(
+        *upstream_offers
+            .lock()
+            .unwrap_or_else(|error| error.into_inner()),
+        expected_offers
+    );
+
+    let _ = shutdown_tx.send(());
+    let _ = upstream_shutdown.send(());
+    assert!(proxy_task.await.unwrap().is_ok());
+}
+
+#[tokio::test]
+async fn reverse_https_negotiates_h2_with_the_upstream() {
+    use rustls::pki_types::pem::PemObject as _;
+    use rustls::pki_types::{CertificateDer, ServerName};
+    use tokio_rustls::TlsConnector;
+
+    let _ = rustls::crypto::ring::default_provider().install_default();
+    let (upstream_addr, upstream_shutdown, _ca_pem, upstream_offers) =
+        start_private_ca_https_upstream(true).await;
+    let proxy_addr = reserve_loopback_addr().await;
+    let ca_dir = tempfile::tempdir().unwrap();
+    let (event_tx, _event_rx) = mpsc::channel::<ProxyEvent>(16);
+    let proxy = Proxy::new(ProxyConfig {
+        addr: proxy_addr,
+        mode: ProxyMode::Reverse {
+            target: format!("https://{upstream_addr}").parse().unwrap(),
+        },
+        event_tx,
+        ca_dir: ca_dir.path().to_path_buf(),
+        upstream_tls: UpstreamTlsConfig::Insecure,
+        intercept: None,
+        body_capture_limit: DEFAULT_BODY_CAPTURE_LIMIT,
+        #[cfg(feature = "scripting")]
+        script_path: None,
+        replay_rx: None,
+    });
+    let (shutdown_tx, shutdown_rx) = tokio::sync::oneshot::channel();
+    let proxy_task = tokio::spawn(async move {
+        proxy
+            .start(async {
+                shutdown_rx.await.ok();
+            })
+            .await
+    });
+    wait_for_tcp(proxy_addr).await;
+
+    let proxy_ca = std::fs::read(ca_dir.path().join("proxelar-ca.pem")).unwrap();
+    let mut roots = rustls::RootCertStore::empty();
+    roots
+        .add(CertificateDer::from_pem_slice(&proxy_ca).unwrap())
+        .unwrap();
+    let mut client_config = rustls::ClientConfig::builder()
+        .with_root_certificates(roots)
+        .with_no_client_auth();
+    let expected_offers = vec![b"h2".to_vec(), b"http/1.1".to_vec()];
+    client_config.alpn_protocols = expected_offers.clone();
+    let tcp = tokio::net::TcpStream::connect(proxy_addr).await.unwrap();
+    let tls = TlsConnector::from(Arc::new(client_config))
+        .connect(ServerName::try_from("127.0.0.1").unwrap(), tcp)
+        .await
+        .unwrap();
+    assert_eq!(tls.get_ref().1.alpn_protocol(), Some(b"h2".as_slice()));
+
+    let (mut sender, connection) = hyper::client::conn::http2::Builder::new(TokioExecutor::new())
+        .handshake(TokioIo::new(tls))
+        .await
+        .unwrap();
+    let connection_task = tokio::spawn(connection);
+    let request = Request::builder()
+        .uri(format!("https://{proxy_addr}/h2"))
+        .header("proxy-authorization", "Basic reverse-secret")
+        .body(Full::new(Bytes::new()))
+        .unwrap();
+    let response = sender.send_request(request).await.unwrap();
+    assert_eq!(response.status(), http::StatusCode::CREATED);
+    assert_eq!(
+        response.into_body().collect().await.unwrap().to_bytes(),
+        "upstream response"
+    );
+    assert_eq!(
+        *upstream_offers
+            .lock()
+            .unwrap_or_else(|error| error.into_inner()),
+        expected_offers
+    );
+
+    drop(sender);
+    let _ = shutdown_tx.send(());
+    let _ = upstream_shutdown.send(());
+    assert!(proxy_task.await.unwrap().is_ok());
+    connection_task.abort();
+}
+
+#[tokio::test]
+async fn reverse_https_proxies_rfc8441_to_an_h2_upstream() {
+    use rustls::pki_types::pem::PemObject as _;
+    use rustls::pki_types::{CertificateDer, ServerName};
+    use tokio_rustls::TlsConnector;
+
+    let _ = rustls::crypto::ring::default_provider().install_default();
+    let (upstream_addr, upstream_shutdown, _ca_pem, _upstream_offers) =
+        start_private_ca_https_upstream(true).await;
+    let proxy_addr = reserve_loopback_addr().await;
+    let ca_dir = tempfile::tempdir().unwrap();
+    let (event_tx, mut event_rx) = mpsc::channel::<ProxyEvent>(32);
+    let proxy = Proxy::new(ProxyConfig {
+        addr: proxy_addr,
+        mode: ProxyMode::Reverse {
+            target: format!("https://{upstream_addr}").parse().unwrap(),
+        },
+        event_tx,
+        ca_dir: ca_dir.path().to_path_buf(),
+        upstream_tls: UpstreamTlsConfig::Insecure,
+        intercept: None,
+        body_capture_limit: DEFAULT_BODY_CAPTURE_LIMIT,
+        #[cfg(feature = "scripting")]
+        script_path: None,
+        replay_rx: None,
+    });
+    let (shutdown_tx, shutdown_rx) = tokio::sync::oneshot::channel();
+    let proxy_task = tokio::spawn(async move {
+        proxy
+            .start(async {
+                shutdown_rx.await.ok();
+            })
+            .await
+    });
+    wait_for_tcp(proxy_addr).await;
+
+    let proxy_ca = std::fs::read(ca_dir.path().join("proxelar-ca.pem")).unwrap();
+    let mut roots = rustls::RootCertStore::empty();
+    roots
+        .add(CertificateDer::from_pem_slice(&proxy_ca).unwrap())
+        .unwrap();
+    let mut client_config = rustls::ClientConfig::builder()
+        .with_root_certificates(roots)
+        .with_no_client_auth();
+    client_config.alpn_protocols = vec![b"h2".to_vec(), b"http/1.1".to_vec()];
+    let tcp = tokio::net::TcpStream::connect(proxy_addr).await.unwrap();
+    let tls = TlsConnector::from(Arc::new(client_config))
+        .connect(ServerName::try_from("127.0.0.1").unwrap(), tcp)
+        .await
+        .unwrap();
+    let (mut sender, connection) = hyper::client::conn::http2::Builder::new(TokioExecutor::new())
+        .handshake(TokioIo::new(tls))
+        .await
+        .unwrap();
+    let connection_task = tokio::spawn(connection);
+
+    let ordinary = Request::builder()
+        .uri(format!("https://{proxy_addr}/ready"))
+        .body(Full::new(Bytes::new()))
+        .unwrap();
+    assert_eq!(
+        sender.send_request(ordinary).await.unwrap().status(),
+        http::StatusCode::CREATED
+    );
+
+    let mut request = Request::builder()
+        .method(http::Method::CONNECT)
+        .version(http::Version::HTTP_2)
+        .uri(format!("https://{proxy_addr}/chat"))
+        .header("sec-websocket-version", "13")
+        .header("sec-websocket-protocol", "chat")
+        .header("proxy-authorization", "Basic reverse-secret")
+        .body(Full::new(Bytes::new()))
+        .unwrap();
+    request
+        .extensions_mut()
+        .insert(hyper::ext::Protocol::from_static("websocket"));
+    let response = sender.send_request(request).await.unwrap();
+    assert_eq!(response.status(), http::StatusCode::OK);
+    assert_eq!(response.headers()["sec-websocket-protocol"], "chat");
+
+    let upgraded = hyper::upgrade::on(response).await.unwrap();
+    let mut websocket =
+        WebSocketStream::from_raw_socket(TokioIo::new(upgraded), Role::Client, None).await;
+    websocket
+        .send(Message::Text("through-h2".into()))
+        .await
+        .unwrap();
+    assert_eq!(
+        websocket.next().await.unwrap().unwrap(),
+        Message::Text("through-h2".into())
+    );
+    websocket.close(None).await.unwrap();
+
+    let mut connected = false;
+    let mut client_frame = false;
+    let mut server_frame = false;
+    tokio::time::timeout(EVENT_TIMEOUT, async {
+        while !(connected && client_frame && server_frame) {
+            match event_rx.recv().await.unwrap() {
+                ProxyEvent::WebSocketConnected {
+                    request, response, ..
+                } => {
+                    connected = true;
+                    assert_eq!(request.uri().path(), "/chat");
+                    assert_eq!(response.version(), http::Version::HTTP_2);
+                }
+                ProxyEvent::WebSocketFrame { frame, .. } => match frame.direction {
+                    proxyapi_models::WsDirection::ClientToServer => {
+                        client_frame |= frame.payload.as_ref() == b"through-h2";
+                    }
+                    proxyapi_models::WsDirection::ServerToClient => {
+                        server_frame |= frame.payload.as_ref() == b"through-h2";
+                    }
+                },
+                _ => {}
+            }
+        }
+    })
+    .await
+    .unwrap();
+
+    drop(sender);
+    let _ = shutdown_tx.send(());
+    let _ = upstream_shutdown.send(());
+    assert!(proxy_task.await.unwrap().is_ok());
+    connection_task.abort();
 }
 
 #[tokio::test]
@@ -404,7 +713,7 @@ async fn reverse_proxy_intercepts_oversized_request_before_streaming_original() 
         }
         other => panic!("expected RequestIntercepted event, got {other:?}"),
     };
-    headers.insert("x-intercept", "yes".parse().unwrap());
+    headers.add("x-intercept", "yes").unwrap();
     assert!(intercept.resolve(
         id,
         InterceptDecision::Modified {
@@ -537,12 +846,12 @@ async fn reverse_proxy_runs_scripts_for_oversized_request_and_response() {
         .write_all(
             br#"
             function on_request(req)
-                req.headers["x-script"] = "yes"
+                req.headers:set("x-script", "yes")
                 return req
             end
 
             function on_response(req, res)
-                res.headers["x-response-script"] = "yes"
+                res.headers:set("x-response-script", "yes")
                 return res
             end
             "#,
@@ -668,7 +977,10 @@ async fn reverse_proxy_lua_short_circuit_emits_request_complete() {
             assert_eq!(request.uri().path(), "/script-short");
             assert_eq!(request.body().as_ref(), b"request body");
             assert_eq!(response.status(), http::StatusCode::ACCEPTED);
-            assert_eq!(response.headers()["x-script"], "short");
+            assert_eq!(
+                response.headers().get("x-script"),
+                Some(b"short".as_slice())
+            );
             assert_eq!(response.body().as_ref(), b"short-circuited");
         }
         other => panic!("expected RequestComplete event, got {other:?}"),
@@ -744,8 +1056,13 @@ async fn request_private_ca_https_upstream(
 
     wait_for_tcp(proxy_addr).await;
 
-    let response = reqwest::Client::new()
-        .get(format!("http://{proxy_addr}/hello"))
+    let proxy_ca = std::fs::read(ca_dir.path().join("proxelar-ca.pem")).unwrap();
+    let client = reqwest::Client::builder()
+        .add_root_certificate(reqwest::Certificate::from_pem(&proxy_ca).unwrap())
+        .build()
+        .unwrap();
+    let response = client
+        .get(format!("https://{proxy_addr}/hello"))
         .send()
         .await
         .unwrap();
@@ -786,130 +1103,63 @@ async fn start_upstream_server() -> (SocketAddr, tokio::sync::oneshot::Sender<()
     (addr, shutdown_tx)
 }
 
-async fn start_private_ca_https_upstream() -> (SocketAddr, tokio::sync::oneshot::Sender<()>, Vec<u8>)
-{
-    use openssl::{
-        asn1::{Asn1Integer, Asn1Time},
-        bn::BigNum,
-        hash::MessageDigest,
-        pkey::{PKey, Private},
-        rsa::Rsa,
-        x509::{
-            extension::{BasicConstraints, ExtendedKeyUsage, KeyUsage, SubjectAlternativeName},
-            X509Builder, X509NameBuilder, X509,
-        },
+async fn start_private_ca_https_upstream(
+    h2: bool,
+) -> (
+    SocketAddr,
+    tokio::sync::oneshot::Sender<()>,
+    Vec<u8>,
+    Arc<std::sync::Mutex<Vec<Vec<u8>>>>,
+) {
+    use rcgen::{
+        BasicConstraints, CertificateParams, DnType, ExtendedKeyUsagePurpose, IsCa, Issuer,
+        KeyPair, KeyUsagePurpose,
     };
-    use rustls_pki_types::{CertificateDer, PrivateKeyDer, PrivatePkcs1KeyDer};
+    use rustls_pki_types::{PrivateKeyDer, PrivatePkcs8KeyDer};
+    use time::{Duration, OffsetDateTime};
     use tokio_rustls::TlsAcceptor;
 
-    fn random_serial_number() -> Asn1Integer {
-        let mut serial = [0; 16];
-        openssl::rand::rand_bytes(&mut serial).unwrap();
-        Asn1Integer::from_bn(&BigNum::from_slice(&serial).unwrap()).unwrap()
+    fn set_validity(params: &mut CertificateParams) {
+        params.not_before = OffsetDateTime::now_utc() - Duration::seconds(60);
+        params.not_after = params.not_before + Duration::days(1);
     }
 
-    fn set_validity(builder: &mut openssl::x509::X509Builder) {
-        let not_before = std::time::SystemTime::now()
-            .duration_since(std::time::SystemTime::UNIX_EPOCH)
-            .unwrap()
-            .as_secs() as i64
-            - 60;
-        builder
-            .set_not_before(Asn1Time::from_unix(not_before).unwrap().as_ref())
-            .unwrap();
-        builder
-            .set_not_after(Asn1Time::from_unix(not_before + 86_400).unwrap().as_ref())
-            .unwrap();
-    }
+    let mut ca_params = CertificateParams::new(Vec::<String>::new()).unwrap();
+    ca_params.is_ca = IsCa::Ca(BasicConstraints::Unconstrained);
+    ca_params
+        .distinguished_name
+        .push(DnType::CommonName, "Proxelar Upstream Test CA");
+    ca_params.key_usages = vec![KeyUsagePurpose::KeyCertSign, KeyUsagePurpose::CrlSign];
+    set_validity(&mut ca_params);
+    let ca_key = KeyPair::generate().unwrap();
+    let ca_cert = ca_params.self_signed(&ca_key).unwrap();
+    let ca_pem = ca_cert.pem().into_bytes();
+    let issuer = Issuer::new(ca_params, ca_key);
 
-    fn generate_ca() -> (PKey<Private>, X509) {
-        let ca_key = PKey::from_rsa(Rsa::generate(2048).unwrap()).unwrap();
-        let mut name_builder = X509NameBuilder::new().unwrap();
-        name_builder
-            .append_entry_by_text("CN", "Proxelar Upstream Test CA")
-            .unwrap();
-        let name = name_builder.build();
+    let mut server_params = CertificateParams::new(vec!["127.0.0.1".to_owned()]).unwrap();
+    server_params
+        .distinguished_name
+        .push(DnType::CommonName, "127.0.0.1");
+    server_params.key_usages = vec![KeyUsagePurpose::DigitalSignature];
+    server_params.extended_key_usages = vec![ExtendedKeyUsagePurpose::ServerAuth];
+    set_validity(&mut server_params);
+    let server_key = KeyPair::generate().unwrap();
+    let server_cert = server_params.signed_by(&server_key, &issuer).unwrap();
+    let certs = vec![server_cert.der().clone()];
+    let private_key = PrivateKeyDer::Pkcs8(PrivatePkcs8KeyDer::from(server_key.serialize_der()));
 
-        let mut builder = X509Builder::new().unwrap();
-        builder.set_version(2).unwrap();
-        builder
-            .set_serial_number(random_serial_number().as_ref())
-            .unwrap();
-        builder.set_subject_name(&name).unwrap();
-        builder.set_issuer_name(&name).unwrap();
-        builder.set_pubkey(&ca_key).unwrap();
-        set_validity(&mut builder);
-        builder
-            .append_extension(BasicConstraints::new().critical().ca().build().unwrap())
-            .unwrap();
-        builder
-            .append_extension(
-                KeyUsage::new()
-                    .critical()
-                    .key_cert_sign()
-                    .crl_sign()
-                    .build()
-                    .unwrap(),
-            )
-            .unwrap();
-        builder.sign(&ca_key, MessageDigest::sha256()).unwrap();
-        (ca_key, builder.build())
-    }
-
-    fn generate_server_cert(ca_key: &PKey<Private>, ca_cert: &X509) -> (PKey<Private>, X509) {
-        let server_key = PKey::from_rsa(Rsa::generate(2048).unwrap()).unwrap();
-        let mut name_builder = X509NameBuilder::new().unwrap();
-        name_builder
-            .append_entry_by_text("CN", "127.0.0.1")
-            .unwrap();
-        let name = name_builder.build();
-
-        let mut builder = X509Builder::new().unwrap();
-        builder.set_version(2).unwrap();
-        builder
-            .set_serial_number(random_serial_number().as_ref())
-            .unwrap();
-        builder.set_subject_name(&name).unwrap();
-        builder.set_issuer_name(ca_cert.subject_name()).unwrap();
-        builder.set_pubkey(&server_key).unwrap();
-        set_validity(&mut builder);
-        builder
-            .append_extension(BasicConstraints::new().critical().build().unwrap())
-            .unwrap();
-        builder
-            .append_extension(
-                KeyUsage::new()
-                    .critical()
-                    .digital_signature()
-                    .key_encipherment()
-                    .build()
-                    .unwrap(),
-            )
-            .unwrap();
-        builder
-            .append_extension(ExtendedKeyUsage::new().server_auth().build().unwrap())
-            .unwrap();
-        let subject_alt_name = SubjectAlternativeName::new()
-            .ip("127.0.0.1")
-            .build(&builder.x509v3_context(Some(ca_cert), None))
-            .unwrap();
-        builder.append_extension(subject_alt_name).unwrap();
-        builder.sign(ca_key, MessageDigest::sha256()).unwrap();
-        (server_key, builder.build())
-    }
-
-    let (ca_key, ca_cert) = generate_ca();
-    let (server_key, server_cert) = generate_server_cert(&ca_key, &ca_cert);
-    let ca_pem = ca_cert.to_pem().unwrap();
-    let certs = vec![CertificateDer::from(server_cert.to_der().unwrap())];
-    let private_key = PrivateKeyDer::Pkcs1(PrivatePkcs1KeyDer::from(
-        server_key.rsa().unwrap().private_key_to_der().unwrap(),
-    ));
-
-    let server_config = tokio_rustls::rustls::ServerConfig::builder()
+    let mut server_config = tokio_rustls::rustls::ServerConfig::builder()
         .with_no_client_auth()
         .with_single_cert(certs, private_key)
         .unwrap();
+    if h2 {
+        server_config.alpn_protocols = vec![b"h2".to_vec()];
+    }
+    let offered_alpn = Arc::new(std::sync::Mutex::new(Vec::new()));
+    server_config.cert_resolver = Arc::new(RecordingCertResolver {
+        inner: Arc::clone(&server_config.cert_resolver),
+        offered: Arc::clone(&offered_alpn),
+    });
     let acceptor = TlsAcceptor::from(Arc::new(server_config));
 
     let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
@@ -928,11 +1178,23 @@ async fn start_private_ca_https_upstream() -> (SocketAddr, tokio::sync::oneshot:
                         let Ok(stream) = acceptor.accept(stream).await else {
                             return;
                         };
-                        let io = TokioIo::new(stream);
-                        let service = service_fn(upstream_response);
-                        let _ = hyper::server::conn::http1::Builder::new()
-                            .serve_connection(io, service)
+                        if h2 {
+                            let _ = proxelar_proto::http2::serve_connection(
+                                stream,
+                                ReverseH2Upstream,
+                                proxelar_proto::http2::ConnectionConfig {
+                                    enable_extended_connect: true,
+                                    ..proxelar_proto::http2::ConnectionConfig::default()
+                                },
+                            )
                             .await;
+                        } else {
+                            let io = TokioIo::new(stream);
+                            let service = service_fn(upstream_response);
+                            let _ = hyper::server::conn::http1::Builder::new()
+                                .serve_connection(io, service)
+                                .await;
+                        }
                     });
                 }
                 _ = &mut shutdown_rx => break,
@@ -940,7 +1202,86 @@ async fn start_private_ca_https_upstream() -> (SocketAddr, tokio::sync::oneshot:
         }
     });
 
-    (addr, shutdown_tx, ca_pem)
+    (addr, shutdown_tx, ca_pem, offered_alpn)
+}
+
+#[derive(Clone)]
+struct ReverseH2Upstream;
+
+impl proxelar_proto::HttpService for ReverseH2Upstream {
+    fn call(
+        &mut self,
+        request: proxyapi::ProxyRequest,
+    ) -> proxelar_proto::BoxFuture<'_, Result<proxyapi::ProxyResponse, proxyapi::ProtocolError>>
+    {
+        Box::pin(async move {
+            assert!(!request.head.headers.contains_key("proxy-authorization"));
+            if request.head.method == http::Method::CONNECT
+                && request.head.headers.get(":protocol") == Some(b"websocket".as_slice())
+            {
+                let (tunnel, body) = proxelar_proto::http2::body_tunnel(request.body, 64 * 1024);
+                tokio::spawn(async move {
+                    let mut websocket =
+                        WebSocketStream::from_raw_socket(tunnel, Role::Server, None).await;
+                    while let Some(Ok(message)) = websocket.next().await {
+                        let close = message.is_close();
+                        if websocket.send(message).await.is_err() || close {
+                            break;
+                        }
+                    }
+                });
+                let mut headers = proxyapi_models::HeaderBlock::new();
+                if let Some(protocol) = request.head.headers.get("sec-websocket-protocol") {
+                    headers.add("sec-websocket-protocol", protocol).unwrap();
+                }
+                return Ok(proxyapi::ProxyResponse::new(
+                    proxyapi::ResponseHead::new(
+                        http::StatusCode::OK,
+                        http::Version::HTTP_2,
+                        headers,
+                    ),
+                    body,
+                ));
+            }
+
+            let mut headers = proxyapi_models::HeaderBlock::new();
+            headers
+                .add("x-upstream-path", request.head.uri.path())
+                .unwrap();
+            Ok(proxyapi::ProxyResponse::new(
+                proxyapi::ResponseHead::new(
+                    http::StatusCode::CREATED,
+                    http::Version::HTTP_2,
+                    headers,
+                ),
+                proxyapi::ProxyBody::full(Bytes::from_static(b"upstream response")),
+            ))
+        })
+    }
+}
+
+#[derive(Debug)]
+struct RecordingCertResolver {
+    inner: Arc<dyn rustls::server::ResolvesServerCert>,
+    offered: Arc<std::sync::Mutex<Vec<Vec<u8>>>>,
+}
+
+impl rustls::server::ResolvesServerCert for RecordingCertResolver {
+    fn resolve(
+        &self,
+        client_hello: rustls::server::ClientHello<'_>,
+    ) -> Option<Arc<rustls::sign::CertifiedKey>> {
+        *self
+            .offered
+            .lock()
+            .unwrap_or_else(|error| error.into_inner()) = client_hello
+            .alpn()
+            .into_iter()
+            .flatten()
+            .map(<[u8]>::to_vec)
+            .collect();
+        self.inner.resolve(client_hello)
+    }
 }
 
 async fn start_echo_request_body_server() -> (SocketAddr, tokio::sync::oneshot::Sender<()>) {

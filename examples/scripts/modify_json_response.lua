@@ -4,7 +4,7 @@
 -- Usage: proxelar --script examples/scripts/modify_json_response.lua
 
 function on_response(request, response)
-    local ct = response.headers["content-type"] or ""
+    local ct = response.headers:get("content-type") or ""
     if not string.find(ct, "application/json") then return end
 
     -- Inject a field into JSON object responses

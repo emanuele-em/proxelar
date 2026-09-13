@@ -12,6 +12,20 @@ proxelar -m reverse --target http://localhost:3000
 
 Clients connect to `http://127.0.0.1:8080` and Proxelar forwards everything to `http://localhost:3000`.
 
+The target scheme selects listeners and upstream transports deterministically:
+
+- `http://` uses cleartext TCP.
+- `https://` listens on TCP and, when the official HTTP/3 feature is enabled, UDP on the same port. TCP follows the client's negotiated H1/H2 protocol; UDP carries H3.
+- `http3://` listens only on UDP and uses H3 upstream.
+
+Client ALPN offers are propagated upstream in their original order. Proxelar does not probe QUIC heuristically or switch protocols after a timeout.
+
+An `https://` target also makes the client-facing TCP listener use TLS. Proxelar
+mints its listener certificate for the target hostname, so point that hostname
+at the Proxelar listener and trust the Proxelar CA in the client. The negotiated
+client ALPN selects H1 or H2 on TCP; clients offering H3 can use the UDP listener
+on the same port.
+
 ## How it works
 
 1. The client sends a request to `127.0.0.1:8080`
@@ -37,9 +51,12 @@ proxelar -m reverse --target http://localhost:3000 -i gui
 
 # HTTPS upstream with a private CA
 proxelar -m reverse --target https://localhost:3000 --upstream-trust default+ca:/path/to/ca.pem
+
+# HTTP/3 in both directions over UDP only
+proxelar -m reverse --target http3://localhost:4433
 ```
 
-For upstream HTTPS, Proxelar uses bundled Mozilla/WebPKI roots by default. Use `--upstream-trust default+ca:/path/to/ca.pem` to add a private CA, `--upstream-trust ca-only:/path/to/ca.pem` to trust only that CA, or `--upstream-trust insecure` for temporary debugging without certificate or hostname verification. `insecure` makes upstream HTTPS traffic vulnerable to MITM.
+For upstream HTTPS and H3, Proxelar uses bundled Mozilla/WebPKI roots by default. Use `--upstream-trust default+ca:/path/to/ca.pem` to add a private CA, `--upstream-trust ca-only:/path/to/ca.pem` to trust only that CA, or `--upstream-trust insecure` for temporary debugging without certificate or hostname verification. `insecure` makes upstream encrypted traffic vulnerable to MITM.
 
 ## Common use cases with scripting
 

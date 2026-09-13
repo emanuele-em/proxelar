@@ -6,10 +6,10 @@ use std::{
 
 use rustls::{
     client::danger::{HandshakeSignatureValid, ServerCertVerified, ServerCertVerifier},
+    client::WebPkiServerVerifier,
     crypto::CryptoProvider,
     pki_types::{CertificateDer, ServerName, UnixTime},
-    ClientConfig, ConfigBuilder, DigitallySignedStruct, RootCertStore, SignatureScheme,
-    WantsVerifier,
+    ClientConfig, DigitallySignedStruct, RootCertStore, SignatureScheme,
 };
 use rustls_pki_types::pem::{self, PemObject};
 
@@ -69,36 +69,44 @@ fn path_to_policy(
 }
 
 pub(super) fn build_client_config(config: &UpstreamTlsConfig) -> Result<ClientConfig, Error> {
-    match config {
-        UpstreamTlsConfig::Default => Ok(client_config_builder()?
-            .with_root_certificates(default_root_store())
-            .with_no_client_auth()),
+    let provider = Arc::new(rustls::crypto::ring::default_provider());
+    let verifier = build_server_verifier(config, Arc::clone(&provider))?;
+    Ok(rustls::ClientConfig::builder_with_provider(provider)
+        .with_safe_default_protocol_versions()?
+        .dangerous()
+        .with_custom_certificate_verifier(verifier)
+        .with_no_client_auth())
+}
+
+#[cfg(feature = "http3")]
+pub(super) fn h3_server_verifier(
+    config: &UpstreamTlsConfig,
+) -> Result<Arc<dyn ServerCertVerifier>, Error> {
+    let provider = Arc::new(rustls::crypto::ring::default_provider());
+    build_server_verifier(config, provider)
+}
+
+fn build_server_verifier(
+    config: &UpstreamTlsConfig,
+    provider: Arc<CryptoProvider>,
+) -> Result<Arc<dyn ServerCertVerifier>, Error> {
+    let roots = match config {
+        UpstreamTlsConfig::Default => Some(default_root_store()),
         UpstreamTlsConfig::DefaultWithCaFile(path) => {
             let mut roots = default_root_store();
             append_ca_file_roots(&mut roots, path)?;
-            Ok(client_config_builder()?
-                .with_root_certificates(roots)
-                .with_no_client_auth())
+            Some(roots)
         }
-        UpstreamTlsConfig::CaFileOnly(path) => Ok(client_config_builder()?
-            .with_root_certificates(load_ca_file_roots(path)?)
-            .with_no_client_auth()),
-        UpstreamTlsConfig::Insecure => {
-            let provider = Arc::new(rustls::crypto::ring::default_provider());
-            Ok(
-                rustls::ClientConfig::builder_with_provider(Arc::clone(&provider))
-                    .with_safe_default_protocol_versions()?
-                    .dangerous()
-                    .with_custom_certificate_verifier(InsecureServerCertVerifier::new(provider))
-                    .with_no_client_auth(),
-            )
-        }
+        UpstreamTlsConfig::CaFileOnly(path) => Some(load_ca_file_roots(path)?),
+        UpstreamTlsConfig::Insecure => None,
+    };
+    match roots {
+        Some(roots) => WebPkiServerVerifier::builder_with_provider(Arc::new(roots), provider)
+            .build()
+            .map(|verifier| verifier as Arc<dyn ServerCertVerifier>)
+            .map_err(|error| Error::Other(format!("failed to build TLS verifier: {error}"))),
+        None => Ok(InsecureServerCertVerifier::new(provider)),
     }
-}
-
-fn client_config_builder() -> Result<ConfigBuilder<ClientConfig, WantsVerifier>, rustls::Error> {
-    rustls::ClientConfig::builder_with_provider(Arc::new(rustls::crypto::ring::default_provider()))
-        .with_safe_default_protocol_versions()
 }
 
 fn default_root_store() -> RootCertStore {

@@ -3,15 +3,18 @@ FROM rust:1.97.1-slim-bookworm AS builder
 RUN apt-get update && apt-get install -y \
     pkg-config \
     cmake \
+    clang \
+    libclang-dev \
     perl \
     gcc \
+    g++ \
     make \
     && rm -rf /var/lib/apt/lists/*
 
 WORKDIR /app
 COPY . .
 
-RUN cargo build --release --locked --workspace
+RUN cargo build --release --locked -p proxelar --features http3
 
 # ---- runtime ----
 FROM debian:bookworm-slim

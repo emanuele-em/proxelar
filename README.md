@@ -42,6 +42,7 @@ Proxelar is intentionally developer-oriented: terminal-first, scriptable, Rust-n
 - **Interactive intercept** — pause requests, edit method/URI/headers/body, forward, drop, or replay.
 - **HTTPS MITM** — local CA generation, per-host certificates, and a built-in certificate install page.
 - **Forward and reverse modes** — inspect configured clients or put Proxelar in front of a local service.
+- **Native protocol core** — HTTP/1, HTTP/2, and feature-gated HTTP/3 without Hyper in the proxy data path.
 - **Six capture modes** — forward, reverse, WireGuard, SOCKS5, DNS inspection/rewrite, and fixed-target raw UDP.
 - **WebSocket inspection** — capture connections and browse frames by direction, opcode, and payload preview.
 - **Portable sessions** — save/reload native captures or import/export HAR, curl, and raw HTTP files with secret redaction.
@@ -166,6 +167,7 @@ Common options:
 
 ```bash
 proxelar -m reverse --target http://localhost:3000   # reverse proxy
+proxelar -m reverse --target http3://localhost:4433  # UDP-only H3 reverse proxy
 proxelar -b 0.0.0.0 -p 9090                         # custom bind/port
 proxelar --script examples/scripts/block_domain.lua  # with a Lua script
 proxelar --body-capture-limit 1048576                # cap captured/editable body bytes
@@ -185,7 +187,7 @@ proxelar -m wireguard -b 0.0.0.0 -p 51820 \
 | `-m, --mode` | `forward` · `reverse` · `wireguard` · `socks5` · `dns` · `udp` | `forward` |
 | `-p, --port` | Listening port | `8080` |
 | `-b, --addr` | Bind address | `127.0.0.1` |
-| `-t, --target` | Upstream URI for reverse or `HOST:PORT` for UDP | — |
+| `-t, --target` | `http://`, `https://`, or `http3://` upstream URI for reverse; `HOST:PORT` for UDP | — |
 | `--gui-port` | Web GUI port | `8081` |
 | `--ca-dir` | CA certificate directory | `~/.proxelar` |
 | `-s, --script` | Lua script file or addon directory (`init.lua`) | — |
@@ -224,7 +226,8 @@ See the [full comparison](https://proxelar.micheletti.io/reference/comparison.ht
 
 Proxelar is usable today, but it intentionally has a narrower scope than a full security suite:
 
-- HTTP/2 clients are accepted, but HTTP/2 MITM streams are normalized and forwarded upstream as HTTP/1.1. HTTP/3/QUIC interception is not supported.
+- HTTP/1 and HTTP/2 are supported across TCP proxy modes. HTTP/3 interception is intentionally limited to reverse and WireGuard modes: `https://` reverse targets listen on TCP and UDP on the same port, while `http3://` is UDP-only and uses H3 in both directions. There is no heuristic QUIC detection or timeout-based protocol fallback.
+- The direct HTTP/3 driver preserves informational responses, streaming bodies, ordered duplicate headers, and request/response trailers. QUIC early data, datagrams, and active migration are disabled.
 - Generic TCP streams are captured as directional chunks, and fixed-target or WireGuard UDP traffic records request/response datagrams. Protobuf has a lossless wire-field JSON editor and MessagePack has a JSON editor; descriptor-backed field names and raw-TCP schemas are not yet available.
 - WireGuard mode currently generates one client identity per CA directory. Proxelar does not modify system proxy settings; `--launch-browser` uses a reversible, isolated browser profile instead.
 - HTTPS interception requires trusting Proxelar's local CA. Certificate-pinned apps and many Android apps will not trust user-installed CAs.

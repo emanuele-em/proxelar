@@ -17,14 +17,15 @@ It is aimed at development and debugging workflows: API inspection, local servic
 
 ## What is it not?
 
-Proxelar is not trying to replace a mature security suite. If you need scanning, collaborative testing, a large pre-existing addon inventory, or end-to-end HTTP/2/HTTP/3 interception, use a tool built for that workflow. Proxelar is deliberately smaller: a local, scriptable proxy that is easy to install, run, and automate.
+Proxelar is not trying to replace a mature security suite. If you need scanning, collaborative testing, a large pre-existing addon inventory, or years of adversarial protocol hardening, use a tool built for that workflow. Proxelar is deliberately smaller: a local, scriptable proxy that is easy to install, run, and automate.
 
 ## Architecture
 
-Proxelar is built as a three-crate Rust workspace:
+Proxelar is built as a four-crate Rust workspace:
 
 - **`proxelar-cli`** — the CLI binary with terminal, TUI, web, and API interfaces
 - **`proxyapi`** — the core proxy engine, usable as a standalone library
+- **`proxelar-proto`** — the internal transport-neutral HTTP core and native H1/H2 adapters
 - **`proxyapi_models`** — shared request/response data types
 
-The proxy engine is built on [hyper](https://hyper.rs) 1.x, [rustls](https://github.com/rustls/rustls) 0.23, and [tokio](https://tokio.rs). HTTPS interception uses OpenSSL for certificate generation and rustls for TLS termination. Lua scripting is powered by [mlua](https://github.com/khvzak/mlua) with a vendored Lua 5.4.
+The proxy data path uses a sans-I/O HTTP/1 codec with `httparse` for lexical parsing, direct `h2`, and a feature-gated direct `quiche` driver for HTTP/3. Tokio drives asynchronous I/O, rustls terminates TCP TLS, and rcgen mints per-host certificates. Production `proxyapi` has no Hyper dependency; Hyper remains transitively in the CLI through Axum and directly in `proxyapi`'s dev dependencies for independent protocol tests and benchmarks. Lua scripting is powered by [mlua](https://github.com/khvzak/mlua) with a vendored Lua 5.4.
