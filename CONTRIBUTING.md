@@ -23,6 +23,8 @@ cargo clippy --workspace --all-targets --all-features
 cargo package --workspace --list
 ```
 
+If you have [`just`](https://github.com/casey/just) installed (`brew install just` or `cargo install just`), `justfile` wraps the commands above as recipes (`just test`, `just lint`, `just check` for the full local gate, etc.) — run `just --list` to see all of them. It's optional; every recipe is a thin wrapper around the plain `cargo` commands documented here and below.
+
 ## Making Changes
 
 1. Fork the repo and create a branch from `main`
