@@ -1,6 +1,7 @@
 FROM rust:1.97.1-slim-bookworm AS builder
 
 RUN apt-get update && apt-get install -y \
+    git \
     pkg-config \
     cmake \
     clang \

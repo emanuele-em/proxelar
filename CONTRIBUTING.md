@@ -151,3 +151,9 @@ workflow build the platform artifacts without publishing them.
 
 If publication has already started, inspect the completed jobs before retrying;
 crates.io versions cannot be published twice.
+
+To retry only a container release after a Dockerfile or build-tool fix, run
+`gh workflow run container.yml --ref main -f tag=vX.Y.Z`. This uses the workflow's
+Dockerfile with the existing tag's source and does not republish crates or
+GitHub release assets. Dockerfile pull requests build and smoke-test the image
+without publishing it.
