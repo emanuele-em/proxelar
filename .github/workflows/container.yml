@@ -1,0 +1,92 @@
+name: Container
+
+on:
+  pull_request:
+    paths: ["Dockerfile", ".dockerignore", ".github/workflows/container.yml"]
+  workflow_call:
+    inputs:
+      tag:
+        description: "Existing release tag to publish"
+        required: true
+        type: string
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: "Existing release tag to publish (for example, v0.6.0)"
+        required: true
+        type: string
+
+permissions:
+  contents: read
+
+jobs:
+  container:
+    name: Build and publish container
+    runs-on: ubuntu-latest
+    permissions:
+      attestations: write
+      contents: read
+      id-token: write
+      packages: write
+    steps:
+      - uses: actions/checkout@v7
+
+      # Preserve the workflow's build recipe before checking out release source.
+      # Recovery can fix build tools without changing an already published tag.
+      - name: Preserve Dockerfile
+        run: cp Dockerfile "$RUNNER_TEMP/proxelar.Dockerfile"
+
+      - name: Check out release source
+        if: inputs.tag != ''
+        uses: actions/checkout@v7
+        with:
+          ref: refs/tags/${{ inputs.tag }}
+
+      - uses: docker/setup-buildx-action@v4
+
+      - name: Log in to ghcr.io
+        if: github.event_name != 'pull_request'
+        uses: docker/login-action@v4.6.0
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Collect image metadata
+        id: meta
+        uses: docker/metadata-action@v6
+        with:
+          images: ghcr.io/${{ github.repository }}
+          tags: |
+            type=ref,event=pr
+            type=semver,pattern={{version}},value=${{ inputs.tag }},enable=${{ github.event_name != 'pull_request' }}
+            type=semver,pattern={{major}}.{{minor}},value=${{ inputs.tag }},enable=${{ github.event_name != 'pull_request' }}
+            type=raw,value=latest,enable=${{ github.event_name != 'pull_request' && !contains(inputs.tag, '-') }}
+
+      - name: Build container
+        id: build
+        uses: docker/build-push-action@v7
+        with:
+          context: .
+          file: ${{ runner.temp }}/proxelar.Dockerfile
+          platforms: linux/amd64
+          push: ${{ github.event_name != 'pull_request' }}
+          load: ${{ github.event_name == 'pull_request' }}
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+      - name: Check packaged version
+        if: github.event_name == 'pull_request'
+        env:
+          IMAGE: ghcr.io/${{ github.repository }}:pr-${{ github.event.number }}
+        run: docker run --rm "$IMAGE" --version
+
+      - name: Attest image provenance
+        if: github.event_name != 'pull_request'
+        uses: actions/attest-build-provenance@v4
+        with:
+          subject-name: ghcr.io/${{ github.repository }}
+          subject-digest: ${{ steps.build.outputs.digest }}
+          push-to-registry: true

@@ -223,54 +223,11 @@ jobs:
   container:
     name: Publish container image
     needs: release
-    runs-on: ubuntu-latest
+    uses: ./.github/workflows/container.yml
     permissions:
       attestations: write
       contents: read
       id-token: write
       packages: write
-    steps:
-      - uses: actions/checkout@v7
-        with:
-          ref: ${{ inputs.tag && format('refs/tags/{0}', inputs.tag) || github.sha }}
-
-      - uses: docker/setup-buildx-action@v4
-
-      - name: Log in to ghcr.io
-        uses: docker/login-action@v4.6.0
-        with:
-          registry: ghcr.io
-          username: ${{ github.actor }}
-          password: ${{ secrets.GITHUB_TOKEN }}
-
-      - name: Collect image metadata
-        id: meta
-        uses: docker/metadata-action@v6
-        with:
-          images: ghcr.io/${{ github.repository }}
-          tags: |
-            type=semver,pattern={{version}},value=${{ env.RELEASE_TAG }}
-            type=semver,pattern={{major}}.{{minor}},value=${{ env.RELEASE_TAG }}
-            type=raw,value=latest,enable=${{ !contains(inputs.tag || github.ref_name, '-') }}
-
-      # linux/amd64 only for now: the Dockerfile compiles the workspace from
-      # source, and building vendored OpenSSL and Lua for arm64 under QEMU
-      # emulation risks exceeding the job timeout on every release.
-      - name: Build and push
-        id: build
-        uses: docker/build-push-action@v7
-        with:
-          context: .
-          platforms: linux/amd64
-          push: true
-          tags: ${{ steps.meta.outputs.tags }}
-          labels: ${{ steps.meta.outputs.labels }}
-          cache-from: type=gha
-          cache-to: type=gha,mode=max
-
-      - name: Attest image provenance
-        uses: actions/attest-build-provenance@v4
-        with:
-          subject-name: ghcr.io/${{ github.repository }}
-          subject-digest: ${{ steps.build.outputs.digest }}
-          push-to-registry: true
+    with:
+      tag: ${{ inputs.tag || github.ref_name }}

@@ -9,6 +9,8 @@
 
 ### Fixed
 
+- Install Git in the container builder for BoringSSL patch setup, test container builds in pull requests, and allow independent container release recovery.
+
 - Build Linux ARM64 release artifacts on a native runner with a supported libclang, validate release builds in workflow pull requests, and allow release recovery against an existing tag.
 
 ## [0.6.0] - 2026-09-13
