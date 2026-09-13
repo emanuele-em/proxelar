@@ -25,8 +25,8 @@ semver = { version = "1", features = ["serde"], optional = true }
 sha2 = { version = "0.11", optional = true }
 # Body (de)compression for the Lua scripting hooks (gzip/deflate + brotli).
 flate2 = "1.1"
-brotli = "8"
-zstd = "0.13"
+brotli = "9"
+zstd = "0.14"
 encoding_rs = "0.8"
 hyper = { version = "1.10", features = ["http1", "http2", "server", "client"] }
 hyper-util = { version = "0.1", features = ["tokio", "server-auto", "client-legacy", "http1", "http2"] }
