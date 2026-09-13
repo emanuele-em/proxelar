@@ -3,6 +3,7 @@ use crate::ca::CertificateAuthority;
 use crate::proxy::test_support::{request, Context};
 use bytes::Bytes;
 use http::StatusCode;
+use std::error::Error as _;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
 #[tokio::test]
@@ -224,7 +225,28 @@ async fn negotiated_http2_reconnects_after_goaway() {
                 signal = close_rx.recv() => { signal.unwrap(); }
             }
             connection.as_mut().graceful_shutdown();
-            connection.await.unwrap();
+            if let Err(error) = connection.await {
+                // The drained client may close as soon as it receives GOAWAY,
+                // before Hyper finishes writing its shutdown frames. Keep
+                // accepting the replacement connection in that case, while
+                // still failing on protocol errors or unrelated I/O failures.
+                let kind = error
+                    .source()
+                    .and_then(|source| source.downcast_ref::<std::io::Error>())
+                    .map(std::io::Error::kind);
+                assert!(
+                    matches!(
+                        kind,
+                        Some(
+                            std::io::ErrorKind::BrokenPipe
+                                | std::io::ErrorKind::ConnectionReset
+                                | std::io::ErrorKind::ConnectionAborted
+                                | std::io::ErrorKind::UnexpectedEof
+                        )
+                    ),
+                    "unexpected server error after GOAWAY: {error:?}"
+                );
+            }
         }
     });
     let upstream = NativeUpstream::negotiated(
