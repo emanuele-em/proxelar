@@ -25,7 +25,7 @@
 
 ### Fixed
 
-- Open a changelog attribution pull request instead of pushing directly to protected main, attribute only entries introduced by the source merge, and dispatch CI for the generated branch.
+- Open a changelog attribution pull request instead of pushing directly to protected main, attribute only entries introduced by the source merge, and dispatch CI for the generated branch. ([#183](https://github.com/emanuele-em/proxelar/pull/183) by @emanuele-em)
 
 - Cancel pending HTTP/2 handlers when the client resets its stream, releasing intercepted requests and upstream work. ([#182](https://github.com/emanuele-em/proxelar/pull/182) by @emanuele-em)
 - Frame HTTP/1 `205 Reset Content` responses with `Content-Length: 0` so keep-alive clients complete the response and can reuse the connection. ([#182](https://github.com/emanuele-em/proxelar/pull/182) by @emanuele-em)
