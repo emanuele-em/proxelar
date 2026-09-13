@@ -9,6 +9,7 @@
 
 ### Fixed
 
+- Render multi-line request and response bodies in the TUI as separate rows instead of collapsing them into a single wrapped row.
 - Update dependencies to address the `h2` empty DATA frame denial of service and the `event-listener` and `lru` soundness advisories, and replace a yanked `chacha20` release.
 
 ## [0.5.1] - 2026-07-31
