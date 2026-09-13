@@ -459,6 +459,10 @@ fn prepare_response_framing(
         response.head.headers.remove("transfer-encoding");
         if status.is_informational() || status == StatusCode::NO_CONTENT {
             response.head.headers.remove("content-length");
+        } else if status == StatusCode::RESET_CONTENT {
+            // 205 forbids content, but unlike 204 it still needs explicit
+            // HTTP/1 framing to terminate a persistent response.
+            set_header(&mut response.head.headers, "content-length", "0")?;
         }
         return Ok(if tunnel {
             BodyFraming::Tunnel

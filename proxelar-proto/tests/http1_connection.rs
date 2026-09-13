@@ -984,3 +984,59 @@ async fn pool_retries_concurrent_requests_that_were_queued_but_never_written() {
     assert_eq!(bodies, expected);
     assert_eq!(connections.load(Ordering::SeqCst), paths.len());
 }
+
+#[tokio::test]
+async fn reset_content_response_is_framed_and_keeps_connection_reusable() {
+    #[derive(Clone)]
+    struct ResetContent(HeaderBlock);
+    impl HttpService for ResetContent {
+        fn call(&mut self, _: ProxyRequest) -> BoxFuture<'_, Result<ProxyResponse, ProtocolError>> {
+            let headers = self.0.clone();
+            Box::pin(async move {
+                Ok(ProxyResponse::new(
+                    ResponseHead::new(StatusCode::RESET_CONTENT, Version::HTTP_11, headers),
+                    ProxyBody::full("must not be sent"),
+                ))
+            })
+        }
+    }
+    for framing in [
+        None,
+        Some(("Content-Length", "16")),
+        Some(("Transfer-Encoding", "chunked")),
+    ] {
+        let mut headers = HeaderBlock::new();
+        if let Some((name, value)) = framing {
+            headers.add(name, value).unwrap();
+        }
+        let (client_io, server_io) = tokio::io::duplex(65536);
+        let server = tokio::spawn(serve_connection(
+            server_io,
+            ResetContent(headers),
+            ConnectionConfig::default(),
+        ));
+        let client = Http1Client::new(client_io, ConnectionConfig::default());
+        // A second response confirms that framing does not depend on EOF.
+        for _ in 0..2 {
+            let response = tokio::time::timeout(
+                Duration::from_secs(1),
+                client.send_request(request(Method::GET, "/", ProxyBody::empty())),
+            )
+            .await
+            .unwrap()
+            .unwrap();
+            assert_eq!(response.head.status, StatusCode::RESET_CONTENT);
+            assert_eq!(
+                response.head.headers.get("content-length"),
+                Some(b"0".as_slice())
+            );
+            assert!(response.head.headers.get("transfer-encoding").is_none());
+            let body = tokio::time::timeout(Duration::from_secs(1), response.body.collect())
+                .await
+                .unwrap()
+                .unwrap();
+            assert!(body.data.is_empty());
+        }
+        server.abort();
+    }
+}

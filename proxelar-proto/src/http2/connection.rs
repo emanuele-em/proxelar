@@ -225,7 +225,16 @@ where
     };
     let request_method = head.method.clone();
     let body = recv_body(request.into_body());
-    let response = match service.call(ProxyRequest::new(head, body)).await {
+    let response = tokio::select! {
+        response = service.call(ProxyRequest::new(head, body)) => response,
+        reset = poll_fn(|cx| respond.poll_reset(cx)) => {
+            return Err(map_h2_error(match reset {
+                Ok(reason) => reason.into(),
+                Err(error) => error,
+            }));
+        }
+    };
+    let response = match response {
         Ok(response) => response,
         Err(error) => {
             respond.send_reset(reason_for_error(&error));

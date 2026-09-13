@@ -220,6 +220,8 @@ struct StreamState {
     response: Option<oneshot::Sender<Result<ProxyResponse, ProtocolError>>>,
     response_body: Option<InboundFrameStream>,
     informational: Vec<proxelar_proto::ResponseHead>,
+    request_method: Method,
+    remaining_content_length: Option<u64>,
     task: Option<tokio::task::AbortHandle>,
 }
 
@@ -243,11 +245,31 @@ impl StreamState {
                 response: None,
                 response_body: None,
                 informational: Vec::new(),
+                request_method: Method::GET,
+                remaining_content_length: None,
                 task: None,
             },
             PollSender::new(outgoing),
             body,
         )
+    }
+
+    fn check_content_length(&mut self, length: usize, end: bool) -> Result<(), ProtocolError> {
+        if let Some(remaining) = self.remaining_content_length.as_mut() {
+            *remaining = remaining.checked_sub(length as u64).ok_or_else(|| {
+                protocol(
+                    ErrorKind::ProtocolViolation,
+                    "HTTP/3 body exceeds Content-Length",
+                )
+            })?;
+            if end && *remaining != 0 {
+                return Err(protocol(
+                    ErrorKind::ProtocolViolation,
+                    "HTTP/3 body ended before Content-Length",
+                ));
+            }
+        }
+        Ok(())
     }
 }
 
@@ -448,8 +470,16 @@ impl Driver {
                             reset(&mut self.connection, id, 0x10b);
                             continue;
                         }
-                        self.requests_seen += 1;
                         let (mut state, send, recv) = StreamState::new(false);
+                        state.remaining_content_length = match content_length(&list) {
+                            Ok(length) => length,
+                            Err(error) => {
+                                reset(&mut self.connection, id, MESSAGE_ERROR);
+                                tracing::debug!("Rejected HTTP/3 headers on stream {id}: {error}");
+                                continue;
+                            }
+                        };
+                        self.requests_seen += 1;
                         let service = service.clone();
                         state.task = Some(self.tasks.spawn(async move {
                             handle_server_request(
@@ -545,6 +575,7 @@ impl Driver {
                 match http3.send_request(&mut self.connection, &headers, false) {
                     Ok(id) => {
                         let (mut stream, sender, body) = StreamState::new(true);
+                        stream.request_method = request.request.head.method.clone();
                         stream.response = Some(request.response);
                         stream.response_body = Some(body);
                         stream.task = Some(self.tasks.spawn(async move {
@@ -675,6 +706,14 @@ impl Driver {
                             let mut buffer = [0; BODY_CHUNK];
                             match http3.recv_body(&mut self.connection, id, &mut buffer) {
                                 Ok(length) => {
+                                    if let Err(error) = stream.check_content_length(length, false) {
+                                        reset(&mut self.connection, id, MESSAGE_ERROR);
+                                        let _ =
+                                            stream.inbound.send_item(InboundFrame::Error(error));
+                                        finished.push(id);
+                                        progress = true;
+                                        continue;
+                                    }
                                     let _ = stream.inbound.send_item(InboundFrame::Body(
                                         Bytes::copy_from_slice(&buffer[..length]),
                                         false,
@@ -694,7 +733,17 @@ impl Driver {
                                 }
                             }
                         }
-                        if let Some(frame) = stream.pending_in.pop_front() {
+                        if let Some(mut frame) = stream.pending_in.pop_front() {
+                            if matches!(
+                                frame,
+                                InboundFrame::Body(_, true) | InboundFrame::Trailers(_)
+                            ) {
+                                if let Err(error) = stream.check_content_length(0, true) {
+                                    reset(&mut self.connection, id, MESSAGE_ERROR);
+                                    frame = InboundFrame::Error(error);
+                                    finished.push(id);
+                                }
+                            }
                             let _ = stream.inbound.send_item(frame);
                             progress = true;
                         }
@@ -785,6 +834,7 @@ impl Drop for Driver {
 fn receive_headers(stream: &mut StreamState, headers: &[Header]) -> Result<(), ProtocolError> {
     if stream.response.is_some() {
         let head = decode_response_headers(headers)?;
+        let length = content_length(headers)?;
         if head.status.is_informational() {
             if head.status == StatusCode::SWITCHING_PROTOCOLS || stream.informational.len() >= 16 {
                 return Err(protocol(
@@ -794,6 +844,16 @@ fn receive_headers(stream: &mut StreamState, headers: &[Header]) -> Result<(), P
             }
             stream.informational.push(head);
         } else {
+            stream.remaining_content_length = if proxelar_proto::response_body_is_forbidden(
+                &stream.request_method,
+                head.status,
+            ) {
+                Some(0)
+            } else if stream.request_method == Method::CONNECT && head.status.is_success() {
+                None // CONNECT DATA carries tunnel bytes, not response content.
+            } else {
+                length
+            };
             let response = ProxyResponse::new(
                 head,
                 inbound_body(stream.response_body.take().expect("pending response body")),
@@ -814,6 +874,36 @@ fn receive_headers(stream: &mut StreamState, headers: &[Header]) -> Result<(), P
             .push_back(InboundFrame::Trailers(trailers));
     }
     Ok(())
+}
+
+// quiche delivers HTTP/3 frames; the adapter must validate HTTP message length.
+// RFC 9110 section 8.6 permits rejecting repeated Content-Length values.
+fn content_length(headers: &[Header]) -> Result<Option<u64>, ProtocolError> {
+    let mut length = None;
+    for header in headers
+        .iter()
+        .filter(|header| header.name() == b"content-length")
+    {
+        let value = header.value();
+        if length.is_some() || value.is_empty() || !value.iter().all(u8::is_ascii_digit) {
+            return Err(protocol(
+                ErrorKind::ProtocolViolation,
+                "invalid or repeated HTTP/3 Content-Length",
+            ));
+        }
+        length = Some(
+            std::str::from_utf8(value)
+                .ok()
+                .and_then(|value| value.parse::<u64>().ok())
+                .ok_or_else(|| {
+                    protocol(
+                        ErrorKind::ProtocolViolation,
+                        "HTTP/3 Content-Length overflows u64",
+                    )
+                })?,
+        );
+    }
+    Ok(length)
 }
 
 async fn writable_at(socket: &UdpSocket, deadline: Option<Instant>) -> io::Result<()> {

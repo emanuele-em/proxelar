@@ -697,3 +697,64 @@ async fn peer_reset_drops_pending_upload_and_keeps_other_streams_usable() {
     response.body.collect().await.unwrap();
     server.abort();
 }
+
+#[derive(Clone)]
+struct PendingService {
+    started: Arc<tokio::sync::Notify>,
+    dropped: Arc<tokio::sync::Notify>,
+}
+
+struct DropSignal(Arc<tokio::sync::Notify>);
+
+impl Drop for DropSignal {
+    fn drop(&mut self) {
+        self.0.notify_one();
+    }
+}
+
+impl HttpService for PendingService {
+    fn call(
+        &mut self,
+        request: ProxyRequest,
+    ) -> BoxFuture<'_, Result<ProxyResponse, ProtocolError>> {
+        Box::pin(async move {
+            let _request = request;
+            let _guard = DropSignal(self.dropped.clone());
+            self.started.notify_one();
+            std::future::pending().await
+        })
+    }
+}
+
+#[tokio::test]
+async fn reset_cancels_pending_http2_service() {
+    let started = Arc::new(tokio::sync::Notify::new());
+    let dropped = Arc::new(tokio::sync::Notify::new());
+    let service = PendingService {
+        started: started.clone(),
+        dropped: dropped.clone(),
+    };
+    let (client_io, server_io) = tokio::io::duplex(65536);
+    let server = tokio::spawn(serve_connection(
+        server_io,
+        service,
+        ConnectionConfig::default(),
+    ));
+    let (client, connection) = h2::client::handshake(client_io).await.unwrap();
+    let connection = tokio::spawn(connection);
+    let mut client = client.ready().await.unwrap();
+    let request = http::Request::builder()
+        .uri("https://example.test/")
+        .body(())
+        .unwrap();
+    let (_response, mut stream) = client.send_request(request, true).unwrap();
+    started.notified().await;
+    stream.send_reset(h2::Reason::CANCEL);
+    let cancelled = tokio::time::timeout(Duration::from_secs(1), dropped.notified()).await;
+    server.abort();
+    connection.abort();
+    assert!(
+        cancelled.is_ok(),
+        "reset left the pending service future alive"
+    );
+}

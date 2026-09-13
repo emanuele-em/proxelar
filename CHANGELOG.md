@@ -25,6 +25,10 @@
 
 ### Fixed
 
+- Cancel pending HTTP/2 handlers when the client resets its stream, releasing intercepted requests and upstream work.
+- Frame HTTP/1 `205 Reset Content` responses with `Content-Length: 0` so keep-alive clients complete the response and can reuse the connection.
+- Validate HTTP/3 Content-Length syntax and received body lengths. Reset malformed streams with `H3_MESSAGE_ERROR`, detect truncation before trailers or FIN, and retain HEAD/304 metadata and CONNECT tunnel behavior.
+
 - Keep the negotiated HTTP/2 GOAWAY regression test accepting replacement connections when the drained peer closes during server shutdown.
 - Retire negotiated HTTP/2 upstream connections after GOAWAY or connection failure before dispatching the next request, while allowing existing response streams to drain.
 - Retire closed idle HTTP/1 upstream connections before reuse, including negotiated connections, without retrying requests whose bytes were already sent. Detect HTTP/2 stream resets while upload or response bodies await data so abandoned senders release their resources.

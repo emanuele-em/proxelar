@@ -163,27 +163,37 @@ impl HttpService for EchoService {
                 1
             };
             let mut headers = HeaderBlock::new();
+            if let Some(lengths) = request.head.uri.path().strip_prefix("/content-length/") {
+                for length in lengths.split(';') {
+                    headers.add("content-length", length).unwrap();
+                }
+            }
             headers.add("x-first", "1").unwrap();
             headers.add("x-repeat", [0x80, 0xff]).unwrap();
             headers.add("x-middle", "2").unwrap();
             headers.add("x-repeat", "last").unwrap();
+            let status = if request.head.uri.path() == "/not-modified" {
+                headers.add("content-length", "999").unwrap();
+                StatusCode::NOT_MODIFIED
+            } else {
+                StatusCode::OK
+            };
             let body = if request.head.uri.path() == "/forbidden" {
                 ProxyBody::full("must not be sent")
             } else {
                 request.body
             };
-            Ok(ProxyResponse::new(
-                ResponseHead::new(StatusCode::OK, Version::HTTP_3, headers),
-                body,
+            Ok(
+                ProxyResponse::new(ResponseHead::new(status, Version::HTTP_3, headers), body)
+                    .with_informational(vec![
+                        ResponseHead::new(
+                            StatusCode::EARLY_HINTS,
+                            Version::HTTP_3,
+                            HeaderBlock::new(),
+                        );
+                        informational_count
+                    ]),
             )
-            .with_informational(vec![
-                ResponseHead::new(
-                    StatusCode::EARLY_HINTS,
-                    Version::HTTP_3,
-                    HeaderBlock::new(),
-                );
-                informational_count
-            ]))
         })
     }
 }
@@ -705,4 +715,116 @@ async fn inbound_body_surfaces_explicit_driver_error_once() {
     let mut body = inbound_body(recv);
     assert_eq!(body.next().await.unwrap().unwrap_err(), error);
     assert!(body.next().await.is_none());
+}
+
+#[tokio::test]
+async fn direct_driver_rejects_invalid_content_length_in_requests_and_responses() {
+    let endpoint = TestEndpoint::new().await;
+    let client = endpoint.client();
+    for value in [
+        "999",
+        "0",
+        "bogus",
+        "+3",
+        "-1",
+        "18446744073709551616",
+        "3,4",
+        "3;4",
+        "3,3",
+        "3;3",
+        "",
+    ] {
+        let mut request = echo_request("/echo", ProxyBody::full("abc"));
+        for length in value.split(';') {
+            request.head.headers.add("content-length", length).unwrap();
+        }
+        let result = within(client.send(request)).await;
+        if let Ok(response) = result {
+            assert!(
+                within(response.body.collect()).await.is_err(),
+                "accepted request Content-Length: {value}"
+            );
+        }
+        let request = echo_request(&format!("/content-length/{value}"), ProxyBody::full("abc"));
+        let result = within(client.send(request)).await;
+        if let Ok(response) = result {
+            assert!(
+                within(response.body.collect()).await.is_err(),
+                "accepted response Content-Length: {value}"
+            );
+        }
+        // A malformed message must reset its stream without killing the connection.
+        let response = within(client.send(echo_request("/echo", ProxyBody::full("ok"))))
+            .await
+            .unwrap();
+        assert_eq!(within(response.body.collect()).await.unwrap().data, "ok");
+    }
+}
+
+#[tokio::test]
+async fn direct_driver_accepts_matching_content_length_and_head_metadata() {
+    let endpoint = TestEndpoint::new().await;
+    let client = endpoint.client();
+    for value in ["3", "03"] {
+        let mut request = echo_request(&format!("/content-length/{value}"), ProxyBody::full("abc"));
+        for length in value.split(';') {
+            request.head.headers.add("content-length", length).unwrap();
+        }
+        let response = within(client.send(request)).await.unwrap();
+        assert_eq!(within(response.body.collect()).await.unwrap().data, "abc");
+    }
+    let mut request = echo_request("/content-length/999", ProxyBody::empty());
+    request.head.method = Method::HEAD;
+    let response = within(client.send(request)).await.unwrap();
+    assert_eq!(
+        response.head.headers.get("content-length"),
+        Some(b"999".as_slice())
+    );
+    assert!(within(response.body.collect())
+        .await
+        .unwrap()
+        .data
+        .is_empty());
+}
+
+#[tokio::test]
+async fn direct_driver_validates_content_length_before_trailers_and_fin() {
+    let endpoint = TestEndpoint::new().await;
+    let client = endpoint.client();
+    for length in ["3", "4"] {
+        let mut trailers = HeaderBlock::new();
+        trailers.add("x-checksum", "ok").unwrap();
+        let request = echo_request(
+            &format!("/content-length/{length}"),
+            ProxyBody::from_frames([
+                Ok(BodyFrame::Data(Bytes::from_static(b"abc"))),
+                Ok(BodyFrame::Trailers(trailers.clone())),
+            ]),
+        );
+        let response = within(client.send(request)).await.unwrap();
+        if length == "3" {
+            let body = within(response.body.collect()).await.unwrap();
+            assert_eq!(body.data, "abc");
+            assert_eq!(body.trailers, Some(trailers));
+        } else {
+            let mut body = response.body;
+            loop {
+                match within(body.next()).await {
+                    Some(Ok(BodyFrame::Data(_))) => {}
+                    Some(Err(_)) => break,
+                    frame => panic!("truncated body delivered trailers or FIN: {frame:?}"),
+                }
+            }
+        }
+    }
+    for path in ["/content-length/0", "/not-modified"] {
+        let response = within(client.send(echo_request(path, ProxyBody::empty())))
+            .await
+            .unwrap();
+        assert!(within(response.body.collect())
+            .await
+            .unwrap()
+            .data
+            .is_empty());
+    }
 }
