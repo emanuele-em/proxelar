@@ -13,6 +13,8 @@ By default, Proxelar stores the CA files in:
 
 The private key stays on your machine. Anyone with the key can mint certificates trusted by clients where you installed the CA, so treat it as sensitive.
 
+If `XDG_CONFIG_HOME` is set, or you pass `--ca-dir`, the files live in that directory instead. See [state directory precedence](../cli-reference.md#state-directory-precedence).
+
 ## Install through the built-in page
 
 Start Proxelar, configure your browser or device to use `127.0.0.1:8080`, then visit:
@@ -33,7 +35,7 @@ Remove trust from every place where you installed the CA:
 - **Firefox**: remove it from Settings > Privacy & Security > Certificates > View Certificates.
 - **iOS/Android**: remove the installed profile or user CA from system settings.
 
-After trust is removed, deleting `~/.proxelar/` removes Proxelar's local copy of the certificate and key.
+After trust is removed, deleting the state directory (`~/.proxelar/` by default) removes Proxelar's local copy of the certificate and key.
 
 ## Limitations
 
