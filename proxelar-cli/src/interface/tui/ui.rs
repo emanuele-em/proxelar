@@ -1444,7 +1444,7 @@ mod tests {
             Bytes::from_static(b"{\"a\":1,\"b\":[true,null]}"),
             0,
         );
-        let lines = build_response_lines(&res);
+        let lines = build_response_lines(&res, &Theme::default());
 
         assert!(lines.iter().all(|line| !line.to_string().contains('\n')));
 
@@ -1466,7 +1466,7 @@ mod tests {
             Bytes::from_static(b"first\nsecond\nthird"),
             0,
         );
-        let rendered: Vec<String> = build_response_lines(&res)
+        let rendered: Vec<String> = build_response_lines(&res, &Theme::default())
             .iter()
             .map(ToString::to_string)
             .collect();
@@ -1491,8 +1491,11 @@ mod tests {
             0,
         );
 
-        let rendered = build_response_lines(&with_newline);
-        assert_eq!(rendered.len(), build_response_lines(&without_newline).len());
+        let rendered = build_response_lines(&with_newline, &Theme::default());
+        assert_eq!(
+            rendered.len(),
+            build_response_lines(&without_newline, &Theme::default()).len()
+        );
         assert_eq!(
             rendered.last().expect("body row").to_string(),
             "only",
