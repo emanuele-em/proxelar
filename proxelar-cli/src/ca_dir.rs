@@ -84,39 +84,53 @@ fn should_warn_relocation(
     legacy: Option<&Path>,
     exists: impl Fn(&Path) -> bool,
 ) -> bool {
+    let has_ca_pair =
+        |dir: &Path| exists(&dir.join("proxelar-ca.pem")) && exists(&dir.join("proxelar-ca.key"));
     source == Source::XdgConfigHome
-        && legacy.is_some_and(|legacy| legacy != resolved && exists(legacy))
-        && !exists(resolved)
+        && legacy.is_some_and(|legacy| {
+            legacy != resolved
+                && exists(legacy)
+                && (!exists(resolved) || (has_ca_pair(legacy) && !has_ca_pair(resolved)))
+        })
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
 
+    fn absolute_path(name: &str) -> PathBuf {
+        let root = if cfg!(windows) { r"C:\" } else { "/" };
+        Path::new(root).join(name)
+    }
+
     #[test]
     fn cli_arg_wins_over_everything() {
         let (dir, source) = resolve_ca_dir_from_parts(
-            Some(PathBuf::from("/explicit")),
-            Some("/xdg".into()),
-            Some(PathBuf::from("/home")),
+            Some(absolute_path("explicit")),
+            Some(absolute_path("xdg").into_os_string()),
+            Some(absolute_path("home")),
         );
-        assert_eq!(dir, PathBuf::from("/explicit"));
+        assert_eq!(dir, absolute_path("explicit"));
         assert_eq!(source, Source::CliArg);
     }
 
     #[test]
     fn uses_xdg_config_home_when_set() {
-        let (dir, source) =
-            resolve_ca_dir_from_parts(None, Some("/xdg".into()), Some(PathBuf::from("/home")));
-        assert_eq!(dir, PathBuf::from("/xdg/proxelar"));
+        let xdg = absolute_path("xdg");
+        let (dir, source) = resolve_ca_dir_from_parts(
+            None,
+            Some(xdg.clone().into_os_string()),
+            Some(absolute_path("home")),
+        );
+        assert_eq!(dir, xdg.join("proxelar"));
         assert_eq!(source, Source::XdgConfigHome);
     }
 
     #[test]
     fn ignores_empty_xdg_config_home() {
         let (dir, source) =
-            resolve_ca_dir_from_parts(None, Some("".into()), Some(PathBuf::from("/home")));
-        assert_eq!(dir, PathBuf::from("/home/.proxelar"));
+            resolve_ca_dir_from_parts(None, Some("".into()), Some(absolute_path("home")));
+        assert_eq!(dir, absolute_path("home").join(".proxelar"));
         assert_eq!(source, Source::HomeDefault);
     }
 
@@ -125,96 +139,148 @@ mod tests {
         let (dir, source) = resolve_ca_dir_from_parts(
             None,
             Some("relative/config".into()),
-            Some(PathBuf::from("/home")),
+            Some(absolute_path("home")),
         );
-        assert_eq!(dir, PathBuf::from("/home/.proxelar"));
+        assert_eq!(dir, absolute_path("home").join(".proxelar"));
         assert_eq!(source, Source::HomeDefault);
     }
 
     #[test]
     fn falls_back_to_home_proxelar_without_xdg() {
-        let (dir, source) = resolve_ca_dir_from_parts(None, None, Some(PathBuf::from("/home")));
-        assert_eq!(dir, PathBuf::from("/home/.proxelar"));
+        let (dir, source) = resolve_ca_dir_from_parts(None, None, Some(absolute_path("home")));
+        assert_eq!(dir, absolute_path("home").join(".proxelar"));
         assert_eq!(source, Source::HomeDefault);
     }
 
     /// Existence predicate that reports true only for the listed paths.
-    fn existing(paths: &[&str]) -> impl Fn(&Path) -> bool + 'static {
-        let paths: Vec<PathBuf> = paths.iter().map(PathBuf::from).collect();
+    fn existing(paths: Vec<PathBuf>) -> impl Fn(&Path) -> bool {
         move |p| paths.iter().any(|e| e == p)
     }
 
-    const XDG: &str = "/xdg/proxelar";
-    const LEGACY: &str = "/home/.proxelar";
-
     #[test]
     fn warns_when_xdg_is_new_and_legacy_dir_exists() {
+        let xdg = absolute_path("xdg").join("proxelar");
+        let legacy = absolute_path("home").join(".proxelar");
         assert!(should_warn_relocation(
-            Path::new(XDG),
+            &xdg,
             Source::XdgConfigHome,
-            Some(Path::new(LEGACY)),
-            existing(&[LEGACY]),
+            Some(&legacy),
+            existing(vec![legacy.clone()]),
         ));
     }
 
     #[test]
     fn silent_when_legacy_dir_absent() {
+        let xdg = absolute_path("xdg").join("proxelar");
+        let legacy = absolute_path("home").join(".proxelar");
         assert!(!should_warn_relocation(
-            Path::new(XDG),
+            &xdg,
             Source::XdgConfigHome,
-            Some(Path::new(LEGACY)),
-            existing(&[]),
+            Some(&legacy),
+            existing(vec![]),
         ));
     }
 
     #[test]
-    fn silent_when_xdg_dir_already_exists() {
+    fn silent_when_existing_directories_have_no_ca_pair() {
+        let xdg = absolute_path("xdg").join("proxelar");
+        let legacy = absolute_path("home").join(".proxelar");
         assert!(!should_warn_relocation(
-            Path::new(XDG),
+            &xdg,
             Source::XdgConfigHome,
-            Some(Path::new(LEGACY)),
-            existing(&[XDG, LEGACY]),
+            Some(&legacy),
+            existing(vec![xdg.clone(), legacy.clone()]),
+        ));
+    }
+
+    #[test]
+    fn warns_when_legacy_has_ca_pair_and_xdg_is_uninitialized() {
+        let xdg = absolute_path("xdg").join("proxelar");
+        let legacy = absolute_path("home").join(".proxelar");
+        for destination_entry in [
+            None,
+            Some("addons"),
+            Some("proxelar-ca.pem"),
+            Some("proxelar-ca.key"),
+        ] {
+            let mut paths = vec![
+                legacy.clone(),
+                legacy.join("proxelar-ca.pem"),
+                legacy.join("proxelar-ca.key"),
+                xdg.clone(),
+            ];
+            if let Some(entry) = destination_entry {
+                paths.push(xdg.join(entry));
+            }
+            assert!(
+                should_warn_relocation(&xdg, Source::XdgConfigHome, Some(&legacy), existing(paths)),
+                "destination entry: {destination_entry:?}",
+            );
+        }
+    }
+
+    #[test]
+    fn silent_when_xdg_has_ca_pair() {
+        let xdg = absolute_path("xdg").join("proxelar");
+        let legacy = absolute_path("home").join(".proxelar");
+        assert!(!should_warn_relocation(
+            &xdg,
+            Source::XdgConfigHome,
+            Some(&legacy),
+            existing(vec![
+                legacy.clone(),
+                legacy.join("proxelar-ca.pem"),
+                legacy.join("proxelar-ca.key"),
+                xdg.clone(),
+                xdg.join("proxelar-ca.pem"),
+                xdg.join("proxelar-ca.key"),
+            ]),
         ));
     }
 
     #[test]
     fn silent_when_cli_arg_given() {
+        let legacy = absolute_path("home").join(".proxelar");
         assert!(!should_warn_relocation(
-            Path::new("/explicit"),
+            &absolute_path("explicit"),
             Source::CliArg,
-            Some(Path::new(LEGACY)),
-            existing(&[LEGACY]),
+            Some(&legacy),
+            existing(vec![legacy.clone()]),
         ));
     }
 
     #[test]
     fn silent_when_home_default() {
+        let legacy = absolute_path("home").join(".proxelar");
         assert!(!should_warn_relocation(
-            Path::new(LEGACY),
+            &legacy,
             Source::HomeDefault,
-            Some(Path::new(LEGACY)),
-            existing(&[LEGACY]),
+            Some(&legacy),
+            existing(vec![legacy.clone()]),
         ));
     }
 
     #[test]
     fn silent_when_home_dir_unknown() {
+        let xdg = absolute_path("xdg").join("proxelar");
+        let legacy = absolute_path("home").join(".proxelar");
         assert!(!should_warn_relocation(
-            Path::new(XDG),
+            &xdg,
             Source::XdgConfigHome,
             None,
-            existing(&[LEGACY]),
+            existing(vec![legacy]),
         ));
     }
 
     /// `XDG_CONFIG_HOME=$HOME` resolves to the legacy path itself; not a relocation.
     #[test]
     fn silent_when_xdg_resolves_to_legacy_path() {
+        let legacy = absolute_path("home").join(".proxelar");
         assert!(!should_warn_relocation(
-            Path::new(LEGACY),
+            &legacy,
             Source::XdgConfigHome,
-            Some(Path::new(LEGACY)),
-            existing(&[LEGACY]),
+            Some(&legacy),
+            existing(vec![legacy.clone()]),
         ));
     }
 }
