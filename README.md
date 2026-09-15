@@ -202,7 +202,7 @@ proxelar -m wireguard -b 0.0.0.0 -p 51820 \
 | `--api-token` | Fixed bearer token for the GUI/headless API; random when omitted | random |
 | `--launch-browser` | Launch an isolated Chromium-family profile using the proxy | off |
 | `--wireguard-endpoint` | Public/LAN `HOST:PORT` written to the generated client config | derived from bind route |
-| `--theme` | TUI color theme: `default`/`dark`/`light`, `system`, a bundled name (`cyberdream`, `cyberdream-light`), or `~/.proxelar/themes/<name>.toml` | `default` |
+| `--theme` | TUI color theme: `default`/`dark`/`light`, `system`, a bundled name (`cyberdream`, `cyberdream-light`), or a custom name without a path or `.toml` suffix | `default` |
 
 </details>
 
@@ -212,7 +212,7 @@ proxelar -m wireguard -b 0.0.0.0 -p 51820 \
 
 ## Theming
 
-The TUI's colors are configurable via `~/.proxelar/config.toml`:
+The TUI's colors are configurable via `CA_DIR/config.toml`. Use `--ca-dir` to select the directory; it normally defaults to `~/.proxelar`:
 
 ```toml
 theme = "cyberdream"
@@ -221,11 +221,11 @@ theme = "cyberdream"
 `theme` accepts:
 
 - `default` / `dark` / `light` — the built-in palette (plain ANSI colors, so it already adapts to whichever light/dark scheme your terminal itself uses)
-- `system` — auto-detects the terminal/OS appearance and picks `theme_dark` or `theme_light` below (both default to `default` if unset)
+- `system` detects the terminal/OS appearance at startup and picks `theme_dark` or `theme_light` below (both default to `default` if unset)
 - a bundled name: `cyberdream`, `cyberdream-light`, `cyberdream-muted`, `rose-pine`, `rose-pine-dawn`, `tokyonight`, `tokyonight-day`, `dracula`, `alucard`, `catppuccin-mocha`, `catppuccin-latte`
-- a custom name resolved from `~/.proxelar/themes/<name>.toml`
+- a custom name resolved from `CA_DIR/themes/<name>.toml`
 
-For light/dark auto-switching:
+To select a light or dark theme at startup (appearance changes while running do not switch themes):
 
 ```toml
 theme = "system"
@@ -245,7 +245,7 @@ A custom theme file only needs to specify the colors it changes — everything e
 
 ### Writing a custom theme
 
-Create a file per theme under the `themes/` folder inside your config directory (`~/.proxelar/themes/` or `$XDG_CONFIG_HOME/proxelar/themes/` — see Configuration above). The filename (minus `.toml`) is the theme name:
+Create each theme file at `CA_DIR/themes/<name>.toml` (normally `~/.proxelar/themes/<name>.toml`). The filename without `.toml` is the theme name:
 
 ```
 ~/.proxelar/
@@ -279,7 +279,7 @@ Or just the light one:
 theme = "my-light-theme"
 ```
 
-Or both together, auto-switching with your terminal/OS appearance:
+Or select between them at startup based on your terminal/OS appearance:
 
 ```toml
 # config.toml

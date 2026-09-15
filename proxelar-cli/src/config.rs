@@ -193,6 +193,7 @@ mod tests {
 
     #[test]
     fn system_theme_uses_theme_dark_or_theme_light() {
+        let _guard = crate::theme::test_support::ColorfgbgGuard::new();
         let dir = Path::new("/nonexistent");
         let config = AppConfig {
             theme: Some("system".to_string()),
@@ -208,7 +209,6 @@ mod tests {
         std::env::set_var("COLORFGBG", "0;15"); // light background
         let (light_resolved, warnings) = resolve_theme(None, &config, dir);
         assert!(warnings.is_empty());
-        std::env::remove_var("COLORFGBG");
 
         // theme_dark and theme_light must resolve to their own distinct
         // named theme, not just "any non-default theme".
@@ -226,6 +226,7 @@ mod tests {
     /// pick different colors on top of that.
     #[test]
     fn system_without_dark_light_config_is_appearance_independent() {
+        let _guard = crate::theme::test_support::ColorfgbgGuard::new();
         let dir = Path::new("/nonexistent");
         let config = AppConfig {
             theme: Some("system".to_string()),
@@ -239,7 +240,6 @@ mod tests {
         std::env::set_var("COLORFGBG", "0;15"); // light background
         let (light_resolved, warnings) = resolve_theme(None, &config, dir);
         assert!(warnings.is_empty());
-        std::env::remove_var("COLORFGBG");
 
         assert_eq!(dark_resolved, light_resolved);
         assert_eq!(dark_resolved, crate::theme::Theme::default());
@@ -249,6 +249,7 @@ mod tests {
     /// actually change; everything else still inherits `Theme::default()`.
     #[test]
     fn theme_dark_only_overrides_specified_colors() {
+        let _guard = crate::theme::test_support::ColorfgbgGuard::new();
         let dir = std::env::temp_dir().join(format!(
             "proxelar-test-partial-dark-{}-{}",
             std::process::id(),
@@ -269,7 +270,6 @@ mod tests {
         };
         std::env::set_var("COLORFGBG", "15;0"); // dark background
         let (theme, warnings) = resolve_theme(None, &config, &dir);
-        std::env::remove_var("COLORFGBG");
 
         assert!(warnings.is_empty());
         assert_eq!(

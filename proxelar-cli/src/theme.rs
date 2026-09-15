@@ -742,6 +742,38 @@ fn set_theme_field(theme: &mut Theme, key: &str, color: Color) -> bool {
 }
 
 #[cfg(test)]
+pub(crate) mod test_support {
+    use std::ffi::OsString;
+    use std::sync::{Mutex, MutexGuard};
+
+    static COLORFGBG_LOCK: Mutex<()> = Mutex::new(());
+
+    pub struct ColorfgbgGuard {
+        previous: Option<OsString>,
+        _lock: MutexGuard<'static, ()>,
+    }
+
+    impl ColorfgbgGuard {
+        pub fn new() -> Self {
+            let lock = COLORFGBG_LOCK.lock().unwrap_or_else(|err| err.into_inner());
+            Self {
+                previous: std::env::var_os("COLORFGBG"),
+                _lock: lock,
+            }
+        }
+    }
+
+    impl Drop for ColorfgbgGuard {
+        fn drop(&mut self) {
+            match &self.previous {
+                Some(value) => std::env::set_var("COLORFGBG", value),
+                None => std::env::remove_var("COLORFGBG"),
+            }
+        }
+    }
+}
+
+#[cfg(test)]
 mod tests {
     use super::*;
 
@@ -839,10 +871,10 @@ mod tests {
 
     #[test]
     fn is_dark_mode_respects_colorfgbg() {
+        let _guard = test_support::ColorfgbgGuard::new();
         std::env::set_var("COLORFGBG", "15;0");
         assert!(is_dark_mode());
         std::env::set_var("COLORFGBG", "0;15");
         assert!(!is_dark_mode());
-        std::env::remove_var("COLORFGBG");
     }
 }
