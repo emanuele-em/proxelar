@@ -7,7 +7,13 @@
 
 ## [Unreleased]
 
+### Added
+
+- Add a customizable TUI color theme system: a `--theme` flag / `config.toml` `theme` key selects `default`/`dark`/`light`, `system` (auto-detects terminal/OS appearance via `theme_dark`/`theme_light`), a bundled preset (`cyberdream`, `cyberdream-light`, `cyberdream-muted`, `rose-pine`, `rose-pine-dawn`, `tokyonight`, `tokyonight-day`, `dracula`, `alucard`, `catppuccin-mocha`, `catppuccin-latte`), or a custom theme file under `CA_DIR/themes/<name>.toml`. Custom and bundled theme files only need to override the colors they change; a `[colors]` table in `config.toml` also allows one-off overrides with no theme file. Unknown theme names, unknown color keys, and invalid colors warn and fall back to the default palette rather than failing to start. `Theme::default()` reproduces every previously hardcoded ANSI color, so existing setups are unaffected until a theme is chosen.
+
 ### Fixed
+
+- Serialize the TUI theme system's appearance-detection tests on a shared guard so parallel test runs no longer race on the process-wide `COLORFGBG` environment variable.
 
 - Install Git in the container builder for BoringSSL patch setup, test container builds in pull requests, and allow independent container release recovery. ([#188](https://github.com/emanuele-em/proxelar/pull/188) by @emanuele-em)
 
