@@ -8,6 +8,8 @@ use proxyapi_models::{
 };
 use ratatui::widgets::TableState;
 
+use crate::theme::Theme;
+
 const MAX_ENTRIES: usize = 10_000;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -266,6 +268,7 @@ pub struct AppState {
     pub detail_scroll: usize,
     /// When true, `detail_scroll` auto-tracks the latest WS frame (tail -f behaviour).
     pub frames_follow: bool,
+    pub theme: Theme,
 }
 
 pub(crate) fn matches_filter(entry: &FlowEntry, filter: Option<&str>) -> bool {
@@ -315,6 +318,7 @@ impl AppState {
             show_help: false,
             detail_scroll: 0,
             frames_follow: true,
+            theme: Theme::default(),
         }
     }
 
