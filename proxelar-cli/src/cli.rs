@@ -53,7 +53,7 @@ pub struct Args {
     /// to the terminal's own light/dark palette), "system" (see
     /// theme_dark/theme_light in config.toml), a bundled name (cyberdream,
     /// cyberdream-light), or a name resolved from
-    /// ~/.proxelar/themes/<name>.toml. Overrides config.toml's `theme` key.
+    /// `~/.proxelar/themes/<name>.toml`. Overrides config.toml's `theme` key.
     #[arg(long, value_name = "NAME")]
     pub theme: Option<String>,
 
