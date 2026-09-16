@@ -384,14 +384,14 @@ async fn reverse_https_propagates_client_alpn_offers_upstream_in_order() {
         replay_rx: None,
     });
     let (shutdown_tx, shutdown_rx) = tokio::sync::oneshot::channel();
-    let proxy_task = tokio::spawn(async move {
+    let mut proxy_task = tokio::spawn(async move {
         proxy
             .start(async {
                 shutdown_rx.await.ok();
             })
             .await
     });
-    wait_for_tcp(proxy_addr).await;
+    wait_for_proxy_ready(proxy_addr, &mut proxy_task).await;
 
     let proxy_ca = std::fs::read(ca_dir.path().join("proxelar-ca.pem")).unwrap();
     let mut roots = rustls::RootCertStore::empty();
@@ -464,14 +464,14 @@ async fn reverse_https_negotiates_h2_with_the_upstream() {
         replay_rx: None,
     });
     let (shutdown_tx, shutdown_rx) = tokio::sync::oneshot::channel();
-    let proxy_task = tokio::spawn(async move {
+    let mut proxy_task = tokio::spawn(async move {
         proxy
             .start(async {
                 shutdown_rx.await.ok();
             })
             .await
     });
-    wait_for_tcp(proxy_addr).await;
+    wait_for_proxy_ready(proxy_addr, &mut proxy_task).await;
 
     let proxy_ca = std::fs::read(ca_dir.path().join("proxelar-ca.pem")).unwrap();
     let mut roots = rustls::RootCertStore::empty();
@@ -547,14 +547,14 @@ async fn reverse_https_proxies_rfc8441_to_an_h2_upstream() {
         replay_rx: None,
     });
     let (shutdown_tx, shutdown_rx) = tokio::sync::oneshot::channel();
-    let proxy_task = tokio::spawn(async move {
+    let mut proxy_task = tokio::spawn(async move {
         proxy
             .start(async {
                 shutdown_rx.await.ok();
             })
             .await
     });
-    wait_for_tcp(proxy_addr).await;
+    wait_for_proxy_ready(proxy_addr, &mut proxy_task).await;
 
     let proxy_ca = std::fs::read(ca_dir.path().join("proxelar-ca.pem")).unwrap();
     let mut roots = rustls::RootCertStore::empty();
@@ -1010,6 +1010,37 @@ async fn wait_for_tcp(addr: SocketAddr) {
     }
 }
 
+/// Like `wait_for_tcp`, but also watches the proxy task so an early startup
+/// failure (e.g. HTTPS's HTTP/3 listener) is reported instead of hidden
+/// behind a generic connect-timeout panic.
+async fn wait_for_proxy_ready(
+    addr: SocketAddr,
+    handle: &mut tokio::task::JoinHandle<Result<(), proxyapi::Error>>,
+) {
+    let deadline = tokio::time::Instant::now() + tokio::time::Duration::from_secs(10);
+    loop {
+        tokio::select! {
+            biased;
+            result = &mut *handle => {
+                match result {
+                    Ok(Ok(())) => panic!("proxy task exited before it became ready"),
+                    Ok(Err(error)) => panic!("proxy task failed before it became ready: {error}"),
+                    Err(error) => panic!("proxy task panicked before it became ready: {error}"),
+                }
+            }
+            connect = tokio::net::TcpStream::connect(addr) => {
+                match connect {
+                    Ok(_) => return,
+                    Err(_) if tokio::time::Instant::now() < deadline => {
+                        tokio::time::sleep(tokio::time::Duration::from_millis(50)).await;
+                    }
+                    Err(e) => panic!("Server failed to start within timeout: {e}"),
+                }
+            }
+        }
+    }
+}
+
 async fn connect_h2(addr: SocketAddr) -> hyper::client::conn::http2::SendRequest<Full<Bytes>> {
     let stream = tokio::net::TcpStream::connect(addr).await.unwrap();
     let (sender, connection) = hyper::client::conn::http2::Builder::new(TokioExecutor::new())
@@ -1046,7 +1077,7 @@ async fn request_private_ca_https_upstream(
 
     let proxy = Proxy::new(config);
     let (shutdown_tx, shutdown_rx) = tokio::sync::oneshot::channel();
-    let handle = tokio::spawn(async move {
+    let mut handle = tokio::spawn(async move {
         proxy
             .start(async {
                 shutdown_rx.await.ok();
@@ -1054,7 +1085,7 @@ async fn request_private_ca_https_upstream(
             .await
     });
 
-    wait_for_tcp(proxy_addr).await;
+    wait_for_proxy_ready(proxy_addr, &mut handle).await;
 
     let proxy_ca = std::fs::read(ca_dir.path().join("proxelar-ca.pem")).unwrap();
     let client = reqwest::Client::builder()
