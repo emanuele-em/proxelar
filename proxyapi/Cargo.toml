@@ -36,7 +36,7 @@ rustls = { version = "0.23", default-features = false, features = ["ring", "logg
 rustls-pki-types = "1.14"
 webpki-roots = "1.0"
 rcgen = { version = "0.14.9", default-features = false, features = ["pem", "ring", "x509-parser"] }
-getrandom = "0.3"
+getrandom = "0.4"
 time = "0.3"
 moka = { version = "0.12", features = ["future"] }
 tokio = { version = "1.52", features = ["rt", "net", "io-util", "macros", "sync", "time", "fs"] }
