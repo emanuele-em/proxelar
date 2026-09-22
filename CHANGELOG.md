@@ -9,7 +9,7 @@
 
 ### Added
 
-- Honor `$XDG_CONFIG_HOME` when resolving the directory holding the CA certificate/key, addons, and other proxelar state. When the variable is set to a non-empty absolute path, state lives in `$XDG_CONFIG_HOME/proxelar`; otherwise `~/.proxelar` is used as before. `--ca-dir` still overrides both. If `$XDG_CONFIG_HOME` points somewhere new while an existing `~/.proxelar` is present, proxelar prints a warning naming both directories, since state is not migrated.
+- Honor `$XDG_CONFIG_HOME` when resolving the directory holding the CA certificate/key, addons, and other proxelar state. When the variable is set to a non-empty absolute path, state lives in `$XDG_CONFIG_HOME/proxelar`; otherwise `~/.proxelar` is used as before. `--ca-dir` still overrides both. If `$XDG_CONFIG_HOME` points somewhere new while an existing `~/.proxelar` is present, proxelar prints a warning naming both directories, since state is not migrated. ([#177](https://github.com/emanuele-em/proxelar/pull/177) by @byt3m4st3r)
 
 ### Fixed
 
