@@ -1,7 +1,9 @@
 mod browser;
 mod ca_dir;
 mod cli;
+mod config;
 mod interface;
+mod theme;
 mod wireguard_setup;
 
 use clap::Parser;
@@ -122,6 +124,13 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         }
     };
 
+    let (app_config, config_warnings) = config::load_config(&ca_dir);
+    let (theme, theme_warnings) =
+        config::resolve_theme(args.theme.as_deref(), &app_config, &ca_dir);
+    for warning in config_warnings.iter().chain(theme_warnings.iter()) {
+        eprintln!("{warning}");
+    }
+
     let proxy_config = ProxyConfig {
         addr: SocketAddr::new(args.addr, args.port),
         mode: proxy_mode,
@@ -212,6 +221,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 replay_tx,
                 wireguard_setup,
                 cancel.clone(),
+                theme,
             )
             .await
         }
