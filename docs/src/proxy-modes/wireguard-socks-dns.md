@@ -7,7 +7,7 @@ proxelar -m wireguard -b 0.0.0.0 -p 51820 \
   --wireguard-endpoint 192.168.1.10:51820
 ```
 
-WireGuard mode accepts a mobile or IoT device without firewall rules or system-proxy configuration. On first start it creates owner-only server/client keys and `~/.proxelar/proxelar-wg.conf`. The TUI and authenticated web GUI show the profile as a scannable QR code while the capture is empty; terminal mode prints the same QR at startup. You can also import the file directly. The short `proxelar-wg` profile name stays within Android's 15-character WireGuard interface-name limit.
+WireGuard mode accepts a mobile or IoT device without firewall rules or system-proxy configuration. On first start it creates owner-only server/client keys and `proxelar-wg.conf` in the state directory (`~/.proxelar` by default). The TUI and authenticated web GUI show the profile as a scannable QR code while the capture is empty; terminal mode prints the same QR at startup. You can also import the file directly. The short `proxelar-wg` profile name stays within Android's 15-character WireGuard interface-name limit.
 
 The QR code contains the client private key. Display it only on a trusted screen. It disappears from the TUI and web GUI after the first captured event, although the configuration file remains available for later import.
 

@@ -8,7 +8,7 @@ The highest-value assets are the root CA private key, captured authorization/coo
 
 ## Local CA
 
-The CA private key can mint certificates trusted by any client that installs the root. Keep `~/.proxelar` private, never share `proxelar-ca.key`, and remove the root from client trust stores when Proxelar is no longer used. Each generated leaf certificate has a distinct private key rather than reusing the CA key.
+The CA private key can mint certificates trusted by any client that installs the root. Keep the state directory (`~/.proxelar` by default) private, never share `proxelar-ca.key`, and remove the root from client trust stores when Proxelar is no longer used. Each generated leaf certificate has a distinct private key rather than reusing the CA key.
 
 Certificate-pinned clients will reject interception. Android 7+ applications trust user-installed CAs only when their network security configuration opts in. See [CA trust and uninstall](../guides/ca-trust.md).
 

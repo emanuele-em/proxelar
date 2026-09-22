@@ -1,4 +1,5 @@
 mod browser;
+mod ca_dir;
 mod cli;
 mod config;
 mod interface;
@@ -19,7 +20,7 @@ use proxyapi::{
 };
 use std::fs::OpenOptions;
 use std::net::SocketAddr;
-use std::path::{Path, PathBuf};
+use std::path::Path;
 use std::sync::Arc;
 use tokio::sync::RwLock;
 use tokio_util::sync::CancellationToken;
@@ -32,17 +33,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let _ = rustls::crypto::ring::default_provider().install_default();
 
     let args = Args::parse();
-    let (ca_dir, used_current_dir) = match args.ca_dir.clone() {
-        Some(path) => (path, false),
-        None => match dirs::home_dir() {
-            Some(home) => (home.join(".proxelar"), false),
-            None => (PathBuf::from(".").join(".proxelar"), true),
-        },
-    };
+    let ca_dir = ca_dir::resolve_ca_dir(args.ca_dir.clone());
     init_tracing(args.interface, &ca_dir)?;
-    if used_current_dir {
-        tracing::warn!("Could not determine home directory, using current directory");
-    }
     #[cfg(feature = "scripting")]
     let addons_dir = args
         .addons_dir
