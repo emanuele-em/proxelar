@@ -50,6 +50,14 @@ pub struct Args {
     #[arg(long, value_name = "DIR")]
     pub ca_dir: Option<PathBuf>,
 
+    /// TUI color theme: "default"/"dark"/"light" (plain ANSI colors, adapt
+    /// to the terminal's own light/dark palette), "system" (see
+    /// theme_dark/theme_light in config.toml), a bundled name (cyberdream,
+    /// cyberdream-light), or a name resolved from
+    /// `~/.proxelar/themes/<name>.toml`. Overrides config.toml's `theme` key.
+    #[arg(long, value_name = "NAME")]
+    pub theme: Option<String>,
+
     /// Lua script file or addon directory containing init.lua
     #[arg(short = 's', long = "script", value_name = "FILE")]
     pub script: Option<PathBuf>,

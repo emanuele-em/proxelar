@@ -202,6 +202,7 @@ proxelar -m wireguard -b 0.0.0.0 -p 51820 \
 | `--api-token` | Fixed bearer token for the GUI/headless API; random when omitted | random |
 | `--launch-browser` | Launch an isolated Chromium-family profile using the proxy | off |
 | `--wireguard-endpoint` | Public/LAN `HOST:PORT` written to the generated client config | derived from bind route |
+| `--theme` | TUI color theme: `default`/`dark`/`light`, `system`, a bundled name (`cyberdream`, `cyberdream-light`), or a custom name without a path or `.toml` suffix | `default` |
 
 </details>
 
@@ -229,6 +230,98 @@ proxelar --ca-dir /path/to/proxelar-state
 ```
 
 This directory isn't just for the CA certificate — addons and other local proxelar state live there too, so pointing `--ca-dir` (or `XDG_CONFIG_HOME`) somewhere else moves everything at once, not just certs.
+
+---
+
+## Theming
+
+The TUI's colors are configurable via `CA_DIR/config.toml`, where `CA_DIR` is the state directory resolved as described above.
+
+```toml
+theme = "cyberdream"
+```
+
+`theme` accepts:
+
+- `default` / `dark` / `light` — the built-in palette (plain ANSI colors, so it already adapts to whichever light/dark scheme your terminal itself uses)
+- `system` detects the terminal/OS appearance at startup and picks `theme_dark` or `theme_light` below (both default to `default` if unset)
+- a bundled name: `cyberdream`, `cyberdream-light`, `cyberdream-muted`, `rose-pine`, `rose-pine-dawn`, `tokyonight`, `tokyonight-day`, `dracula`, `alucard`, `catppuccin-mocha`, `catppuccin-latte`
+- a custom name resolved from `CA_DIR/themes/<name>.toml`
+
+To select a light or dark theme at startup (appearance changes while running do not switch themes):
+
+```toml
+theme = "system"
+theme_dark = "cyberdream"
+theme_light = "cyberdream-light"
+```
+
+To tweak a handful of colors without creating a theme file:
+
+```toml
+[colors]
+status_bar_bg = "#222222"
+status_bar_fg = "#eeeeee"
+```
+
+A custom theme file only needs to specify the colors it changes — everything else falls back to the default palette. Colors are `"#rrggbb"` hex or a named ANSI color (`"red"`, `"light_green"`, `"dark_gray"`, ...). Unknown keys or invalid colors print a warning and fall back rather than failing to start. `--theme <name>` on the command line overrides `config.toml`.
+
+### Writing a custom theme
+
+Create each theme file at `CA_DIR/themes/<name>.toml`. The filename without `.toml` is the theme name:
+
+```text
+CA_DIR/
+├── config.toml
+└── themes/
+    ├── my-dark-theme.toml
+    └── my-light-theme.toml
+```
+
+Each file only needs to specify the colors it changes — everything else falls back to the default palette:
+
+```toml
+# CA_DIR/themes/my-dark-theme.toml
+status_bar_bg = "#222222"
+status_bar_fg = "#eeeeee"
+method_get = "#8fbc8f"
+row_error = "#ff6b6b"
+```
+
+Use just the dark theme:
+
+```toml
+# config.toml
+theme = "my-dark-theme"
+```
+
+Or just the light one:
+
+```toml
+# config.toml
+theme = "my-light-theme"
+```
+
+Or select between them at startup based on your terminal/OS appearance:
+
+```toml
+# config.toml
+theme = "system"
+theme_dark = "my-dark-theme"
+theme_light = "my-light-theme"
+```
+
+For the authoritative list of every colorable key, see `known_theme_keys()` in `proxelar-cli/src/theme.rs`, or look at one of the bundled theme presets under `proxelar-cli/src/themes/` for a real, fully filled-in example.
+
+### Bundled theme credits
+
+The bundled themes are palette ports of these projects — full credit to their authors:
+
+- `cyberdream` / `cyberdream-light` / `cyberdream-muted` — [cyberdream.nvim](https://github.com/scottmckendry/cyberdream.nvim)
+- `rose-pine` / `rose-pine-dawn` — [Rosé Pine](https://rosepinetheme.com/)
+- `tokyonight` / `tokyonight-day` — [Tokyo Night](https://github.com/tokyo-night/tokyo-night-vscode-theme)
+- `dracula` / `alucard` — [Dracula](https://draculatheme.com/)
+- `catppuccin-mocha` / `catppuccin-latte` — [Catppuccin](https://catppuccin.com/)
 
 ---
 
