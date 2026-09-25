@@ -364,6 +364,18 @@ fn synthetic_response_parts(
         .into_parts()
 }
 
+/// Build a protocol-level synthetic response without capture side effects.
+///
+/// Used as the default [`crate::HttpHandler::synthetic_protocol_response`].
+pub(crate) fn pure_synthetic_protocol_response(
+    status: http::StatusCode,
+    headers: http::HeaderMap,
+    body: Bytes,
+) -> ProxyResponse {
+    let (parts, body) = synthetic_response_parts(status, headers, body);
+    response_to_protocol(Response::from_parts(parts, body::full(body)))
+}
+
 struct HookedResponse {
     parts: http::response::Parts,
     body: HookedResponseBody,
@@ -1427,6 +1439,36 @@ fn response_to_protocol(response: Response<ProxyBody>) -> ProxyResponse {
 
 #[async_trait]
 impl HttpHandler for CapturingHandler {
+    fn synthetic_protocol_response(
+        &mut self,
+        status: http::StatusCode,
+        headers: http::HeaderMap,
+        body: Bytes,
+    ) -> ProxyResponse {
+        CapturingHandler::synthetic_protocol_response(self, status, headers, body)
+    }
+
+    fn take_pending_id(&mut self) -> Option<u64> {
+        CapturingHandler::take_pending_id(self)
+    }
+
+    fn take_captured_request(&mut self) -> Option<ProxiedRequest> {
+        CapturingHandler::take_captured_request(self)
+    }
+
+    fn send_event(&self, event: ProxyEvent) {
+        CapturingHandler::send_event(self, event)
+    }
+
+    fn event_tx_clone(&self) -> mpsc::Sender<ProxyEvent> {
+        CapturingHandler::event_tx_clone(self)
+    }
+
+    #[cfg(feature = "scripting")]
+    fn script_engine_clone(&self) -> Option<Arc<crate::scripting::ScriptEngine>> {
+        CapturingHandler::script_engine_clone(self)
+    }
+
     async fn handle_request(
         &mut self,
         _ctx: &HttpContext,
