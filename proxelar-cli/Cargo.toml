@@ -61,7 +61,7 @@ open = "5"
 ratatui = "0.30"
 crossterm = { version = "0.29", features = ["event-stream"] }
 futures = "0.3"
-toml = "0.8"
+toml = "1.1"
 
 # Web GUI
 axum = { version = "0.8", features = ["ws"] }
