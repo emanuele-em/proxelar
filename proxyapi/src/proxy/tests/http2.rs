@@ -3,7 +3,7 @@ use crate::proxy::test_support::{request, Context};
 use proxelar_proto::ProxyBody;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
-fn service(context: &Context) -> ForwardH2Service {
+fn service(context: &Context) -> ForwardH2Service<CapturingHandler> {
     let pool = context.pool();
     ForwardH2Service {
         scheme: Scheme::HTTP,
