@@ -52,10 +52,10 @@ pub(super) enum StreamProtocol {
 }
 
 #[allow(clippy::too_many_arguments)]
-pub(super) async fn handle_connection(
+pub(super) async fn handle_connection<H: HttpHandler>(
     mut stream: TcpStream,
     remote_addr: SocketAddr,
-    handler: CapturingHandler,
+    handler: H,
     ca: Arc<Ssl>,
     native_pool: Arc<NativePool>,
     route: Option<String>,
@@ -106,26 +106,26 @@ pub(super) async fn handle_connection(
     }
 }
 
-enum NativeUpgradePlan {
+enum NativeUpgradePlan<H> {
     Connect(Authority),
     WebSocket {
         upstream: UpgradeReceiver,
-        handler: Box<CapturingHandler>,
+        handler: Box<H>,
         conn_id: u64,
     },
 }
 
-struct ForwardHttp1Service {
+struct ForwardHttp1Service<H> {
     scheme: Scheme,
-    handler: CapturingHandler,
+    handler: H,
     ca: Arc<Ssl>,
     upstream: NativeUpstream,
     remote_addr: SocketAddr,
     listen_addr: SocketAddr,
-    upgrade: Arc<Mutex<Option<NativeUpgradePlan>>>,
+    upgrade: Arc<Mutex<Option<NativeUpgradePlan<H>>>>,
 }
 
-impl HttpService for ForwardHttp1Service {
+impl<H: HttpHandler> HttpService for ForwardHttp1Service<H> {
     fn call(
         &mut self,
         request: ProxyRequest,
@@ -231,10 +231,10 @@ impl HttpService for ForwardHttp1Service {
 }
 
 #[allow(clippy::too_many_arguments)]
-pub(super) async fn serve_native_stream(
+pub(super) async fn serve_native_stream<H: HttpHandler>(
     stream: BoxIo,
     scheme: Scheme,
-    handler: CapturingHandler,
+    handler: H,
     ca: Arc<Ssl>,
     upstream: NativeUpstream,
     remote_addr: SocketAddr,
@@ -398,10 +398,10 @@ pub(super) fn handle_cert_protocol_request(
 }
 
 #[allow(clippy::too_many_arguments)]
-async fn handle_native_connect(
+async fn handle_native_connect<H: HttpHandler>(
     upgraded: proxelar_proto::http1::UpgradedIo<BoxIo>,
     authority: Authority,
-    handler: CapturingHandler,
+    handler: H,
     ca: Arc<Ssl>,
     upstream: NativeUpstream,
     remote_addr: SocketAddr,
@@ -512,27 +512,25 @@ async fn handle_native_connect(
     }
 }
 
-pub(super) async fn pump_native_websocket<I>(
+pub(super) async fn pump_native_websocket<I, H>(
     conn_id: u64,
     client: proxelar_proto::http1::UpgradedIo<I>,
     server: proxelar_proto::http1::UpgradedIo<proxelar_proto::http1::BoxIo>,
-    handler: CapturingHandler,
+    handler: H,
 ) where
     I: AsyncRead + AsyncWrite + Unpin,
+    H: HttpHandler,
 {
     let client = Rewind::new_buffered(client.io, client.read_ahead);
     let server = Rewind::new_buffered(server.io, server.read_ahead);
     pump_websocket_streams(conn_id, client, server, handler).await;
 }
 
-pub(super) async fn pump_websocket_streams<C, S>(
-    conn_id: u64,
-    client: C,
-    server: S,
-    handler: CapturingHandler,
-) where
+pub(super) async fn pump_websocket_streams<C, S, H>(conn_id: u64, client: C, server: S, handler: H)
+where
     C: AsyncRead + AsyncWrite + Unpin,
     S: AsyncRead + AsyncWrite + Unpin,
+    H: HttpHandler,
 {
     let event_tx = handler.event_tx_clone();
     #[cfg(feature = "scripting")]
@@ -553,10 +551,10 @@ pub(super) async fn pump_websocket_streams<C, S>(
 /// WireGuard and other userspace capture transports use this entry point to
 /// share HTTP, TLS, and raw-stream behavior.
 #[allow(clippy::too_many_arguments)]
-pub(super) async fn handle_captured_stream<I>(
+pub(super) async fn handle_captured_stream<I, H>(
     mut stream: I,
     remote_addr: SocketAddr,
-    handler: CapturingHandler,
+    handler: H,
     ca: Arc<Ssl>,
     native_pool: Arc<NativePool>,
     route: Option<String>,
@@ -564,6 +562,7 @@ pub(super) async fn handle_captured_stream<I>(
     authority: Authority,
 ) where
     I: AsyncRead + AsyncWrite + Unpin + Send + 'static,
+    H: HttpHandler,
 {
     let (protocol, buffered) = match sniff_stream_protocol(&mut stream).await {
         Ok(result) => result,
@@ -671,12 +670,12 @@ pub(super) async fn handle_captured_stream<I>(
 
 /// Serve HTTP requests over an already-established stream (plain or TLS).
 ///
-/// Each request is passed through the [`CapturingHandler`] for inspection before
+/// Each request is passed through the [`HttpHandler`] for inspection before
 /// being forwarded to the upstream server via `client`.
-pub(super) async fn serve_stream<I>(
+pub(super) async fn serve_stream<I, H>(
     stream: I,
     scheme: Scheme,
-    handler: CapturingHandler,
+    handler: H,
     ca: Arc<Ssl>,
     upstream: NativeUpstream,
     remote_addr: SocketAddr,
@@ -684,6 +683,7 @@ pub(super) async fn serve_stream<I>(
 ) -> Result<(), BoxError>
 where
     I: AsyncRead + AsyncWrite + Unpin + Send + 'static,
+    H: HttpHandler,
 {
     super::http2::serve_with_upstream(
         stream,
@@ -703,12 +703,12 @@ where
 /// connection. SOCKS5 uses this to preserve the destination selected by its
 /// CONNECT request even when the inner HTTP `Host` value differs.
 #[allow(clippy::too_many_arguments)]
-pub(super) async fn serve_pinned_stream<I, U>(
+pub(super) async fn serve_pinned_stream<I, U, H>(
     mut stream: I,
     upstream: U,
     authority: Authority,
     scheme: Scheme,
-    handler: CapturingHandler,
+    handler: H,
     ca: Arc<Ssl>,
     remote_addr: SocketAddr,
     listen_addr: SocketAddr,
@@ -716,6 +716,7 @@ pub(super) async fn serve_pinned_stream<I, U>(
 where
     I: AsyncRead + AsyncWrite + Unpin + Send + 'static,
     U: AsyncRead + AsyncWrite + Unpin + Send + 'static,
+    H: HttpHandler,
 {
     let (_, buffered) = sniff_stream_protocol(&mut stream).await?;
     let h2 = is_h2_preface(&buffered);

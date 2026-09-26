@@ -26,6 +26,7 @@ use crate::handler::CapturingHandler;
 use crate::intercept::InterceptConfig;
 #[cfg(feature = "scripting")]
 use crate::scripting::ScriptEngine;
+use crate::HttpHandler;
 
 pub use dns::DnsConfig;
 pub use outbound::UpstreamProxyConfig;
@@ -425,6 +426,87 @@ impl Proxy {
                         handler,
                         Arc::clone(&native_pool),
                         native_route.clone(),
+                    ));
+                }
+                () = &mut shutdown => {
+                    tracing::info!("Proxy shutting down");
+                    break;
+                }
+            }
+        }
+
+        Ok(())
+    }
+
+    /// Start the proxy with a custom [`HttpHandler`] and run until the
+    /// `shutdown` future resolves.
+    ///
+    /// The handler is cloned for every accepted connection.
+    ///
+    /// Only [`ProxyMode::Forward`] is supported. Route rules attached with
+    /// [`Proxy::with_route_rules`] are rejected, apply policy inside
+    /// `handle_request` instead.
+    pub async fn start_with_handler<H: HttpHandler>(
+        self,
+        handler: H,
+        shutdown: impl Future<Output = ()>,
+    ) -> Result<(), Error> {
+        if !matches!(self.config.mode, ProxyMode::Forward) {
+            return Err(Error::Other(
+                "start_with_handler is only supported in forward mode".to_owned(),
+            ));
+        }
+        if self.route_rules.is_some() {
+            return Err(Error::Other(
+                "start_with_handler does not apply route rules. Handle them in the handler"
+                    .to_owned(),
+            ));
+        }
+
+        let ca_dir = self.config.ca_dir.clone();
+        let ca =
+            Arc::new(tokio::task::spawn_blocking(move || Ssl::load_or_generate(&ca_dir)).await??);
+
+        if self.config.upstream_tls.is_insecure() {
+            tracing::warn!(
+                "Upstream TLS certificate verification is disabled. Traffic is vulnerable to upstream MITM"
+            );
+        }
+
+        let tls_config = Arc::new(tls::build_client_config(&self.config.upstream_tls)?);
+        let outbound = outbound::OutboundConnector::new(self.upstream_proxy.as_ref());
+        let native_route = self
+            .upstream_proxy
+            .as_ref()
+            .map(|proxy| proxy.destination().to_string());
+        let native_pool = Arc::new(http1::new_pool(outbound, Arc::clone(&tls_config)));
+        let listener = TcpListener::bind(self.config.addr).await?;
+        let listen_addr = listener.local_addr()?;
+        tracing::info!("Proxy listening on {listen_addr}");
+        tokio::pin!(shutdown);
+
+        loop {
+            tokio::select! {
+                result = listener.accept() => {
+                    let (stream, remote_addr) = match result {
+                        Ok(conn) => conn,
+                        Err(e) => {
+                            tracing::warn!("Failed to accept connection: {e}");
+                            continue;
+                        }
+                    };
+                    let handler = handler.clone();
+                    let ca = Arc::clone(&ca);
+                    let native_pool = Arc::clone(&native_pool);
+                    let native_route = native_route.clone();
+                    tokio::spawn(forward::handle_connection(
+                        stream,
+                        remote_addr,
+                        handler,
+                        ca,
+                        native_pool,
+                        native_route,
+                        listen_addr,
                     ));
                 }
                 () = &mut shutdown => {

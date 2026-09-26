@@ -29,11 +29,11 @@ use super::BoxError;
 const TUNNEL_BUFFER_CAPACITY: usize = 64 * 1024;
 
 #[allow(clippy::too_many_arguments)]
-pub(super) async fn serve_forward<I>(
+pub(super) async fn serve_forward<I, H>(
     io: I,
     scheme: Scheme,
     remote_addr: SocketAddr,
-    handler: CapturingHandler,
+    handler: H,
     ca: Arc<Ssl>,
     native_pool: Arc<NativePool>,
     route: Option<String>,
@@ -41,6 +41,7 @@ pub(super) async fn serve_forward<I>(
 ) -> Result<(), BoxError>
 where
     I: AsyncRead + AsyncWrite + Unpin + Send + 'static,
+    H: HttpHandler,
 {
     serve_with_upstream(
         io,
@@ -57,11 +58,11 @@ where
 }
 
 #[allow(clippy::too_many_arguments)]
-pub(super) async fn serve_with_upstream<I>(
+pub(super) async fn serve_with_upstream<I, H>(
     io: I,
     scheme: Scheme,
     remote_addr: SocketAddr,
-    handler: CapturingHandler,
+    handler: H,
     ca: Arc<Ssl>,
     upstream: NativeUpstream,
     native_pool: Option<Arc<NativePool>>,
@@ -70,6 +71,7 @@ pub(super) async fn serve_with_upstream<I>(
 ) -> Result<(), BoxError>
 where
     I: AsyncRead + AsyncWrite + Unpin + Send + 'static,
+    H: HttpHandler,
 {
     let service = ForwardH2Service {
         scheme,
@@ -87,19 +89,20 @@ where
 }
 
 #[allow(clippy::too_many_arguments)]
-pub(super) async fn serve_pinned<I, U>(
+pub(super) async fn serve_pinned<I, U, H>(
     io: I,
     upstream_io: U,
     authority: Authority,
     scheme: Scheme,
     remote_addr: SocketAddr,
-    handler: CapturingHandler,
+    handler: H,
     ca: Arc<Ssl>,
     listen_addr: SocketAddr,
 ) -> Result<(), BoxError>
 where
     I: AsyncRead + AsyncWrite + Unpin + Send + 'static,
     U: AsyncRead + AsyncWrite + Unpin + Send + 'static,
+    H: HttpHandler,
 {
     serve_with_upstream(
         io,
@@ -137,10 +140,10 @@ where
 }
 
 #[derive(Clone)]
-struct ForwardH2Service {
+struct ForwardH2Service<H> {
     scheme: Scheme,
     remote_addr: SocketAddr,
-    handler: CapturingHandler,
+    handler: H,
     ca: Arc<Ssl>,
     native_pool: Option<Arc<NativePool>>,
     route: Option<String>,
@@ -148,7 +151,7 @@ struct ForwardH2Service {
     listen_addr: SocketAddr,
 }
 
-impl HttpService for ForwardH2Service {
+impl<H: HttpHandler> HttpService for ForwardH2Service<H> {
     fn call(
         &mut self,
         request: ProxyRequest,
@@ -158,7 +161,7 @@ impl HttpService for ForwardH2Service {
     }
 }
 
-impl ForwardH2Service {
+impl<H: HttpHandler> ForwardH2Service<H> {
     async fn handle(self, request: ProxyRequest) -> Result<ProxyResponse, ProtocolError> {
         if is_direct_cert_protocol_request(&request, self.listen_addr)
             || is_cert_protocol_request(&request)
@@ -287,9 +290,9 @@ impl HttpService for ReverseH2Service {
     }
 }
 
-async fn handle_extended_websocket(
+async fn handle_extended_websocket<H: HttpHandler>(
     mut request: ProxyRequest,
-    mut handler: CapturingHandler,
+    mut handler: H,
     upstream: NativeUpstream,
     remote_addr: SocketAddr,
     reverse_target: Option<Uri>,
@@ -467,10 +470,10 @@ fn server_config() -> ConnectionConfig {
     }
 }
 
-async fn handle_connect_tunnel(
+async fn handle_connect_tunnel<H: HttpHandler>(
     mut tunnel: tokio::io::DuplexStream,
     authority: Authority,
-    service: ForwardH2Service,
+    service: ForwardH2Service<H>,
 ) {
     let (protocol, buffered) = match sniff_stream_protocol(&mut tunnel).await {
         Ok(detected) => detected,
