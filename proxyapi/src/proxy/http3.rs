@@ -186,7 +186,7 @@ async fn connect_h3_candidate(
     let server_name =
         ServerName::try_from(host.to_owned()).map_err(|e| malformed(e.to_string()))?;
     let mut tls =
-        SslContextBuilder::new(SslMethod::tls_client()).map_err(|e| protocol(ErrorKind::Io, e))?;
+        SslContextBuilder::new(SslMethod::tls()).map_err(|e| protocol(ErrorKind::Io, e))?;
     tls.set_custom_verify_callback(SslVerifyMode::PEER, move |ssl| {
         verify_boring_peer_with_rustls(ssl, verifier.as_ref(), &server_name).map_err(|error| {
             tracing::debug!("HTTP/3 upstream certificate verification failed: {error}");
@@ -215,7 +215,7 @@ pub(super) fn server_config(
 ) -> Result<quiche::Config, ProtocolError> {
     use boring::ssl::{NameType, SelectCertError, SslContextBuilder, SslMethod};
     let mut tls =
-        SslContextBuilder::new(SslMethod::tls_server()).map_err(|e| protocol(ErrorKind::Io, e))?;
+        SslContextBuilder::new(SslMethod::tls()).map_err(|e| protocol(ErrorKind::Io, e))?;
     let material = ca
         .gen_h3_certificate(&authority)
         .map_err(|e| protocol(ErrorKind::Io, e))?;
