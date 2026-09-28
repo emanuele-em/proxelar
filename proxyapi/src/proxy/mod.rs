@@ -446,6 +446,10 @@ impl Proxy {
     /// Only [`ProxyMode::Forward`] is supported. Route rules attached with
     /// [`Proxy::with_route_rules`] are rejected, apply policy inside
     /// `handle_request` instead.
+    /// `ProxyConfig` settings specific to [`CapturingHandler`] (`intercept`,
+    /// `body_capture_limit`, `replay_rx`, and `script_path` when scripting is
+    /// enabled) are also rejected. The supplied handler controls its own
+    /// capture and event emission.
     pub async fn start_with_handler<H: HttpHandler>(
         self,
         handler: H,
@@ -460,6 +464,26 @@ impl Proxy {
             return Err(Error::Other(
                 "start_with_handler does not apply route rules. Handle them in the handler"
                     .to_owned(),
+            ));
+        }
+        for (configured, field) in [
+            (self.config.intercept.is_some(), "intercept"),
+            (
+                self.config.body_capture_limit.is_some(),
+                "body_capture_limit",
+            ),
+            (self.config.replay_rx.is_some(), "replay_rx"),
+        ] {
+            if configured {
+                return Err(Error::Other(format!(
+                    "start_with_handler does not support ProxyConfig::{field}"
+                )));
+            }
+        }
+        #[cfg(feature = "scripting")]
+        if self.config.script_path.is_some() {
+            return Err(Error::Other(
+                "start_with_handler does not support ProxyConfig::script_path".to_owned(),
             ));
         }
 

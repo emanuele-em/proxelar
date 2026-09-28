@@ -202,6 +202,58 @@ async fn test_start_with_handler_rejects_route_rules() {
     assert!(result.is_err());
 }
 
+#[tokio::test]
+async fn test_start_with_handler_rejects_capturing_config() {
+    let _ = rustls::crypto::ring::default_provider().install_default();
+    let ca_dir = tempfile::tempdir().unwrap();
+    let config = || {
+        let (event_tx, _event_rx) = mpsc::channel(1);
+        ProxyConfig {
+            addr: "127.0.0.1:0".parse().unwrap(),
+            mode: ProxyMode::Forward,
+            event_tx,
+            ca_dir: ca_dir.path().to_path_buf(),
+            upstream_tls: UpstreamTlsConfig::Default,
+            intercept: None,
+            body_capture_limit: None,
+            #[cfg(feature = "scripting")]
+            script_path: None,
+            replay_rx: None,
+        }
+    };
+
+    let mut with_intercept = config();
+    with_intercept.intercept = Some(proxyapi::InterceptConfig::new());
+    assert_unsupported_config(with_intercept, "intercept").await;
+
+    let mut with_limit = config();
+    with_limit.body_capture_limit = Some(1024);
+    assert_unsupported_config(with_limit, "body_capture_limit").await;
+
+    let mut with_replay = config();
+    let (_replay_tx, replay_rx) = mpsc::channel(1);
+    with_replay.replay_rx = Some(replay_rx);
+    assert_unsupported_config(with_replay, "replay_rx").await;
+
+    #[cfg(feature = "scripting")]
+    {
+        let mut with_script = config();
+        with_script.script_path = Some(ca_dir.path().join("missing.lua"));
+        assert_unsupported_config(with_script, "script_path").await;
+    }
+}
+
+async fn assert_unsupported_config(config: ProxyConfig, field: &str) {
+    let error = Proxy::new(config)
+        .start_with_handler(PassThroughHandler, async {})
+        .await
+        .expect_err("unsupported configuration should fail before startup");
+    assert!(
+        error.to_string().contains(field),
+        "unexpected error: {error}"
+    );
+}
+
 /// Forwards every request and response unchanged.
 #[derive(Clone)]
 struct PassThroughHandler;
