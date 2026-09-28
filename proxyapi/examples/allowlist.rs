@@ -3,10 +3,13 @@
 //! Uses [`Proxy::start_with_handler`] with a handler that only
 //! implements `handle_request` and `handle_response`:
 //!
-//! - requests for hosts outside the allowlist are answered with `403`
+//! - HTTP requests for hosts outside the allowlist are answered with `403`
 //! - after a given count, requests are rejected with `429` (e.g., quota
 //!   enforcement)
 //! - allowed requests gain an `x-via` header before being forwarded.
+//!
+//! This policy runs on inspected HTTP requests. The CONNECT request itself
+//! and raw TCP traffic tunneled through CONNECT do not reach `HttpHandler`.
 //!
 //! Start a local upstream (e.g. `python3 -m http.server 8000`), run this
 //! example, and point an HTTP client at the proxy:
