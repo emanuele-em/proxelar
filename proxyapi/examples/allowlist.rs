@@ -15,8 +15,8 @@
 //! example, and point an HTTP client at the proxy:
 //!
 //! ```console
-//! $ curl --noproxy '*' -x http://127.0.0.1:8118 http://127.0.0.1:8000/
-//! $ curl --noproxy '*' -x http://127.0.0.1:8118 http://example.test/
+//! $ curl --noproxy '' -x http://127.0.0.1:8118 http://127.0.0.1:8000/
+//! $ curl --noproxy '' -x http://127.0.0.1:8118 http://example.test/
 //! ```
 
 use std::net::SocketAddr;
@@ -90,8 +90,7 @@ impl HttpHandler for AllowlistHandler {
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     // This handler never emits events; the channel exists only because
-    // ProxyConfig requires a sender. Dropping the receiver makes any
-    // event a no-op.
+    // ProxyConfig requires a sender.
     let (event_tx, _event_rx) = mpsc::channel(64);
     let config = ProxyConfig {
         addr: LISTEN.parse::<SocketAddr>()?,
