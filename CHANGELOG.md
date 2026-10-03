@@ -7,6 +7,14 @@
 
 ## [Unreleased]
 
+### Added
+
+- Add `Proxy::start_with_handler` for embedding a forward proxy with a custom `HttpHandler`, instead of only `CapturingHandler`. See the `allowlist` example in `proxyapi/examples/`.
+
+### Changed
+
+- Make forward and HTTP/2 proxy paths generic over `HttpHandler`.
+
 ## [0.6.1] - 2026-09-22
 
 ### Added
