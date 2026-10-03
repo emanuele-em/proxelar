@@ -89,6 +89,8 @@ impl HttpHandler for AllowlistHandler {
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+    let _ = rustls::crypto::ring::default_provider().install_default();
+
     // This handler never emits events; the channel exists only because
     // ProxyConfig requires a sender.
     let (event_tx, _event_rx) = mpsc::channel(64);
