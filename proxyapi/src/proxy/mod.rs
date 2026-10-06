@@ -28,7 +28,7 @@ use crate::intercept::InterceptConfig;
 use crate::scripting::ScriptEngine;
 use crate::HttpHandler;
 
-pub use dns::DnsConfig;
+pub use dns::{DnsConfig, DnsDecision, DnsHandler};
 pub use outbound::UpstreamProxyConfig;
 pub use tls::UpstreamTlsConfig;
 pub use wireguard::WireGuardConfig;
@@ -187,6 +187,7 @@ impl Proxy {
             return dns::serve(
                 self.config.addr,
                 config.clone(),
+                dns::ForwardAll,
                 self.config.event_tx.clone(),
                 shutdown,
             )
