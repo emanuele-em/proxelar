@@ -543,6 +543,33 @@ impl Proxy {
 
         Ok(())
     }
+
+    /// Start the DNS proxy with a custom [`DnsHandler`] and run until the
+    /// `shutdown` future resolves.
+    ///
+    /// The handler is cloned for every query.
+    ///
+    /// Only [`ProxyMode::Dns`] is supported.
+    pub async fn start_with_dns_handler<H: DnsHandler>(
+        self,
+        handler: H,
+        shutdown: impl Future<Output = ()>,
+    ) -> Result<(), Error> {
+        let ProxyMode::Dns { config } = self.config.mode else {
+            return Err(Error::Other(
+                "start_with_dns_handler is only supported in DNS mode".to_owned(),
+            ));
+        };
+        dns::serve(
+            self.config.addr,
+            config,
+            handler,
+            self.config.event_tx,
+            shutdown,
+        )
+        .await
+        .map_err(Error::Io)
+    }
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
