@@ -24,7 +24,7 @@ docker run --rm -it -v ~/.proxelar:/root/.proxelar -p 8080:8080 ghcr.io/emanuele
 
 The `-v ~/.proxelar:/root/.proxelar` mount reuses your existing trusted CA certificate, so you do not get browser warnings after trusting the CA once. The container always keeps its state at `/root/.proxelar`; if your host state directory differs (because `XDG_CONFIG_HOME` is set), mount that path instead of `~/.proxelar`.
 
-The published image is `linux/amd64`. To build it yourself, or to run on another architecture, use the `Dockerfile` in the repository:
+The published image supports `linux/amd64` and `linux/arm64`, with Lua and HTTP/3 enabled. Docker and Podman select the matching architecture automatically. To build it yourself, use the `Dockerfile` in the repository:
 
 ```bash
 docker build -t proxelar .

@@ -9,6 +9,7 @@
 
 ### Added
 
+- Publish multi-platform Linux container images for AMD64 and ARM64, built and smoke-tested on native runners with HTTP/3 enabled.
 - Add `Proxy::start_with_handler` for embedding a forward proxy with a custom `HttpHandler`, instead of only `CapturingHandler`. See the `allowlist` example in `proxyapi/examples/`. ([#196](https://github.com/emanuele-em/proxelar/pull/196) by @ajanon)
 
 ### Changed
