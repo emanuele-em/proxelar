@@ -19,14 +19,29 @@ on:
 permissions:
   contents: read
 
+env:
+  IMAGE_NAME: ghcr.io/${{ github.repository }}
+
+defaults:
+  run:
+    shell: bash
+
 jobs:
   container:
-    name: Build and publish container
-    runs-on: ubuntu-latest
+    name: Build container (${{ matrix.platform }})
+    runs-on: ${{ matrix.runner }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - platform: linux/amd64
+            runner: ubuntu-24.04
+            arch: amd64
+          - platform: linux/arm64
+            runner: ubuntu-24.04-arm
+            arch: arm64
     permissions:
-      attestations: write
       contents: read
-      id-token: write
       packages: write
     steps:
       - uses: actions/checkout@v7
@@ -56,7 +71,7 @@ jobs:
         id: meta
         uses: docker/metadata-action@v6
         with:
-          images: ghcr.io/${{ github.repository }}
+          images: ${{ env.IMAGE_NAME }}
           tags: |
             type=ref,event=pr
             type=semver,pattern={{version}},value=${{ inputs.tag }},enable=${{ github.event_name != 'pull_request' }}
@@ -69,24 +84,109 @@ jobs:
         with:
           context: .
           file: ${{ runner.temp }}/proxelar.Dockerfile
-          platforms: linux/amd64
-          push: ${{ github.event_name != 'pull_request' }}
+          platforms: ${{ matrix.platform }}
+          # Publish only by digest; the merge job assigns shared release tags.
+          outputs: ${{ github.event_name != 'pull_request' && format('type=image,name={0},push-by-digest=true,name-canonical=true,push=true', env.IMAGE_NAME) || '' }}
           load: ${{ github.event_name == 'pull_request' }}
-          tags: ${{ steps.meta.outputs.tags }}
+          tags: ${{ github.event_name == 'pull_request' && steps.meta.outputs.tags || '' }}
           labels: ${{ steps.meta.outputs.labels }}
-          cache-from: type=gha
-          cache-to: type=gha,mode=max
+          cache-from: type=gha,scope=container-${{ matrix.arch }}
+          cache-to: type=gha,mode=max,scope=container-${{ matrix.arch }}
 
       - name: Check packaged version
-        if: github.event_name == 'pull_request'
         env:
-          IMAGE: ghcr.io/${{ github.repository }}:pr-${{ github.event.number }}
-        run: docker run --rm "$IMAGE" --version
+          IMAGE: ${{ github.event_name == 'pull_request' && format('{0}:pr-{1}', env.IMAGE_NAME, github.event.number) || format('{0}@{1}', env.IMAGE_NAME, steps.build.outputs.digest) }}
+          PLATFORM: ${{ matrix.platform }}
+        run: docker run --rm --platform "$PLATFORM" "$IMAGE" --version
+
+      - name: Export image digest
+        if: github.event_name != 'pull_request'
+        env:
+          DIGEST: ${{ steps.build.outputs.digest }}
+        run: |
+          mkdir -p "$RUNNER_TEMP/digests"
+          touch "$RUNNER_TEMP/digests/${DIGEST#sha256:}"
+
+      - name: Upload image digest
+        if: github.event_name != 'pull_request'
+        uses: actions/upload-artifact@v7
+        with:
+          name: digests-${{ matrix.arch }}
+          path: ${{ runner.temp }}/digests/*
+          if-no-files-found: error
+          retention-days: 1
+
+  merge:
+    name: Publish multi-platform container
+    if: github.event_name != 'pull_request'
+    needs: container
+    runs-on: ubuntu-24.04
+    permissions:
+      attestations: write
+      contents: read
+      id-token: write
+      packages: write
+    steps:
+      - uses: actions/download-artifact@v8
+        with:
+          path: ${{ runner.temp }}/digests
+          pattern: digests-*
+          merge-multiple: true
+
+      - uses: docker/setup-buildx-action@v4
+
+      - name: Log in to ghcr.io
+        uses: docker/login-action@v4.6.0
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Collect image metadata
+        id: meta
+        uses: docker/metadata-action@v6
+        with:
+          images: ${{ env.IMAGE_NAME }}
+          tags: |
+            type=semver,pattern={{version}},value=${{ inputs.tag }}
+            type=semver,pattern={{major}}.{{minor}},value=${{ inputs.tag }}
+            type=raw,value=latest,enable=${{ !contains(inputs.tag, '-') }}
+
+      - name: Create multi-platform manifest
+        id: manifest
+        working-directory: ${{ runner.temp }}/digests
+        env:
+          TAGS: ${{ steps.meta.outputs.tags }}
+        run: |
+          tag_args=()
+          while IFS= read -r tag; do
+            if [[ -n "$tag" ]]; then
+              tag_args+=(--tag "$tag")
+            fi
+          done <<< "$TAGS"
+          sources=()
+          for digest in *; do
+            sources+=("$IMAGE_NAME@sha256:$digest")
+          done
+          if [[ ${#sources[@]} -ne 2 ]]; then
+            echo "Expected both AMD64 and ARM64 image digests" >&2
+            exit 1
+          fi
+          docker buildx imagetools create "${tag_args[@]}" "${sources[@]}" \
+            --metadata-file "$RUNNER_TEMP/manifest.json"
+          digest=$(jq -er '."containerimage.descriptor".digest' "$RUNNER_TEMP/manifest.json")
+          echo "digest=$digest" >> "$GITHUB_OUTPUT"
+
+      - name: Verify published platforms
+        env:
+          DIGEST: ${{ steps.manifest.outputs.digest }}
+        run: |
+          docker buildx imagetools inspect "$IMAGE_NAME@$DIGEST" --raw | \
+            jq -e '[.manifests[].platform | select(.os == "linux") | .architecture] | sort == ["amd64", "arm64"]'
 
       - name: Attest image provenance
-        if: github.event_name != 'pull_request'
         uses: actions/attest-build-provenance@v4
         with:
-          subject-name: ghcr.io/${{ github.repository }}
-          subject-digest: ${{ steps.build.outputs.digest }}
+          subject-name: ${{ env.IMAGE_NAME }}
+          subject-digest: ${{ steps.manifest.outputs.digest }}
           push-to-registry: true

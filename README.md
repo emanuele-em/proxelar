@@ -72,6 +72,8 @@ cargo install proxelar
 
 ### Docker / Podman
 
+The published image supports `linux/amd64` and `linux/arm64`, with Lua and HTTP/3 enabled. Docker and Podman select the matching architecture automatically.
+
 ```bash
 # Web GUI
 docker run --rm -it -v ~/.proxelar:/root/.proxelar -p 8080:8080 -p 127.0.0.1:8081:8081 ghcr.io/emanuele-em/proxelar --interface gui --addr 0.0.0.0
