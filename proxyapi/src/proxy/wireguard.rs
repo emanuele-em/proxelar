@@ -546,7 +546,7 @@ fn spawn_udp_exchange(
 ) {
     tokio::spawn(async move {
         let response = if destination.port() == 53 {
-            dns::resolve_packet(request, dns_config, event_tx).await
+            dns::resolve_packet(request, dns_config, dns::ForwardAll, event_tx).await
         } else {
             udp::exchange(source, destination, request, event_tx).await
         };

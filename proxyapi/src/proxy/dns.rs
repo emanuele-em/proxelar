@@ -10,6 +10,44 @@ use tokio::sync::mpsc;
 use crate::event::{next_id, ProxyEvent};
 use crate::handler::now_millis;
 
+/// Trait for filtering queries in DNS proxy mode.
+///
+/// Implementations must be `Clone` because the proxy clones the handler
+/// for each query.
+///
+/// Queries answered by a [`DnsConfig`] override never reach the handler.
+/// Queries the handler does not forward are reported as a
+/// [`ProxyEvent::DnsResponse`] with `overridden` set and no answers.
+#[async_trait::async_trait]
+pub trait DnsHandler: Clone + Send + Sync + 'static {
+    /// Decide how to answer a query.
+    ///
+    /// `name` has no trailing dot and keeps the case sent by the client.
+    /// `query_type` is the numeric QTYPE, e.g. 1 for A or 28 for AAAA.
+    async fn handle_query(&self, name: &str, query_type: u16) -> DnsDecision;
+}
+
+/// Returned by [`DnsHandler::handle_query`].
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[non_exhaustive]
+pub enum DnsDecision {
+    /// Forward the query to the upstream resolver.
+    Forward,
+    /// Answer with NXDOMAIN without contacting the upstream resolver.
+    NxDomain,
+}
+
+/// [`DnsHandler`] that forwards every query.
+#[derive(Clone, Copy)]
+pub(crate) struct ForwardAll;
+
+#[async_trait::async_trait]
+impl DnsHandler for ForwardAll {
+    async fn handle_query(&self, _name: &str, _query_type: u16) -> DnsDecision {
+        DnsDecision::Forward
+    }
+}
+
 #[derive(Clone, Debug)]
 pub struct DnsConfig {
     pub upstream: SocketAddr,
@@ -34,9 +72,10 @@ impl DnsConfig {
     }
 }
 
-pub async fn serve(
+pub async fn serve<H: DnsHandler>(
     address: SocketAddr,
     config: DnsConfig,
+    handler: H,
     event_tx: mpsc::Sender<ProxyEvent>,
     shutdown: impl Future<Output = ()>,
 ) -> std::io::Result<()> {
@@ -55,8 +94,11 @@ pub async fn serve(
                 let socket = Arc::clone(&socket);
                 let config = config.clone();
                 let event_tx = event_tx.clone();
+                let handler = handler.clone();
                 tokio::spawn(async move {
-                    if let Err(error) = handle_packet(socket, client, packet, config, event_tx).await {
+                    if let Err(error) =
+                        handle_packet(socket, client, packet, config, handler, event_tx).await
+                    {
                         tracing::debug!("DNS request failed: {error}");
                     }
                 });
@@ -66,21 +108,23 @@ pub async fn serve(
     }
 }
 
-async fn handle_packet(
+async fn handle_packet<H: DnsHandler>(
     socket: Arc<UdpSocket>,
     client: SocketAddr,
     packet: Vec<u8>,
     config: DnsConfig,
+    handler: H,
     event_tx: mpsc::Sender<ProxyEvent>,
 ) -> std::io::Result<()> {
-    let response = resolve_packet(packet, config, event_tx).await?;
+    let response = resolve_packet(packet, config, handler, event_tx).await?;
     socket.send_to(&response, client).await?;
     Ok(())
 }
 
-pub(crate) async fn resolve_packet(
+pub(crate) async fn resolve_packet<H: DnsHandler>(
     packet: Vec<u8>,
     config: DnsConfig,
+    handler: H,
     event_tx: mpsc::Sender<ProxyEvent>,
 ) -> std::io::Result<Vec<u8>> {
     let query = parse_query(&packet)?;
@@ -108,9 +152,14 @@ pub(crate) async fn resolve_packet(
             true,
         )
     } else {
-        let response = forward(&packet, config.upstream).await?;
-        let answers = parse_answers(&response).unwrap_or_default();
-        (response, answers, false)
+        match handler.handle_query(&query.name, query.query_type).await {
+            DnsDecision::Forward => {
+                let response = forward(&packet, config.upstream).await?;
+                let answers = parse_answers(&response).unwrap_or_default();
+                (response, answers, false)
+            }
+            DnsDecision::NxDomain => (nxdomain_response(&packet, &query)?, vec![], true),
+        }
     };
     let _ = event_tx.try_send(ProxyEvent::DnsResponse {
         id,
@@ -284,6 +333,17 @@ fn override_response(
     Ok(response)
 }
 
+fn nxdomain_response(packet: &[u8], query: &Query) -> std::io::Result<Vec<u8>> {
+    let mut response = packet
+        .get(..query.question_end)
+        .ok_or_else(|| invalid("truncated DNS question"))?
+        .to_vec();
+    response[2] |= 0x80; // QR
+    response[3] = (response[3] & 0xf0) | 0x83; // RA, RCODE = NXDOMAIN
+    response[6..12].fill(0); // ANCOUNT, NSCOUNT, ARCOUNT
+    Ok(response)
+}
+
 fn invalid(message: &'static str) -> std::io::Error {
     std::io::Error::new(std::io::ErrorKind::InvalidData, message)
 }
@@ -356,6 +416,7 @@ mod tests {
             client.local_addr().unwrap(),
             query("api.example.test", 1),
             config,
+            ForwardAll,
             event_tx,
         )
         .await
@@ -454,5 +515,25 @@ mod tests {
             30
         )
         .is_err());
+        assert!(nxdomain_response(&query("example.test", 1), &parsed).is_err());
+    }
+
+    #[test]
+    fn nxdomain_response_echoes_question_without_records() {
+        let mut packet = query("blocked.example.test", 1);
+        let question_end = packet.len();
+        // EDNS OPT record in the additional section.
+        packet[11] = 1;
+        packet.extend_from_slice(&[0, 0, 41, 0x10, 0, 0, 0, 0, 0, 0, 0]);
+        let parsed = parse_query(&packet).unwrap();
+
+        let response = nxdomain_response(&packet, &parsed).unwrap();
+
+        assert_eq!(&response[..2], &packet[..2]); // ID
+        assert_eq!(response[2] & 0x80, 0x80); // QR
+        assert_eq!(response[3] & 0x8f, 0x83); // RA, RCODE = NXDOMAIN
+        assert_eq!(&response[4..6], &[0, 1]); // QDCOUNT
+        assert_eq!(&response[6..12], &[0; 6]); // ANCOUNT, NSCOUNT, ARCOUNT
+        assert_eq!(&response[12..], &packet[12..question_end]);
     }
 }

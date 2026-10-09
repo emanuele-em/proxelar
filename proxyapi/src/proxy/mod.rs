@@ -28,7 +28,7 @@ use crate::intercept::InterceptConfig;
 use crate::scripting::ScriptEngine;
 use crate::HttpHandler;
 
-pub use dns::DnsConfig;
+pub use dns::{DnsConfig, DnsDecision, DnsHandler};
 pub use outbound::UpstreamProxyConfig;
 pub use tls::UpstreamTlsConfig;
 pub use wireguard::WireGuardConfig;
@@ -187,6 +187,7 @@ impl Proxy {
             return dns::serve(
                 self.config.addr,
                 config.clone(),
+                dns::ForwardAll,
                 self.config.event_tx.clone(),
                 shutdown,
             )
@@ -541,6 +542,33 @@ impl Proxy {
         }
 
         Ok(())
+    }
+
+    /// Start the DNS proxy with a custom [`DnsHandler`] and run until the
+    /// `shutdown` future resolves.
+    ///
+    /// The handler is cloned for every query.
+    ///
+    /// Only [`ProxyMode::Dns`] is supported.
+    pub async fn start_with_dns_handler<H: DnsHandler>(
+        self,
+        handler: H,
+        shutdown: impl Future<Output = ()>,
+    ) -> Result<(), Error> {
+        let ProxyMode::Dns { config } = self.config.mode else {
+            return Err(Error::Other(
+                "start_with_dns_handler is only supported in DNS mode".to_owned(),
+            ));
+        };
+        dns::serve(
+            self.config.addr,
+            config,
+            handler,
+            self.config.event_tx,
+            shutdown,
+        )
+        .await
+        .map_err(Error::Io)
     }
 }
 
