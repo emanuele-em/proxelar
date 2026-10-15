@@ -14,6 +14,8 @@
 
 ### Changed
 
+- Use byte-preserving `DnsName` values for DNS handlers, overrides, query events, and captured exchanges (breaking Rust API change). Names compare whole labels with ASCII case insensitivity and serialize as escaped DNS presentation strings; ordinary domain strings retain their existing JSON shape.
+
 - Make forward and HTTP/2 proxy paths generic over `HttpHandler`. ([#196](https://github.com/emanuele-em/proxelar/pull/196) by @ajanon)
 
 ## [0.6.1] - 2026-09-22

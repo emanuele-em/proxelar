@@ -813,7 +813,7 @@ mod tests {
         state.add_event(ProxyEvent::TcpClosed { stream_id: 10 });
         state.add_event(ProxyEvent::DnsQuery {
             id: 11,
-            name: "api.example.test".to_owned(),
+            name: "api.example.test".parse().unwrap(),
             query_type: 1,
             time: 1_002,
         });

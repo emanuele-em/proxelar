@@ -221,7 +221,7 @@ fn traffic_session_roundtrip_keeps_version_and_dns_state() {
     let mut session = TrafficSession::new(123);
     session.dns_exchanges.push(CapturedDnsExchange {
         id: 7,
-        name: "api.example.test".to_owned(),
+        name: "api.example.test".parse().unwrap(),
         query_type: 1,
         time: 123,
         answers: vec!["127.0.0.1".to_owned()],

@@ -922,6 +922,32 @@ mod tests {
     }
 
     #[test]
+    fn dns_names_survive_event_serialization_session_storage_and_replay() {
+        let name = crate::DnsName::from_labels([b"a.b\\\0\xff".as_slice(), b"Example"]).unwrap();
+        let event = ProxyEvent::DnsQuery {
+            id: 1,
+            name: name.clone(),
+            query_type: 1,
+            time: 123,
+        };
+        let json = serde_json::to_value(&event).unwrap();
+        assert_eq!(json["DnsQuery"]["name"], name.to_string());
+        let event: ProxyEvent = serde_json::from_value(json).unwrap();
+        let mut recorder = SessionRecorder::new(123);
+        recorder.record(&event);
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("dns.json");
+        save_session(&path, recorder.session()).unwrap();
+        let loaded = load_session(path).unwrap();
+        assert_eq!(loaded.dns_exchanges[0].name.labels(), name.labels());
+        let replay = session_events(&loaded);
+        let ProxyEvent::DnsQuery { name: replayed, .. } = &replay[0] else {
+            panic!("expected DNS query event");
+        };
+        assert_eq!(replayed.labels(), name.labels());
+    }
+
+    #[test]
     fn recorder_tracks_http_websocket_and_dns_lifecycle() {
         let captured = flow(7);
         let mut recorder = SessionRecorder::new(1);
@@ -938,7 +964,7 @@ mod tests {
         recorder.record(&ProxyEvent::WebSocketClosed { conn_id: 8 });
         recorder.record(&ProxyEvent::DnsQuery {
             id: 9,
-            name: "api.example.test".to_owned(),
+            name: "api.example.test".parse().unwrap(),
             query_type: 1,
             time: 1_000,
         });
@@ -1114,7 +1140,7 @@ mod tests {
 
         recorder.record(&ProxyEvent::DnsQuery {
             id: 14,
-            name: "example.test".to_owned(),
+            name: "example.test".parse().unwrap(),
             query_type: 1,
             time: 5,
         });

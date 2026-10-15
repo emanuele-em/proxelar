@@ -230,7 +230,7 @@ pub fn draw(f: &mut Frame, state: &mut AppState, wireguard_setup: Option<&WireGu
                     Cell::from("DNS").style(Style::default().fg(theme.proto_color("DNS"))),
                     Cell::from(dns_query_type(exchange.query_type))
                         .style(Style::default().fg(theme.dns_query_type.0)),
-                    Cell::from(exchange.name.as_str()),
+                    Cell::from(exchange.name.to_string()),
                     Cell::from("-"),
                     Cell::from(status).style(Style::default().fg(if exchange.overridden {
                         theme.dns_state_override.0
@@ -970,7 +970,7 @@ fn build_dns_lines(exchange: &CapturedDnsExchange, theme: &Theme) -> Vec<Line<'s
                     .add_modifier(Modifier::BOLD),
             ),
             Span::raw(" "),
-            Span::raw(exchange.name.clone()),
+            Span::raw(exchange.name.to_string()),
         ]),
         Line::from(format!(
             "Source: {} · State: {}",

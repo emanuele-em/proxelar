@@ -29,6 +29,7 @@ pub use proxelar_proto::{
     BodyFrame, ProtocolError, ProxyBody, ProxyRequest, ProxyResponse, RequestHead, ResponseHead,
 };
 use proxyapi_models::ProxiedRequest;
+pub use proxyapi_models::{DnsName, DnsNameError};
 use std::net::SocketAddr;
 #[cfg(feature = "scripting")]
 use std::sync::Arc;

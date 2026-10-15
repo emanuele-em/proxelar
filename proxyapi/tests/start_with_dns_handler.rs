@@ -8,7 +8,7 @@ use std::net::SocketAddr;
 use std::time::Duration;
 
 use proxyapi::{
-    DnsConfig, DnsDecision, DnsHandler, Proxy, ProxyConfig, ProxyEvent, ProxyMode,
+    DnsConfig, DnsDecision, DnsHandler, DnsName, Proxy, ProxyConfig, ProxyEvent, ProxyMode,
     UpstreamTlsConfig,
 };
 use tokio::net::UdpSocket;
@@ -23,9 +23,12 @@ async fn test_start_with_dns_handler_filters_queries() {
     let (shutdown_tx, shutdown_rx) = tokio::sync::oneshot::channel();
     let handle = tokio::spawn(async move {
         proxy
-            .start_with_dns_handler(AllowNameHandler("allowed.example.test"), async {
-                shutdown_rx.await.ok();
-            })
+            .start_with_dns_handler(
+                AllowNameHandler("allowed.example.test".parse().unwrap()),
+                async {
+                    shutdown_rx.await.ok();
+                },
+            )
             .await
     });
 
@@ -39,6 +42,25 @@ async fn test_start_with_dns_handler_filters_queries() {
     let response = exchange(&client, &query(2, "blocked.example.test")).await;
     assert_eq!(response[3] & 0x0f, 3, "blocked query should be NXDOMAIN");
     assert_eq!(&response[6..8], &[0, 0], "no answer expected");
+
+    // Literal dots inside a label must not create an allowlisted suffix.
+    for (id, labels) in [
+        (3, vec![b"evil.allowed".as_slice(), b"example", b"test"]),
+        (4, vec![b"allowed.example.test".as_slice()]),
+    ] {
+        let response = exchange(&client, &query_labels(id, &labels)).await;
+        assert_eq!(
+            response[3] & 0x0f,
+            3,
+            "label-boundary bypass must be blocked"
+        );
+    }
+    // Arbitrary bytes in a subdomain are preserved, not rejected as invalid UTF-8.
+    let binary_labels = [b"\xff.\\".as_slice(), b"Allowed", b"Example", b"Test"];
+    let binary_packet = query_labels(5, &binary_labels);
+    let response = exchange(&client, &binary_packet).await;
+    assert_eq!(response[3] & 0x0f, 0);
+    assert_eq!(&response[12..binary_packet.len()], &binary_packet[12..]);
 
     let _ = shutdown_tx.send(());
     assert!(handle.await.unwrap().is_ok());
@@ -59,11 +81,16 @@ async fn test_start_with_dns_handler_filters_queries() {
         }
     }
     assert!(responses.contains(&(
-        "Allowed.Example.Test".to_owned(),
+        "Allowed.Example.Test".parse().unwrap(),
         vec!["127.0.0.1".to_owned()],
         false
     )));
-    assert!(responses.contains(&("blocked.example.test".to_owned(), vec![], true)));
+    assert!(responses.contains(&("blocked.example.test".parse().unwrap(), vec![], true)));
+    let binary_name = DnsName::from_labels(binary_labels).unwrap();
+    assert!(responses.contains(&(binary_name.clone(), vec!["127.0.0.1".to_owned()], false)));
+    assert!(names
+        .values()
+        .any(|name| name.labels() == binary_name.labels()));
 }
 
 #[tokio::test]
@@ -77,7 +104,7 @@ async fn test_start_with_dns_handler_rejects_non_dns_mode() {
     config.mode = ProxyMode::Forward;
 
     let error = Proxy::new(config)
-        .start_with_dns_handler(AllowNameHandler(""), async {})
+        .start_with_dns_handler(AllowNameHandler(".".parse().unwrap()), async {})
         .await
         .expect_err("non-DNS mode should fail before startup");
     assert!(
@@ -86,14 +113,14 @@ async fn test_start_with_dns_handler_rejects_non_dns_mode() {
     );
 }
 
-/// Allows a single name, case-insensitively, and blocks everything else.
+/// Allows a domain and its subdomains, case-insensitively.
 #[derive(Clone)]
-struct AllowNameHandler(&'static str);
+struct AllowNameHandler(DnsName);
 
 #[async_trait::async_trait]
 impl DnsHandler for AllowNameHandler {
-    async fn handle_query(&self, name: &str, _query_type: u16) -> DnsDecision {
-        if name.eq_ignore_ascii_case(self.0) {
+    async fn handle_query(&self, name: &DnsName, _query_type: u16) -> DnsDecision {
+        if name.is_subdomain_of(&self.0) {
             DnsDecision::Forward
         } else {
             DnsDecision::NxDomain
@@ -125,11 +152,15 @@ fn dns_config(
 
 /// Build an A query with the given transaction ID.
 fn query(id: u16, name: &str) -> Vec<u8> {
+    query_labels(id, &name.split('.').map(str::as_bytes).collect::<Vec<_>>())
+}
+
+fn query_labels(id: u16, labels: &[&[u8]]) -> Vec<u8> {
     let mut packet = id.to_be_bytes().to_vec();
     packet.extend_from_slice(&[1, 0, 0, 1, 0, 0, 0, 0, 0, 0]);
-    for label in name.split('.') {
+    for label in labels {
         packet.push(u8::try_from(label.len()).unwrap());
-        packet.extend_from_slice(label.as_bytes());
+        packet.extend_from_slice(label);
     }
     packet.extend_from_slice(&[0, 0, 1, 0, 1]);
     packet

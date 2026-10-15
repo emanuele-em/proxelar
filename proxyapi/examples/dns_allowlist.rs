@@ -17,7 +17,7 @@ use std::net::SocketAddr;
 use tokio::sync::mpsc;
 
 use proxyapi::{
-    DnsConfig, DnsDecision, DnsHandler, Proxy, ProxyConfig, ProxyMode, UpstreamTlsConfig,
+    DnsConfig, DnsDecision, DnsHandler, DnsName, Proxy, ProxyConfig, ProxyMode, UpstreamTlsConfig,
 };
 
 const LISTEN: &str = "127.0.0.1:5335";
@@ -26,17 +26,16 @@ const ALLOWED_DOMAINS: &[&str] = &["example.org"];
 
 #[derive(Clone)]
 struct AllowlistDnsHandler {
-    allowed_domains: &'static [&'static str],
+    allowed_domains: Vec<DnsName>,
 }
 
 #[async_trait::async_trait]
 impl DnsHandler for AllowlistDnsHandler {
-    async fn handle_query(&self, name: &str, _query_type: u16) -> DnsDecision {
-        let name = name.to_ascii_lowercase();
+    async fn handle_query(&self, name: &DnsName, _query_type: u16) -> DnsDecision {
         let allowed = self
             .allowed_domains
             .iter()
-            .any(|domain| name == *domain || name.ends_with(&format!(".{domain}")));
+            .any(|domain| name.is_subdomain_of(domain));
         if allowed {
             DnsDecision::Forward
         } else {
@@ -66,7 +65,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         replay_rx: None,
     };
     let handler = AllowlistDnsHandler {
-        allowed_domains: ALLOWED_DOMAINS,
+        allowed_domains: ALLOWED_DOMAINS
+            .iter()
+            .map(|domain| domain.parse())
+            .collect::<Result<_, _>>()?,
     };
     println!("DNS allowlist proxy listening on udp://{LISTEN}, upstream {UPSTREAM}");
     Proxy::new(config)

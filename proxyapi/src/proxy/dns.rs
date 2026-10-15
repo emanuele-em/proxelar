@@ -9,6 +9,7 @@ use tokio::sync::mpsc;
 
 use crate::event::{next_id, ProxyEvent};
 use crate::handler::now_millis;
+use crate::DnsName;
 
 /// Trait for filtering queries in DNS proxy mode.
 ///
@@ -22,9 +23,10 @@ use crate::handler::now_millis;
 pub trait DnsHandler: Clone + Send + Sync + 'static {
     /// Decide how to answer a query.
     ///
-    /// `name` has no trailing dot and keeps the case sent by the client.
+    /// `name` preserves the label bytes and case sent by the client.
+    /// Use [`DnsName::is_subdomain_of`] to match a domain and its subdomains.
     /// `query_type` is the numeric QTYPE, e.g. 1 for A or 28 for AAAA.
-    async fn handle_query(&self, name: &str, query_type: u16) -> DnsDecision;
+    async fn handle_query(&self, name: &DnsName, query_type: u16) -> DnsDecision;
 }
 
 /// Returned by [`DnsHandler::handle_query`].
@@ -43,7 +45,7 @@ pub(crate) struct ForwardAll;
 
 #[async_trait::async_trait]
 impl DnsHandler for ForwardAll {
-    async fn handle_query(&self, _name: &str, _query_type: u16) -> DnsDecision {
+    async fn handle_query(&self, _name: &DnsName, _query_type: u16) -> DnsDecision {
         DnsDecision::Forward
     }
 }
@@ -51,7 +53,7 @@ impl DnsHandler for ForwardAll {
 #[derive(Clone, Debug)]
 pub struct DnsConfig {
     pub upstream: SocketAddr,
-    pub overrides: HashMap<String, IpAddr>,
+    pub overrides: HashMap<DnsName, IpAddr>,
     pub ttl: u32,
 }
 
@@ -64,11 +66,9 @@ impl DnsConfig {
         }
     }
 
-    pub fn add_override(&mut self, name: impl Into<String>, address: IpAddr) {
-        self.overrides.insert(
-            name.into().trim_end_matches('.').to_ascii_lowercase(),
-            address,
-        );
+    /// Override an exact DNS name, ignoring ASCII case.
+    pub fn add_override(&mut self, name: DnsName, address: IpAddr) {
+        self.overrides.insert(name, address);
     }
 }
 
@@ -137,7 +137,7 @@ pub(crate) async fn resolve_packet<H: DnsHandler>(
     });
     let override_address = config
         .overrides
-        .get(&query.name.trim_end_matches('.').to_ascii_lowercase())
+        .get(&query.name)
         .copied()
         .filter(|address| {
             matches!(
@@ -187,7 +187,7 @@ async fn forward(packet: &[u8], upstream: SocketAddr) -> std::io::Result<Vec<u8>
 }
 
 struct Query {
-    name: String,
+    name: DnsName,
     query_type: u16,
     question_end: usize,
 }
@@ -216,18 +216,15 @@ fn parse_query(packet: &[u8]) -> std::io::Result<Query> {
         let label = packet
             .get(cursor..end)
             .ok_or_else(|| invalid("truncated DNS label"))?;
-        labels.push(
-            std::str::from_utf8(label)
-                .map_err(|_| invalid("DNS label is not UTF-8"))?
-                .to_owned(),
-        );
+        labels.push(label);
         cursor = end;
     }
     let question = packet
         .get(cursor..cursor + 4)
         .ok_or_else(|| invalid("truncated DNS question"))?;
     Ok(Query {
-        name: labels.join("."),
+        name: DnsName::from_labels(labels)
+            .map_err(|error| std::io::Error::new(std::io::ErrorKind::InvalidData, error))?,
         query_type: u16::from_be_bytes([question[0], question[1]]),
         question_end: cursor + 4,
     })
@@ -369,7 +366,7 @@ mod tests {
     fn parses_query_and_builds_ipv4_and_ipv6_overrides() {
         let packet = query("api.example.test", 1);
         let parsed = parse_query(&packet).unwrap();
-        assert_eq!(parsed.name, "api.example.test");
+        assert_eq!(parsed.name.to_string(), "api.example.test");
         assert_eq!(parsed.query_type, 1);
         let response = override_response(
             &packet,
@@ -394,13 +391,84 @@ mod tests {
     }
 
     #[test]
-    fn config_normalizes_override_names() {
+    fn config_matches_override_names_case_insensitively() {
         let mut config = DnsConfig::new("1.1.1.1:53".parse().unwrap());
-        config.add_override("API.Example.Test.", "127.0.0.1".parse().unwrap());
+        config.add_override(
+            "API.Example.Test.".parse().unwrap(),
+            "127.0.0.1".parse().unwrap(),
+        );
         assert_eq!(
-            config.overrides["api.example.test"],
+            config.overrides[&"api.example.test".parse::<DnsName>().unwrap()],
             IpAddr::V4(Ipv4Addr::LOCALHOST)
         );
+    }
+
+    #[test]
+    fn parses_root_binary_labels_and_enforces_the_wire_name_limit() {
+        let mut packet = vec![0_u8; 12];
+        packet[5] = 1;
+        packet.extend_from_slice(&[0, 0, 1, 0, 1]);
+        assert!(parse_query(&packet).unwrap().name.labels().is_empty());
+
+        packet.truncate(12);
+        packet.extend_from_slice(&[3, 0xff, b'.', b'\\', 0, 0, 1, 0, 1]);
+        let name = parse_query(&packet).unwrap().name;
+        assert_eq!(name.labels(), &[vec![0xff, b'.', b'\\']]);
+
+        packet.truncate(12);
+        for length in [63, 63, 63, 61] {
+            packet.push(length);
+            packet.extend(std::iter::repeat_n(b'a', usize::from(length)));
+        }
+        packet.extend_from_slice(&[0, 0, 1, 0, 1]);
+        assert!(parse_query(&packet).is_ok());
+        packet[12 + 3 * 64] = 62;
+        packet.insert(packet.len() - 5, b'a');
+        assert!(parse_query(&packet).is_err());
+    }
+
+    #[tokio::test]
+    async fn overrides_do_not_match_dots_embedded_in_a_label() {
+        #[derive(Clone)]
+        struct BlockAll;
+
+        #[async_trait::async_trait]
+        impl DnsHandler for BlockAll {
+            async fn handle_query(&self, _name: &DnsName, _query_type: u16) -> DnsDecision {
+                DnsDecision::NxDomain
+            }
+        }
+
+        let mut config = DnsConfig::new("127.0.0.1:9".parse().unwrap());
+        config.add_override(
+            "example.test".parse().unwrap(),
+            IpAddr::V4(Ipv4Addr::LOCALHOST),
+        );
+        let (event_tx, mut event_rx) = mpsc::channel(8);
+        let mut packet = query("example.test", 1);
+        // Encode the same text in one label, rather than two.
+        packet[12] = 12;
+        packet[20] = b'.';
+        let response = resolve_packet(packet.clone(), config.clone(), BlockAll, event_tx.clone())
+            .await
+            .unwrap();
+        assert_eq!(response[3] & 0x0f, 3);
+        assert_eq!(&response[6..8], &[0, 0]);
+        let ProxyEvent::DnsQuery { name, .. } = event_rx.recv().await.unwrap() else {
+            panic!("expected DNS query event");
+        };
+        assert_eq!(name.labels(), &[b"example.test".to_vec()]);
+
+        // Escaped configuration can target that literal label explicitly.
+        config.add_override(
+            r"example\.test".parse().unwrap(),
+            IpAddr::V4(Ipv4Addr::LOCALHOST),
+        );
+        let response = resolve_packet(packet, config, BlockAll, event_tx)
+            .await
+            .unwrap();
+        assert_eq!(response[3] & 0x0f, 0);
+        assert_eq!(parse_answers(&response).unwrap(), ["127.0.0.1"]);
     }
 
     #[tokio::test]
@@ -408,7 +476,10 @@ mod tests {
         let listener = Arc::new(UdpSocket::bind("127.0.0.1:0").await.unwrap());
         let client = UdpSocket::bind("127.0.0.1:0").await.unwrap();
         let mut config = DnsConfig::new("127.0.0.1:9".parse().unwrap());
-        config.add_override("api.example.test", IpAddr::V4(Ipv4Addr::LOCALHOST));
+        config.add_override(
+            "api.example.test".parse().unwrap(),
+            IpAddr::V4(Ipv4Addr::LOCALHOST),
+        );
         let (event_tx, mut event_rx) = mpsc::channel(4);
 
         handle_packet(
@@ -428,7 +499,7 @@ mod tests {
         let ProxyEvent::DnsQuery { id, name, .. } = event_rx.recv().await.unwrap() else {
             panic!("expected DNS query event");
         };
-        assert_eq!(name, "api.example.test");
+        assert_eq!(name.to_string(), "api.example.test");
         let ProxyEvent::DnsResponse {
             id: response_id,
             overridden,
@@ -455,11 +526,6 @@ mod tests {
         assert!(parse_query(&packet).is_err());
         packet[12] = 64;
         assert!(parse_query(&packet).is_err());
-
-        let mut invalid_utf8 = vec![0_u8; 12];
-        invalid_utf8[5] = 1;
-        invalid_utf8.extend_from_slice(&[1, 0xff, 0, 0, 1, 0, 1]);
-        assert!(parse_query(&invalid_utf8).is_err());
 
         let mut missing_question = vec![0_u8; 12];
         missing_question[5] = 1;
@@ -504,7 +570,7 @@ mod tests {
         assert!(parse_answers(&ignored_record).unwrap().is_empty());
 
         let parsed = Query {
-            name: "example.test".to_owned(),
+            name: "example.test".parse().unwrap(),
             query_type: 1,
             question_end: 100,
         };

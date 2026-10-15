@@ -1,4 +1,6 @@
-use proxyapi_models::{CapturedUdpExchange, ProxiedRequest, ProxiedResponse, TcpChunk, WsFrame};
+use proxyapi_models::{
+    CapturedUdpExchange, DnsName, ProxiedRequest, ProxiedResponse, TcpChunk, WsFrame,
+};
 use serde::{Deserialize, Serialize};
 use std::sync::atomic::{AtomicU64, Ordering};
 
@@ -69,7 +71,7 @@ pub enum ProxyEvent {
     /// A DNS query was received by DNS proxy mode.
     DnsQuery {
         id: u64,
-        name: String,
+        name: DnsName,
         query_type: u16,
         time: i64,
     },
