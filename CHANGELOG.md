@@ -19,6 +19,10 @@
 
 - Make forward and HTTP/2 proxy paths generic over `HttpHandler`. ([#196](https://github.com/emanuele-em/proxelar/pull/196) by @ajanon)
 
+### Fixed
+
+- Update rustls to 0.23.46 (and require at least that version) and quinn-proto to 0.11.18 to address TLS/QUIC security advisories.
+
 ## [0.6.1] - 2026-09-22
 
 ### Added

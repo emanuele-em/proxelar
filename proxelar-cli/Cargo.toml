@@ -54,7 +54,7 @@ tokio-util = "0.7"
 chrono = "0.4"
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
-rustls = { version = "0.23", default-features = false, features = ["ring"] }
+rustls = { version = "0.23.46", default-features = false, features = ["ring"] }
 open = "5"
 
 # TUI
