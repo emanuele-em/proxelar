@@ -22,6 +22,7 @@
 ### Fixed
 
 - Update rustls to 0.23.46 (and require at least that version) and quinn-proto to 0.11.18 to address TLS/QUIC security advisories.
+- Select test ports available for both TCP and UDP so Windows reverse-HTTPS tests can start their HTTP/3 listener.
 
 ## [0.6.1] - 2026-09-22
 
