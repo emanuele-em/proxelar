@@ -10,19 +10,19 @@
 ### Added
 
 - Add `Proxy::start_with_handler` for embedding a forward proxy with a custom `HttpHandler`, instead of only `CapturingHandler`. See the `allowlist` example in `proxyapi/examples/`. ([#196](https://github.com/emanuele-em/proxelar/pull/196) by @ajanon)
-- Add `DnsHandler` and `Proxy::start_with_dns_handler` for embedding a DNS proxy that filters queries: blocked queries are answered with NXDOMAIN without contacting the upstream resolver. See the `dns_allowlist` example in `proxyapi/examples/`.
+- Add `DnsHandler` and `Proxy::start_with_dns_handler` for embedding a DNS proxy that filters queries: blocked queries are answered with NXDOMAIN without contacting the upstream resolver. See the `dns_allowlist` example in `proxyapi/examples/`. ([#200](https://github.com/emanuele-em/proxelar/pull/200) by @ajanon)
 
 ### Changed
 
-- Use byte-preserving `DnsName` values for DNS handlers, overrides, query events, and captured exchanges (breaking Rust API change). Names compare whole labels with ASCII case insensitivity and serialize as escaped DNS presentation strings; ordinary domain strings retain their existing JSON shape.
-- Bump native sessions to format v3 for escaped DNS names. Older session versions are rejected with an explicit version error; no migration is provided.
+- Use byte-preserving `DnsName` values for DNS handlers, overrides, query events, and captured exchanges (breaking Rust API change). Names compare whole labels with ASCII case insensitivity and serialize as escaped DNS presentation strings; ordinary domain strings retain their existing JSON shape. ([#200](https://github.com/emanuele-em/proxelar/pull/200) by @ajanon and @emanuele-em)
+- Bump native sessions to format v3 for escaped DNS names. Older session versions are rejected with an explicit version error; no migration is provided. ([#200](https://github.com/emanuele-em/proxelar/pull/200) by @emanuele-em)
 
 - Make forward and HTTP/2 proxy paths generic over `HttpHandler`. ([#196](https://github.com/emanuele-em/proxelar/pull/196) by @ajanon)
 
 ### Fixed
 
-- Update rustls to 0.23.46 (and require at least that version) and quinn-proto to 0.11.18 to address TLS/QUIC security advisories.
-- Select test ports available for both TCP and UDP so Windows reverse-HTTPS tests can start their HTTP/3 listener.
+- Update rustls to 0.23.46 (and require at least that version) and quinn-proto to 0.11.18 to address TLS/QUIC security advisories. ([#200](https://github.com/emanuele-em/proxelar/pull/200) by @emanuele-em)
+- Select test ports available for both TCP and UDP so Windows reverse-HTTPS tests can start their HTTP/3 listener. ([#200](https://github.com/emanuele-em/proxelar/pull/200) by @emanuele-em)
 
 ## [0.6.1] - 2026-09-22
 
