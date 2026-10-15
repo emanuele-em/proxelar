@@ -1,10 +1,10 @@
 # Session format
 
-The native Proxelar session is JSON with a mandatory numeric `version`. Version 2 has this top-level shape:
+The native Proxelar session is JSON with a mandatory numeric `version`. Version 3 has this top-level shape:
 
 ```json
 {
-  "version": 2,
+  "version": 3,
   "created_at": 1784450000000,
   "flows": [],
   "websockets": [],
@@ -20,6 +20,9 @@ The native Proxelar session is JSON with a mandatory numeric `version`. Version 
 - `websockets` contain handshake snapshots, ordered frames, direction/opcode, and closure state.
 - `tcp_streams` contain target, opening time, ordered directional chunks, and closure state.
 - `dns_exchanges` contain the query name/type, parsed IP answers, override state, and completion state.
+  Names use escaped DNS presentation strings: literal dots within labels are
+  `\.`, backslashes are `\\`, and non-printable or non-ASCII octets use decimal
+  `\DDD` escapes. The final root dot is omitted except for the root name (`.`).
 - `udp_exchanges` contain the client and fixed target addresses, lossless request/response bytes, response-received state, and capture-limit flags.
 - HTTP headers are ordered lists, so global field order, duplicate values, and
   HTTP/1 field-name casing are preserved. UTF-8 values use `value`; other bytes
@@ -33,9 +36,11 @@ The native Proxelar session is JSON with a mandatory numeric `version`. Version 
   ]
   ```
 
-Readers accept only the current format version. Version 1 used a map-shaped
-header representation that could not preserve global field order or arbitrary
-bytes, so v1 files are rejected explicitly rather than decoded ambiguously.
+Readers accept only the current format version. Version 2 stored unescaped DNS
+names; interpreting their backslashes as escapes could change names or fail to
+load a capture. Version 1 also used a map-shaped header representation that could
+not preserve global field order or arbitrary bytes. Both older versions are
+rejected with an explicit version error; no migration is performed.
 Future incompatible schema changes must increment the version and provide an
 explicit migration or a clear rejection.
 

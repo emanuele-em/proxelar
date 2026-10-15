@@ -88,7 +88,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         Mode::Dns => {
             let mut config = DnsConfig::new(resolve_socket_addr(&args.dns_upstream).await?);
             for mapping in &args.dns_map {
-                config.add_override(&mapping.source, mapping.target.parse::<std::net::IpAddr>()?);
+                config.add_override(
+                    mapping.source.parse()?,
+                    mapping.target.parse::<std::net::IpAddr>()?,
+                );
             }
             ProxyMode::Dns { config }
         }
@@ -103,7 +106,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         Mode::Wireguard => {
             let mut dns = DnsConfig::new(resolve_socket_addr(&args.dns_upstream).await?);
             for mapping in &args.dns_map {
-                dns.add_override(&mapping.source, mapping.target.parse::<std::net::IpAddr>()?);
+                dns.add_override(
+                    mapping.source.parse()?,
+                    mapping.target.parse::<std::net::IpAddr>()?,
+                );
             }
             let endpoint = match &args.wireguard_endpoint {
                 Some(endpoint) => endpoint.clone(),

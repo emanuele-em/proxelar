@@ -331,14 +331,15 @@ impl Term {
 
     fn matches_dns(&self, exchange: &CapturedDnsExchange) -> bool {
         let contains = |value: &str| value.to_ascii_lowercase().contains(&self.needle);
+        let name = exchange.name.to_string();
         let answers = exchange.answers.join(" ");
         let query_type = dns_query_type(exchange.query_type);
         match self.field {
-            Field::Any => contains(&exchange.name) || contains(&answers) || contains(query_type),
+            Field::Any => contains(&name) || contains(&answers) || contains(query_type),
             Field::Time => contains(&format_time(exchange.time)),
             Field::Proto => contains("dns"),
             Field::Method | Field::ContentType => contains(query_type),
-            Field::Host | Field::Path | Field::Url => contains(&exchange.name),
+            Field::Host | Field::Path | Field::Url => contains(&name),
             Field::Status => contains(if !exchange.completed {
                 "pending"
             } else if exchange.overridden {
@@ -785,7 +786,7 @@ mod tests {
 
         let dns = CapturedDnsExchange {
             id: 2,
-            name: "api.example.test".to_owned(),
+            name: "api.example.test".parse().unwrap(),
             query_type: 1,
             time: 1_000,
             answers: vec!["127.0.0.1".to_owned()],
@@ -991,7 +992,7 @@ mod tests {
         ] {
             let dns = CapturedDnsExchange {
                 id: 2,
-                name: "api.example.test".to_owned(),
+                name: "api.example.test".parse().unwrap(),
                 query_type,
                 time: 1_000,
                 answers: vec!["127.0.0.1".to_owned()],
@@ -1004,7 +1005,7 @@ mod tests {
         }
         let mut dns = CapturedDnsExchange {
             id: 2,
-            name: "api.example.test".to_owned(),
+            name: "api.example.test".parse().unwrap(),
             query_type: 1,
             time: 1_000,
             answers: vec!["127.0.0.1".to_owned()],

@@ -991,10 +991,22 @@ async fn reverse_proxy_lua_short_circuit_emits_request_complete() {
 }
 
 async fn reserve_loopback_addr() -> SocketAddr {
-    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
-    let addr = listener.local_addr().unwrap();
-    drop(listener);
-    addr
+    // HTTPS reverse mode also binds HTTP/3 on UDP at the same address. Windows
+    // can reserve different port ranges for TCP and UDP, so probe both protocols.
+    for _ in 0..100 {
+        let udp = tokio::net::UdpSocket::bind("127.0.0.1:0").await.unwrap();
+        let addr = udp.local_addr().unwrap();
+        match TcpListener::bind(addr).await {
+            Ok(_listener) => return addr,
+            Err(error)
+                if matches!(
+                    error.kind(),
+                    std::io::ErrorKind::AddrInUse | std::io::ErrorKind::PermissionDenied
+                ) => {}
+            Err(error) => panic!("failed to reserve a loopback TCP port: {error}"),
+        }
+    }
+    panic!("failed to find a loopback port available for both TCP and UDP");
 }
 
 async fn wait_for_tcp(addr: SocketAddr) {

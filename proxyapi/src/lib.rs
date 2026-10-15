@@ -29,6 +29,7 @@ pub use proxelar_proto::{
     BodyFrame, ProtocolError, ProxyBody, ProxyRequest, ProxyResponse, RequestHead, ResponseHead,
 };
 use proxyapi_models::ProxiedRequest;
+pub use proxyapi_models::{DnsName, DnsNameError};
 use std::net::SocketAddr;
 #[cfg(feature = "scripting")]
 use std::sync::Arc;
@@ -45,8 +46,8 @@ pub use filter::{FilterParseError, FlowFilter};
 pub use handler::{CapturingHandler, DEFAULT_BODY_CAPTURE_LIMIT};
 pub use intercept::{InterceptConfig, InterceptDecision};
 pub use proxy::{
-    DnsConfig, Proxy, ProxyConfig, ProxyMode, UpstreamProxyConfig, UpstreamTlsConfig,
-    WireGuardConfig,
+    DnsConfig, DnsDecision, DnsHandler, Proxy, ProxyConfig, ProxyMode, UpstreamProxyConfig,
+    UpstreamTlsConfig, WireGuardConfig,
 };
 pub use rules::{RouteRule, RouteRules, RuleError, RuleHeader, RuleOutcome};
 pub use session::{RedactionPolicy, SessionError, SessionRecorder};

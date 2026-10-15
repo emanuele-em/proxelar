@@ -32,7 +32,7 @@ encoding_rs = "0.8"
 http = "1.4"
 bytes = "1.9"
 tokio-rustls = "0.26"
-rustls = { version = "0.23", default-features = false, features = ["ring", "logging", "std", "tls12"] }
+rustls = { version = "0.23.46", default-features = false, features = ["ring", "logging", "std", "tls12"] }
 rustls-pki-types = "1.14"
 webpki-roots = "1.0"
 rcgen = { version = "0.14.9", default-features = false, features = ["pem", "ring", "x509-parser"] }
@@ -66,7 +66,7 @@ hyper = { version = "1.10", features = ["http1", "http2", "server", "client"] }
 hyper-util = { version = "0.1", features = ["tokio", "http1", "http2"] }
 http-body-util = "0.1"
 reqwest = { version = "0.13", features = ["rustls"] }
-rustls = { version = "0.23", features = ["ring"] }
+rustls = { version = "0.23.46", features = ["ring"] }
 tempfile = "3"
 stats_alloc = "0.1"
 x509-parser = "0.18"

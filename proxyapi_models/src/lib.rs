@@ -2,6 +2,10 @@
 
 #![forbid(unsafe_code)]
 
+mod dns;
+
+pub use dns::{DnsName, DnsNameError};
+
 use std::fmt;
 
 use base64::Engine as _;
@@ -633,7 +637,7 @@ impl ProxiedResponse {
 }
 
 /// Current version of Proxelar's portable session format.
-pub const SESSION_FORMAT_VERSION: u32 = 2;
+pub const SESSION_FORMAT_VERSION: u32 = 3;
 
 /// A completed HTTP request/response exchange stored in a session.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -699,7 +703,7 @@ pub struct CapturedTcpStream {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct CapturedDnsExchange {
     pub id: u64,
-    pub name: String,
+    pub name: DnsName,
     pub query_type: u16,
     pub time: i64,
     #[serde(default)]
