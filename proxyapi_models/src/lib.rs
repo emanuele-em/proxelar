@@ -637,7 +637,7 @@ impl ProxiedResponse {
 }
 
 /// Current version of Proxelar's portable session format.
-pub const SESSION_FORMAT_VERSION: u32 = 2;
+pub const SESSION_FORMAT_VERSION: u32 = 3;
 
 /// A completed HTTP request/response exchange stored in a session.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]

@@ -147,7 +147,7 @@ impl FromStr for DnsName {
     type Err = DnsNameError;
 
     /// Parse DNS presentation syntax, with an optional final root dot.
-    /// Empty text also denotes root for compatibility with older captures.
+    /// Empty text also denotes root.
     /// Unescaped UTF-8 is retained as bytes; no IDNA conversion is performed.
     fn from_str(text: &str) -> Result<Self, Self::Err> {
         if text.is_empty() || text == "." {

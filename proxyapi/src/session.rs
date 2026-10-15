@@ -948,6 +948,38 @@ mod tests {
     }
 
     #[test]
+    fn rejects_v2_sessions_before_interpreting_legacy_dns_names() {
+        let directory = tempdir().unwrap();
+        let path = directory.path().join("legacy.pxsession");
+        for name in [r"a\b.example", r"a\999.example", "api.example.test"] {
+            let legacy = json!({
+                "version": 2,
+                "created_at": 123,
+                "dns_exchanges": [{
+                    "id": 1,
+                    "name": name,
+                    "query_type": 1,
+                    "time": 123,
+                    "answers": [],
+                    "overridden": false,
+                    "completed": true
+                }]
+            });
+            std::fs::write(&path, serde_json::to_vec(&legacy).unwrap()).unwrap();
+            assert!(
+                matches!(
+                    load_session(&path),
+                    Err(SessionError::UnsupportedVersion {
+                        found: 2,
+                        supported: SESSION_FORMAT_VERSION
+                    })
+                ),
+                "legacy name {name:?} must receive an explicit version error"
+            );
+        }
+    }
+
+    #[test]
     fn recorder_tracks_http_websocket_and_dns_lifecycle() {
         let captured = flow(7);
         let mut recorder = SessionRecorder::new(1);

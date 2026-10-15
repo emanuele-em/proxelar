@@ -29,7 +29,7 @@ fn root_and_final_dot_have_one_representation() {
     let root: DnsName = ".".parse().unwrap();
     assert!(root.labels().is_empty());
     assert_eq!(root.to_string(), ".");
-    assert_eq!("".parse::<DnsName>().unwrap(), root); // Legacy root captures.
+    assert_eq!("".parse::<DnsName>().unwrap(), root);
     let name: DnsName = "Example.COM.".parse().unwrap();
     assert_eq!(name, "example.com".parse::<DnsName>().unwrap());
     assert_eq!(name.to_string(), "Example.COM");
