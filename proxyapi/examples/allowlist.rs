@@ -1,15 +1,17 @@
 //! Example: forward proxy with hardcoded host allowlist.
 //!
-//! Uses [`Proxy::start_with_handler`] with a handler that only
-//! implements `handle_request` and `handle_response`:
+//! Uses [`Proxy::start_with_handler`] with a handler that implements
+//! `handle_request`, `handle_response`, and `handle_tunnel`:
 //!
 //! - HTTP requests for hosts outside the allowlist are answered with `403`
 //! - after a given count, requests are rejected with `429` (e.g., quota
 //!   enforcement)
 //! - allowed requests gain an `x-via` header before being forwarded.
+//! - raw TCP tunnels to hosts outside the allowlist are closed.
 //!
-//! This policy runs on inspected HTTP requests. The CONNECT request itself
-//! and raw TCP traffic tunneled through CONNECT do not reach `HttpHandler`.
+//! The CONNECT request itself never reaches `handle_request`; the requests
+//! inside a TLS or HTTP tunnel do. Any other tunnel is decided by
+//! `handle_tunnel`, from its CONNECT target.
 //!
 //! Start a local upstream (e.g. `python3 -m http.server 8000`), run this
 //! example, and point an HTTP client at the proxy:
@@ -24,12 +26,12 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 
 use bytes::Bytes;
-use http::{HeaderMap, StatusCode};
+use http::{uri::Authority, HeaderMap, StatusCode};
 use tokio::sync::mpsc;
 
 use proxyapi::{
     HttpContext, HttpHandler, Proxy, ProxyConfig, ProxyMode, ProxyRequest, ProxyResponse,
-    RequestOrResponse, UpstreamTlsConfig,
+    RequestOrResponse, TunnelDecision, UpstreamTlsConfig,
 };
 
 const LISTEN: &str = "127.0.0.1:8118";
@@ -84,6 +86,14 @@ impl HttpHandler for AllowlistHandler {
         response: ProxyResponse,
     ) -> ProxyResponse {
         response
+    }
+
+    async fn handle_tunnel(&mut self, _ctx: &HttpContext, authority: &Authority) -> TunnelDecision {
+        if self.allowed_hosts.contains(&authority.host()) {
+            TunnelDecision::Forward
+        } else {
+            TunnelDecision::Close
+        }
     }
 }
 
