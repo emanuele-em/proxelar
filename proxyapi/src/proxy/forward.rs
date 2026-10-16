@@ -24,7 +24,7 @@ use crate::ca::{cert_server, CertificateAuthority, Ssl};
 use crate::event::ProxyEvent;
 use crate::handler::{now_millis, CapturingHandler};
 use crate::rewind::Rewind;
-use crate::{HttpContext, HttpHandler, RequestOrResponse};
+use crate::{HttpContext, HttpHandler, RequestOrResponse, TunnelDecision};
 
 use super::{
     http1::{NativePool, NativeUpstream},
@@ -401,7 +401,7 @@ pub(super) fn handle_cert_protocol_request(
 async fn handle_native_connect<H: HttpHandler>(
     upgraded: proxelar_proto::http1::UpgradedIo<BoxIo>,
     authority: Authority,
-    handler: H,
+    mut handler: H,
     ca: Arc<Ssl>,
     upstream: NativeUpstream,
     remote_addr: SocketAddr,
@@ -490,6 +490,14 @@ async fn handle_native_connect<H: HttpHandler>(
             }
         }
         StreamProtocol::Unknown => {
+            let ctx = HttpContext { remote_addr };
+            match handler.handle_tunnel(&ctx, &authority).await {
+                TunnelDecision::Forward => {}
+                TunnelDecision::Close => {
+                    tracing::debug!("Native CONNECT raw tunnel closed by handler");
+                    return;
+                }
+            }
             let mut client = stream;
             let mut server = match TcpStream::connect(authority.as_str()).await {
                 Ok(server) => server,
@@ -554,7 +562,7 @@ where
 pub(super) async fn handle_captured_stream<I, H>(
     mut stream: I,
     remote_addr: SocketAddr,
-    handler: H,
+    mut handler: H,
     ca: Arc<Ssl>,
     native_pool: Arc<NativePool>,
     route: Option<String>,
@@ -646,6 +654,14 @@ pub(super) async fn handle_captured_stream<I, H>(
             }
         }
         StreamProtocol::Unknown => {
+            let ctx = HttpContext { remote_addr };
+            match handler.handle_tunnel(&ctx, &authority).await {
+                TunnelDecision::Forward => {}
+                TunnelDecision::Close => {
+                    tracing::debug!("Captured TCP tunnel closed by handler");
+                    return;
+                }
+            }
             let mut stream = stream;
             let mut upstream = match TcpStream::connect(authority.as_str()).await {
                 Ok(upstream) => upstream,

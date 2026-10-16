@@ -11,9 +11,10 @@ use hyper::{Request, Response};
 use hyper_util::rt::TokioIo;
 use proxyapi::{
     HttpContext, HttpHandler, Proxy, ProxyConfig, ProxyMode, ProxyRequest, ProxyResponse,
-    RequestOrResponse, UpstreamTlsConfig,
+    RequestOrResponse, TunnelDecision, UpstreamTlsConfig,
 };
 use std::net::SocketAddr;
+use std::sync::{Arc, Mutex};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::{TcpListener, TcpStream};
 use tokio::sync::mpsc;
@@ -243,6 +244,121 @@ async fn test_start_with_handler_rejects_capturing_config() {
     }
 }
 
+#[tokio::test]
+async fn test_start_with_handler_forwards_allowed_raw_tunnel() {
+    let _ = rustls::crypto::ring::default_provider().install_default();
+
+    let (echo_addr, echo_shutdown) = start_raw_echo_server().await;
+    let handler = TunnelPolicyHandler {
+        allowed_authority: echo_addr.to_string(),
+        seen_tunnels: Arc::new(Mutex::new(Vec::new())),
+    };
+    let seen_tunnels = Arc::clone(&handler.seen_tunnels);
+    let (proxy_addr, shutdown_tx, handle) = start_proxy_with_handler(handler).await;
+
+    let mut stream = TcpStream::connect(proxy_addr).await.unwrap();
+    let client_addr = stream.local_addr().unwrap();
+    stream
+        .write_all(
+            format!(
+                "CONNECT {echo_addr} HTTP/1.1\r\n\
+                 Host: {echo_addr}\r\n\
+                 \r\n"
+            )
+            .as_bytes(),
+        )
+        .await
+        .unwrap();
+    let connect_response = read_headers(&mut stream).await;
+    assert!(
+        connect_response.starts_with("HTTP/1.1 200 OK"),
+        "unexpected CONNECT response:\n{connect_response}"
+    );
+
+    stream.write_all(b"PING").await.unwrap();
+    let mut pong = [0; 4];
+    tokio::time::timeout(
+        std::time::Duration::from_secs(5),
+        stream.read_exact(&mut pong),
+    )
+    .await
+    .unwrap()
+    .unwrap();
+    assert_eq!(&pong, b"PONG");
+
+    let _ = shutdown_tx.send(());
+    let _ = echo_shutdown.send(());
+    assert!(handle.await.unwrap().is_ok());
+    assert_eq!(
+        *seen_tunnels.lock().unwrap(),
+        [(client_addr, echo_addr.to_string())],
+        "the handler should have seen the client and the connection target"
+    );
+}
+
+#[tokio::test]
+async fn test_start_with_handler_closes_denied_raw_tunnel() {
+    let _ = rustls::crypto::ring::default_provider().install_default();
+
+    // The proxy must never dial this listener: the accept() at the end
+    // would see the connection in the backlog.
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let target = listener.local_addr().unwrap();
+    let handler = TunnelPolicyHandler {
+        allowed_authority: "allowed.example.test:443".to_string(),
+        seen_tunnels: Arc::new(Mutex::new(Vec::new())),
+    };
+    let seen_tunnels = Arc::clone(&handler.seen_tunnels);
+    let (proxy_addr, shutdown_tx, handle) = start_proxy_with_handler(handler).await;
+
+    let mut stream = TcpStream::connect(proxy_addr).await.unwrap();
+    let client_addr = stream.local_addr().unwrap();
+    // Host names the allowed authority: only the CONNECT target may decide.
+    stream
+        .write_all(
+            format!(
+                "CONNECT {target} HTTP/1.1\r\n\
+                 Host: allowed.example.test:443\r\n\
+                 \r\n"
+            )
+            .as_bytes(),
+        )
+        .await
+        .unwrap();
+    let connect_response = read_headers(&mut stream).await;
+    assert!(
+        connect_response.starts_with("HTTP/1.1 200 OK"),
+        "unexpected CONNECT response:\n{connect_response}"
+    );
+
+    stream.write_all(b"PING").await.unwrap();
+    let mut relayed = Vec::new();
+    let read = tokio::time::timeout(
+        std::time::Duration::from_secs(5),
+        stream.read_to_end(&mut relayed),
+    )
+    .await
+    .expect("proxy never closed the denied tunnel");
+    assert!(
+        relayed.is_empty(),
+        "denied tunnel relayed {relayed:?} ({read:?})"
+    );
+    assert!(
+        tokio::time::timeout(std::time::Duration::from_millis(300), listener.accept())
+            .await
+            .is_err(),
+        "the proxy must not contact the target after TunnelDecision::Close"
+    );
+
+    let _ = shutdown_tx.send(());
+    assert!(handle.await.unwrap().is_ok());
+    assert_eq!(
+        *seen_tunnels.lock().unwrap(),
+        [(client_addr, target.to_string())],
+        "the handler should have seen the client and the connection target"
+    );
+}
+
 async fn assert_unsupported_config(config: ProxyConfig, field: &str) {
     let error = Proxy::new(config)
         .start_with_handler(PassThroughHandler, async {})
@@ -321,6 +437,41 @@ impl HttpHandler for AddHeaderHandler {
 
     async fn handle_response(&mut self, _ctx: &HttpContext, res: ProxyResponse) -> ProxyResponse {
         res
+    }
+}
+
+/// Forwards raw tunnels to `allowed_authority`, closes every other tunnel,
+/// and records the client address and authority of each tunnel.
+#[derive(Clone)]
+struct TunnelPolicyHandler {
+    allowed_authority: String,
+    seen_tunnels: Arc<Mutex<Vec<(SocketAddr, String)>>>,
+}
+
+#[async_trait::async_trait]
+impl HttpHandler for TunnelPolicyHandler {
+    async fn handle_request(&mut self, _ctx: &HttpContext, req: ProxyRequest) -> RequestOrResponse {
+        RequestOrResponse::Request(req)
+    }
+
+    async fn handle_response(&mut self, _ctx: &HttpContext, res: ProxyResponse) -> ProxyResponse {
+        res
+    }
+
+    async fn handle_tunnel(
+        &mut self,
+        ctx: &HttpContext,
+        authority: &http::uri::Authority,
+    ) -> TunnelDecision {
+        self.seen_tunnels
+            .lock()
+            .unwrap()
+            .push((ctx.remote_addr, authority.to_string()));
+        if authority.as_str() == self.allowed_authority {
+            TunnelDecision::Forward
+        } else {
+            TunnelDecision::Close
+        }
     }
 }
 
@@ -414,6 +565,50 @@ async fn upstream_response(req: Request<Incoming>) -> Result<Response<Full<Bytes
         .header("x-upstream-injected", injected)
         .body(Full::new(Bytes::from_static(b"forward response")))
         .unwrap())
+}
+
+async fn start_raw_echo_server() -> (SocketAddr, tokio::sync::oneshot::Sender<()>) {
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    let (shutdown_tx, mut shutdown_rx) = tokio::sync::oneshot::channel::<()>();
+
+    tokio::spawn(async move {
+        tokio::select! {
+            result = listener.accept() => {
+                let Ok((mut stream, _)) = result else {
+                    return;
+                };
+                let mut ping = [0; 4];
+                if stream.read_exact(&mut ping).await.is_ok() && &ping == b"PING" {
+                    let _ = stream.write_all(b"PONG").await;
+                }
+            }
+            _ = &mut shutdown_rx => {}
+        }
+    });
+
+    (addr, shutdown_tx)
+}
+
+async fn read_headers(stream: &mut TcpStream) -> String {
+    let mut bytes = Vec::new();
+    let mut buf = [0; 1];
+
+    loop {
+        tokio::time::timeout(
+            std::time::Duration::from_secs(5),
+            stream.read_exact(&mut buf),
+        )
+        .await
+        .unwrap()
+        .unwrap();
+        bytes.push(buf[0]);
+        if bytes.ends_with(b"\r\n\r\n") {
+            break;
+        }
+    }
+
+    String::from_utf8(bytes).unwrap()
 }
 
 async fn reserve_loopback_addr() -> SocketAddr {

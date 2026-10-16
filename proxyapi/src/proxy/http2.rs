@@ -16,7 +16,7 @@ use tokio::io::{AsyncRead, AsyncWrite};
 use crate::ca::{CertificateAuthority, Ssl};
 use crate::handler::CapturingHandler;
 use crate::rewind::Rewind;
-use crate::{HttpContext, HttpHandler, RequestOrResponse};
+use crate::{HttpContext, HttpHandler, RequestOrResponse, TunnelDecision};
 
 use super::forward::{
     handle_cert_protocol_request, is_cert_protocol_request, is_direct_cert_protocol_request,
@@ -473,7 +473,7 @@ fn server_config() -> ConnectionConfig {
 async fn handle_connect_tunnel<H: HttpHandler>(
     mut tunnel: tokio::io::DuplexStream,
     authority: Authority,
-    service: ForwardH2Service<H>,
+    mut service: ForwardH2Service<H>,
 ) {
     let (protocol, buffered) = match sniff_stream_protocol(&mut tunnel).await {
         Ok(detected) => detected,
@@ -572,6 +572,16 @@ async fn handle_connect_tunnel<H: HttpHandler>(
             }
         }
         StreamProtocol::Unknown => {
+            let context = HttpContext {
+                remote_addr: service.remote_addr,
+            };
+            match service.handler.handle_tunnel(&context, &authority).await {
+                TunnelDecision::Forward => {}
+                TunnelDecision::Close => {
+                    tracing::debug!("HTTP/2 CONNECT raw tunnel closed by handler");
+                    return;
+                }
+            }
             let mut server = match tokio::net::TcpStream::connect(authority.as_str()).await {
                 Ok(server) => server,
                 Err(error) => {
