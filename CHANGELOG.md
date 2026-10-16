@@ -12,7 +12,7 @@
 - Publish multi-platform Linux container images for AMD64 and ARM64, built and smoke-tested on native runners with HTTP/3 enabled. ([#201](https://github.com/emanuele-em/proxelar/pull/201) by @emanuele-em)
 - Add `Proxy::start_with_handler` for embedding a forward proxy with a custom `HttpHandler`, instead of only `CapturingHandler`. See the `allowlist` example in `proxyapi/examples/`. ([#196](https://github.com/emanuele-em/proxelar/pull/196) by @ajanon)
 - Add `DnsHandler` and `Proxy::start_with_dns_handler` for embedding a DNS proxy that filters queries: blocked queries are answered with NXDOMAIN without contacting the upstream resolver. See the `dns_allowlist` example in `proxyapi/examples/`. ([#200](https://github.com/emanuele-em/proxelar/pull/200) by @ajanon)
-- Add `HttpHandler::handle_tunnel` and `TunnelDecision` for filtering raw TCP tunnels (CONNECT payloads that are neither TLS nor HTTP) by target: closed tunnels never contact the target. See the `allowlist` example in `proxyapi/examples/`.
+- Add `HttpHandler::handle_tunnel` and `TunnelDecision` for filtering raw TCP tunnels (CONNECT payloads that are neither TLS nor HTTP) by target: closed tunnels never contact the target. See the `allowlist` example in `proxyapi/examples/`. ([#205](https://github.com/emanuele-em/proxelar/pull/205) by @ajanon)
 
 ### Changed
 
