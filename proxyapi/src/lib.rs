@@ -58,6 +58,16 @@ pub enum RequestOrResponse {
     Response(ProxyResponse),
 }
 
+/// Returned by [`HttpHandler::handle_tunnel`].
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[non_exhaustive]
+pub enum TunnelDecision {
+    /// Connect to the target and relay the tunnel unchanged.
+    Forward,
+    /// Close the tunnel without contacting the target.
+    Close,
+}
+
 /// Metadata about the incoming connection.
 #[derive(Clone, Debug, Eq, Hash, PartialEq)]
 pub struct HttpContext {
@@ -69,15 +79,35 @@ pub struct HttpContext {
 /// Implementations must be `Clone` because the proxy clones the handler
 /// for each connection/request pair.
 ///
-/// The remaining methods are plumbing hooks called by the built-in proxy
-/// loop. Their defaults are capture-free, so a handler that only
-/// implements `handle_request` and `handle_response` needs nothing else;
-/// override them to participate in capture and event emission.
+/// Override `handle_tunnel` to filter raw TCP tunnels; the default
+/// forwards them. The remaining methods are plumbing hooks called by the
+/// built-in proxy loop. Their defaults are capture-free, so a handler that
+/// only implements `handle_request` and `handle_response` needs nothing
+/// else; override them to participate in capture and event emission.
 #[async_trait::async_trait]
 pub trait HttpHandler: Clone + Send + Sync + 'static {
     async fn handle_request(&mut self, ctx: &HttpContext, req: ProxyRequest) -> RequestOrResponse;
 
     async fn handle_response(&mut self, ctx: &HttpContext, res: ProxyResponse) -> ProxyResponse;
+
+    /// Decide whether a raw TCP tunnel is forwarded or closed.
+    ///
+    /// Called when the payload of a CONNECT tunnel is neither TLS nor HTTP,
+    /// so [`handle_request`](HttpHandler::handle_request) never sees it.
+    /// `authority` is the CONNECT target: exactly what the proxy dials on
+    /// [`TunnelDecision::Forward`], the default.
+    ///
+    /// [`TunnelDecision::Close`] closes the tunnel without contacting
+    /// `authority`. The CONNECT request has already been answered with a
+    /// success response by then, so the client sees the tunnel close, not
+    /// an HTTP error.
+    async fn handle_tunnel(
+        &mut self,
+        _ctx: &HttpContext,
+        _authority: &http::uri::Authority,
+    ) -> TunnelDecision {
+        TunnelDecision::Forward
+    }
 
     /// Build a protocol-level response for upstream failures or rejected
     /// upgrades.

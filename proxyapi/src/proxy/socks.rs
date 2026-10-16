@@ -12,6 +12,7 @@ use tower_service::Service;
 use crate::ca::{CertificateAuthority, Ssl};
 use crate::handler::CapturingHandler;
 use crate::rewind::Rewind;
+use crate::{HttpContext, HttpHandler, TunnelDecision};
 
 use super::forward::{serve_pinned_stream, sniff_stream_protocol, StreamProtocol};
 use super::outbound::OutboundConnector;
@@ -28,7 +29,7 @@ const ADDRESS_IPV6: u8 = 4;
 pub async fn handle_connection(
     mut stream: TcpStream,
     remote_addr: SocketAddr,
-    handler: CapturingHandler,
+    mut handler: CapturingHandler,
     ca: Arc<Ssl>,
     mut outbound: OutboundConnector,
     upstream_tls: Arc<rustls::ClientConfig>,
@@ -129,6 +130,16 @@ pub async fn handle_connection(
             }
         }
         StreamProtocol::Unknown => {
+            // The SOCKS5 negotiation has already connected the upstream,
+            // so Close only prevents the relay.
+            let ctx = HttpContext { remote_addr };
+            match handler.handle_tunnel(&ctx, &authority).await {
+                TunnelDecision::Forward => {}
+                TunnelDecision::Close => {
+                    tracing::debug!("SOCKS5 TCP tunnel closed by handler");
+                    return;
+                }
+            }
             let mut client_stream = stream;
             let mut upstream = upstream;
             if let Err(error) = super::raw::tunnel(
