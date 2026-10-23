@@ -12,6 +12,8 @@ Capture, inspect, intercept, replay, and rewrite traffic from your terminal or b
 <a href="https://proxelar.micheletti.io"><img src="https://img.shields.io/badge/docs-proxelar.micheletti.io-blue" alt="Docs"></a>
 </p>
 
+<a href="https://trendshift.io/repositories/26355?utm_source=repository-badge&amp;utm_medium=badge&amp;utm_campaign=badge-repository-26355" target="_blank" rel="noopener noreferrer"><img src="https://trendshift.io/api/badge/repositories/26355" alt="emanuele-em%2Fproxelar | Trendshift" width="250" height="55"/></a><br><br>
+
 <img src="assets/screenshots/tui.gif" alt="TUI demo" width="800"><br><br>
 <img src="assets/screenshots/gui.gif" alt="Web GUI demo" width="800">
 </div>
