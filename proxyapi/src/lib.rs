@@ -91,6 +91,32 @@ pub enum ClientInfo {
     /// the proxy. In WireGuard mode, this is the source address inside the
     /// tunnel.
     Ip(SocketAddr),
+    /// A client connected over a Unix socket, identified by its process.
+    Unix(UnixClient),
+}
+
+/// The process that connected to a Unix socket, as of its `connect()` call.
+///
+/// On platforms where peer credentials are unavailable (ESP-IDF, Fuchsia,
+/// GNU Hurd, NuttX and PlayStation Vita), every client is reported with
+/// `uid` and `gid` 0: do not base access decisions on them there.
+#[derive(Clone, Debug, Eq, Hash, PartialEq)]
+#[non_exhaustive]
+pub struct UnixClient {
+    /// Effective user ID of the process.
+    pub uid: u32,
+    /// Effective group ID of the process.
+    pub gid: u32,
+    /// Process ID, where the platform reports it. A hint only: process IDs
+    /// are reused once a process exits.
+    pub pid: Option<i32>,
+}
+
+impl UnixClient {
+    /// Create the identity of a Unix socket client.
+    pub const fn new(uid: u32, gid: u32, pid: Option<i32>) -> Self {
+        Self { uid, gid, pid }
+    }
 }
 
 /// Trait for intercepting and modifying proxied HTTP traffic.

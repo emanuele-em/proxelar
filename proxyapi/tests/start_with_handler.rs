@@ -10,13 +10,15 @@ use hyper::body::Incoming;
 use hyper::service::service_fn;
 use hyper::{Request, Response};
 use hyper_util::rt::TokioIo;
+#[cfg(unix)]
+use proxyapi::UnixClient;
 use proxyapi::{
     ClientInfo, HttpContext, HttpHandler, Proxy, ProxyConfig, ProxyMode, ProxyRequest,
     ProxyResponse, RequestOrResponse, TunnelDecision, UpstreamTlsConfig,
 };
 use std::net::SocketAddr;
 use std::sync::{Arc, Mutex};
-use tokio::io::{AsyncReadExt, AsyncWriteExt};
+use tokio::io::{AsyncRead, AsyncReadExt, AsyncWriteExt};
 use tokio::net::{TcpListener, TcpStream};
 use tokio::sync::mpsc;
 
@@ -419,6 +421,90 @@ async fn test_serve_with_handler_serves_a_pre_bound_listener() {
     assert!(handle.await.unwrap().is_ok());
 }
 
+#[cfg(unix)]
+#[tokio::test]
+async fn test_serve_with_handler_identifies_unix_socket_clients() {
+    let _ = rustls::crypto::ring::default_provider().install_default();
+
+    let (echo_addr, echo_shutdown) = start_raw_echo_server().await;
+    let handler = TunnelPolicyHandler {
+        allowed_authority: echo_addr.to_string(),
+        seen_tunnels: Arc::new(Mutex::new(Vec::new())),
+    };
+    let seen_tunnels = Arc::clone(&handler.seen_tunnels);
+
+    let socket_dir = tempfile::tempdir().unwrap();
+    let socket_path = socket_dir.path().join("proxy.sock");
+    let listener = tokio::net::UnixListener::bind(&socket_path).unwrap();
+    let ca_dir = tempfile::tempdir().unwrap();
+    let (event_tx, _event_rx) = mpsc::channel(64);
+    let config = ProxyConfig {
+        // Ignored: the proxy serves `listener`.
+        addr: "192.0.2.1:9".parse().unwrap(),
+        mode: ProxyMode::Forward,
+        event_tx,
+        ca_dir: ca_dir.path().to_path_buf(),
+        upstream_tls: UpstreamTlsConfig::Default,
+        intercept: None,
+        body_capture_limit: None,
+        #[cfg(feature = "scripting")]
+        script_path: None,
+        replay_rx: None,
+    };
+    let (shutdown_tx, shutdown_rx) = tokio::sync::oneshot::channel();
+    let handle = tokio::spawn(async move {
+        Proxy::new(config)
+            .serve_with_handler(listener, handler, async {
+                shutdown_rx.await.ok();
+            })
+            .await
+    });
+
+    let mut stream = tokio::net::UnixStream::connect(&socket_path).await.unwrap();
+    stream
+        .write_all(
+            format!(
+                "CONNECT {echo_addr} HTTP/1.1\r\n\
+                 Host: {echo_addr}\r\n\
+                 \r\n"
+            )
+            .as_bytes(),
+        )
+        .await
+        .unwrap();
+    let connect_response = read_headers(&mut stream).await;
+    assert!(
+        connect_response.starts_with("HTTP/1.1 200 OK"),
+        "unexpected CONNECT response:\n{connect_response}"
+    );
+
+    stream.write_all(b"PING").await.unwrap();
+    let mut pong = [0; 4];
+    tokio::time::timeout(
+        std::time::Duration::from_secs(5),
+        stream.read_exact(&mut pong),
+    )
+    .await
+    .unwrap()
+    .unwrap();
+    assert_eq!(&pong, b"PONG");
+
+    let _ = shutdown_tx.send(());
+    let _ = echo_shutdown.send(());
+    assert!(handle.await.unwrap().is_ok());
+    // This process connected: a socket pair reports the same credentials.
+    let (ours, _theirs) = tokio::net::UnixStream::pair().unwrap();
+    let us = ours.peer_cred().unwrap();
+    assert_eq!(
+        *seen_tunnels.lock().unwrap(),
+        [(
+            ClientInfo::Unix(UnixClient::new(us.uid(), us.gid(), us.pid())),
+            echo_addr.to_string()
+        )],
+        "the handler should have seen this process as the client"
+    );
+}
+
 async fn assert_unsupported_config(config: ProxyConfig, field: &str) {
     let error = Proxy::new(config)
         .start_with_handler(PassThroughHandler, async {})
@@ -650,7 +736,7 @@ async fn start_raw_echo_server() -> (SocketAddr, tokio::sync::oneshot::Sender<()
     (addr, shutdown_tx)
 }
 
-async fn read_headers(stream: &mut TcpStream) -> String {
+async fn read_headers<S: AsyncRead + Unpin>(stream: &mut S) -> String {
     let mut bytes = Vec::new();
     let mut buf = [0; 1];
 

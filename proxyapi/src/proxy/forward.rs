@@ -52,15 +52,18 @@ pub(super) enum StreamProtocol {
 }
 
 #[allow(clippy::too_many_arguments)]
-pub(super) async fn handle_connection<H: HttpHandler>(
-    mut stream: TcpStream,
+pub(super) async fn handle_connection<I, H>(
+    mut stream: I,
     context: HttpContext,
     handler: H,
     ca: Arc<Ssl>,
     native_pool: Arc<NativePool>,
     route: Option<String>,
     listen_addr: Option<SocketAddr>,
-) {
+) where
+    I: AsyncRead + AsyncWrite + Unpin + Send + 'static,
+    H: HttpHandler,
+{
     let (_, buffered) = match sniff_stream_protocol(&mut stream).await {
         Ok(detected) => detected,
         Err(error) => {
