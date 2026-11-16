@@ -41,7 +41,7 @@ async fn native_connect_and_captured_stream_inspect_each_tcp_http_protocol() {
                     let ca = context.ca.clone();
                     let remote =
                         HttpContext::new(crate::ClientInfo::Ip("127.0.0.1:23456".parse().unwrap()));
-                    let listen = "127.0.0.1:8080".parse().unwrap();
+                    let listen = Some("127.0.0.1:8080".parse().unwrap());
                     let authority = "proxel.ar:443".parse().unwrap();
                     let task = tokio::spawn(async move {
                         if captured {
@@ -109,7 +109,7 @@ async fn captured_raw_stream_forwards_initial_bytes_and_records_close() {
         context.ca.clone(),
         context.pool(),
         None,
-        "127.0.0.1:8080".parse().unwrap(),
+        Some("127.0.0.1:8080".parse().unwrap()),
         authority,
     ));
     client.write_all(b"\0opaque").await.unwrap();
@@ -140,7 +140,7 @@ async fn truncated_tls_handshakes_close_native_and_captured_streams() {
         let task = tokio::spawn(async move {
             let remote =
                 HttpContext::new(crate::ClientInfo::Ip("127.0.0.1:23456".parse().unwrap()));
-            let listen = "127.0.0.1:8080".parse().unwrap();
+            let listen = Some("127.0.0.1:8080".parse().unwrap());
             let authority = "proxel.ar:443".parse().unwrap();
             if captured {
                 handle_captured_stream(server, remote, handler, ca, pool, None, listen, authority)
@@ -183,7 +183,7 @@ fn direct_certificate_routing_distinguishes_local_authorities() {
         let mut req = request(Method::GET, "/");
         req.head.headers.add("host", host).unwrap();
         assert_eq!(
-            is_direct_cert_protocol_request(&req, listen.parse().unwrap()),
+            is_direct_cert_protocol_request(&req, Some(listen.parse().unwrap())),
             expected,
             "{listen} {host}"
         );
@@ -192,8 +192,15 @@ fn direct_certificate_routing_distinguishes_local_authorities() {
     req.head.headers.add("host", b"\xff").unwrap();
     assert!(!is_direct_cert_protocol_request(
         &req,
-        "127.0.0.1:8080".parse().unwrap()
+        Some("127.0.0.1:8080".parse().unwrap())
     ));
+    // Without a listener address, nothing reaches the certificate page this way.
+    let req = request(Method::GET, "/");
+    assert!(is_direct_cert_protocol_request(
+        &req,
+        Some("127.0.0.1:8080".parse().unwrap())
+    ));
+    assert!(!is_direct_cert_protocol_request(&req, None));
 }
 
 #[tokio::test]
@@ -226,7 +233,7 @@ async fn pinned_stream_preserves_destination_for_http1_and_http2() {
                 context.handler.clone(),
                 context.ca.clone(),
                 HttpContext::new(crate::ClientInfo::Ip("127.0.0.1:2".parse().unwrap())),
-                "127.0.0.1:8080".parse().unwrap(),
+                Some("127.0.0.1:8080".parse().unwrap()),
             ));
             if h2 {
                 let client = proxelar_proto::http2::H2Client::handshake(client, Default::default())

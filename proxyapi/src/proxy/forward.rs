@@ -59,7 +59,7 @@ pub(super) async fn handle_connection<H: HttpHandler>(
     ca: Arc<Ssl>,
     native_pool: Arc<NativePool>,
     route: Option<String>,
-    listen_addr: SocketAddr,
+    listen_addr: Option<SocketAddr>,
 ) {
     let (_, buffered) = match sniff_stream_protocol(&mut stream).await {
         Ok(detected) => detected,
@@ -121,7 +121,7 @@ struct ForwardHttp1Service<H> {
     ca: Arc<Ssl>,
     upstream: NativeUpstream,
     context: HttpContext,
-    listen_addr: SocketAddr,
+    listen_addr: Option<SocketAddr>,
     upgrade: Arc<Mutex<Option<NativeUpgradePlan<H>>>>,
 }
 
@@ -144,7 +144,7 @@ impl<H: HttpHandler> HttpService for ForwardHttp1Service<H> {
                 return Ok(handle_cert_protocol_request(
                     &request,
                     &ca.ca_cert_pem(),
-                    Some(listen_addr),
+                    listen_addr,
                 ));
             }
 
@@ -169,7 +169,7 @@ impl<H: HttpHandler> HttpService for ForwardHttp1Service<H> {
                 return Ok(handle_cert_protocol_request(
                     &request,
                     &ca.ca_cert_pem(),
-                    Some(listen_addr),
+                    listen_addr,
                 ));
             }
 
@@ -237,7 +237,7 @@ pub(super) async fn serve_native_stream<H: HttpHandler>(
     ca: Arc<Ssl>,
     upstream: NativeUpstream,
     context: HttpContext,
-    listen_addr: SocketAddr,
+    listen_addr: Option<SocketAddr>,
 ) -> Result<(), BoxError> {
     let upgrade = Arc::new(Mutex::new(None));
     let service = ForwardHttp1Service {
@@ -342,10 +342,17 @@ pub(super) fn is_cert_protocol_request(request: &ProxyRequest) -> bool {
         })
 }
 
+/// Whether an origin-form request targets the proxy's own address.
+///
+/// Always false without a listener address: clients then reach the
+/// certificate page through `proxel.ar` only.
 pub(super) fn is_direct_cert_protocol_request(
     request: &ProxyRequest,
-    listen_addr: SocketAddr,
+    listen_addr: Option<SocketAddr>,
 ) -> bool {
+    let Some(listen_addr) = listen_addr else {
+        return false;
+    };
     if request.head.uri.host().is_some() || request.head.uri.path().is_empty() {
         return false;
     }
@@ -404,7 +411,7 @@ async fn handle_native_connect<H: HttpHandler>(
     ca: Arc<Ssl>,
     upstream: NativeUpstream,
     context: HttpContext,
-    listen_addr: SocketAddr,
+    listen_addr: Option<SocketAddr>,
 ) {
     let mut stream = Rewind::new_buffered(upgraded.io, upgraded.read_ahead);
     let (protocol, buffered) = match sniff_stream_protocol(&mut stream).await {
@@ -564,7 +571,7 @@ pub(super) async fn handle_captured_stream<I, H>(
     ca: Arc<Ssl>,
     native_pool: Arc<NativePool>,
     route: Option<String>,
-    listen_addr: SocketAddr,
+    listen_addr: Option<SocketAddr>,
     authority: Authority,
 ) where
     I: AsyncRead + AsyncWrite + Unpin + Send + 'static,
@@ -692,7 +699,7 @@ pub(super) async fn serve_stream<I, H>(
     ca: Arc<Ssl>,
     upstream: NativeUpstream,
     context: HttpContext,
-    listen_addr: SocketAddr,
+    listen_addr: Option<SocketAddr>,
 ) -> Result<(), BoxError>
 where
     I: AsyncRead + AsyncWrite + Unpin + Send + 'static,
@@ -724,7 +731,7 @@ pub(super) async fn serve_pinned_stream<I, U, H>(
     handler: H,
     ca: Arc<Ssl>,
     context: HttpContext,
-    listen_addr: SocketAddr,
+    listen_addr: Option<SocketAddr>,
 ) -> Result<(), BoxError>
 where
     I: AsyncRead + AsyncWrite + Unpin + Send + 'static,

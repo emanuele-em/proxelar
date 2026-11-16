@@ -37,7 +37,7 @@ pub(super) async fn serve_forward<I, H>(
     ca: Arc<Ssl>,
     native_pool: Arc<NativePool>,
     route: Option<String>,
-    listen_addr: SocketAddr,
+    listen_addr: Option<SocketAddr>,
 ) -> Result<(), BoxError>
 where
     I: AsyncRead + AsyncWrite + Unpin + Send + 'static,
@@ -67,7 +67,7 @@ pub(super) async fn serve_with_upstream<I, H>(
     upstream: NativeUpstream,
     native_pool: Option<Arc<NativePool>>,
     route: Option<String>,
-    listen_addr: SocketAddr,
+    listen_addr: Option<SocketAddr>,
 ) -> Result<(), BoxError>
 where
     I: AsyncRead + AsyncWrite + Unpin + Send + 'static,
@@ -97,7 +97,7 @@ pub(super) async fn serve_pinned<I, U, H>(
     context: HttpContext,
     handler: H,
     ca: Arc<Ssl>,
-    listen_addr: SocketAddr,
+    listen_addr: Option<SocketAddr>,
 ) -> Result<(), BoxError>
 where
     I: AsyncRead + AsyncWrite + Unpin + Send + 'static,
@@ -148,7 +148,7 @@ struct ForwardH2Service<H> {
     native_pool: Option<Arc<NativePool>>,
     route: Option<String>,
     upstream: NativeUpstream,
-    listen_addr: SocketAddr,
+    listen_addr: Option<SocketAddr>,
 }
 
 impl<H: HttpHandler> HttpService for ForwardH2Service<H> {
@@ -169,7 +169,7 @@ impl<H: HttpHandler> ForwardH2Service<H> {
             return Ok(handle_cert_protocol_request(
                 &request,
                 &self.ca.ca_cert_pem(),
-                Some(self.listen_addr),
+                self.listen_addr,
             ));
         }
 
@@ -206,7 +206,7 @@ impl<H: HttpHandler> ForwardH2Service<H> {
             return Ok(handle_cert_protocol_request(
                 &request,
                 &self.ca.ca_cert_pem(),
-                Some(self.listen_addr),
+                self.listen_addr,
             ));
         }
         let context = self.context;

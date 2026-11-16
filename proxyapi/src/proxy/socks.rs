@@ -75,7 +75,7 @@ pub async fn handle_connection(
                 handler,
                 ca,
                 context,
-                listen_addr,
+                Some(listen_addr),
             )
             .await
             {
@@ -122,7 +122,7 @@ pub async fn handle_connection(
                 handler,
                 ca,
                 context,
-                listen_addr,
+                Some(listen_addr),
             )
             .await
             {

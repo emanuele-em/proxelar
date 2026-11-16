@@ -490,7 +490,7 @@ async fn tcp_loop(
                     Arc::clone(&ca),
                     Arc::clone(&native_pool),
                     native_route.clone(),
-                    SocketAddr::new(IpAddr::V4(SERVER_ADDRESS), 80),
+                    Some(SocketAddr::new(IpAddr::V4(SERVER_ADDRESS), 80)),
                     authority,
                 ));
             }

@@ -370,7 +370,7 @@ impl Proxy {
                                 ca,
                                 native_pool,
                                 native_route,
-                                listen_addr,
+                                Some(listen_addr),
                             ));
                         }
                         ProxyMode::Reverse { target } => {
@@ -533,7 +533,7 @@ impl Proxy {
                         ca,
                         native_pool,
                         native_route,
-                        listen_addr,
+                        Some(listen_addr),
                     ));
                 }
                 () = &mut shutdown => {

@@ -13,7 +13,7 @@ fn service(context: &Context) -> ForwardH2Service<CapturingHandler> {
         native_pool: Some(pool.clone()),
         route: None,
         upstream: NativeUpstream::shared(pool, None),
-        listen_addr: "127.0.0.1:8080".parse().unwrap(),
+        listen_addr: Some("127.0.0.1:8080".parse().unwrap()),
     }
 }
 
