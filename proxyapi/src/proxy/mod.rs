@@ -108,6 +108,9 @@ fn trim_header_ows(mut value: &[u8]) -> &[u8] {
 /// Configuration for creating a [`Proxy`].
 pub struct ProxyConfig {
     /// Address to listen on.
+    ///
+    /// Ignored by [`Proxy::serve_with_handler`], which serves a listener
+    /// bound by the caller.
     pub addr: SocketAddr,
     /// Listener and capture mode.
     pub mode: ProxyMode,
@@ -148,6 +151,20 @@ pub enum ProxyMode {
     Udp { target: SocketAddr },
     /// Privilege-free WireGuard endpoint with userspace TCP/UDP reconstruction.
     WireGuard { config: WireGuardConfig },
+}
+
+/// A listener bound by the caller, served by [`Proxy::serve_with_handler`].
+#[derive(Debug)]
+#[non_exhaustive]
+pub enum Listener {
+    /// Accept clients over TCP.
+    Tcp(TcpListener),
+}
+
+impl From<TcpListener> for Listener {
+    fn from(listener: TcpListener) -> Self {
+        Self::Tcp(listener)
+    }
 }
 
 /// The proxy server.
@@ -452,20 +469,39 @@ impl Proxy {
     /// `body_capture_limit`, `replay_rx`, and `script_path` when scripting is
     /// enabled) are also rejected. The supplied handler controls its own
     /// capture and event emission.
+    ///
+    /// Binds [`ProxyConfig::addr`] and serves it like
+    /// [`Proxy::serve_with_handler`].
     pub async fn start_with_handler<H: HttpHandler>(
         self,
         handler: H,
         shutdown: impl Future<Output = ()>,
     ) -> Result<(), Error> {
+        let listener = TcpListener::bind(self.config.addr).await?;
+        self.serve_with_handler(listener, handler, shutdown).await
+    }
+
+    /// Like [`Proxy::start_with_handler`], but serve clients from a
+    /// `listener` the caller has already bound. [`ProxyConfig::addr`] is
+    /// ignored.
+    ///
+    /// Binding first lets the caller pick an ephemeral port and read it
+    /// back, and handle bind errors before starting the proxy. Connections
+    /// made in between wait in the listener's backlog.
+    pub async fn serve_with_handler<H: HttpHandler>(
+        self,
+        listener: impl Into<Listener>,
+        handler: H,
+        shutdown: impl Future<Output = ()>,
+    ) -> Result<(), Error> {
         if !matches!(self.config.mode, ProxyMode::Forward) {
             return Err(Error::Other(
-                "start_with_handler is only supported in forward mode".to_owned(),
+                "custom handlers are only supported in forward mode".to_owned(),
             ));
         }
         if self.route_rules.is_some() {
             return Err(Error::Other(
-                "start_with_handler does not apply route rules. Handle them in the handler"
-                    .to_owned(),
+                "custom handlers do not apply route rules. Handle them in the handler".to_owned(),
             ));
         }
         for (configured, field) in [
@@ -478,14 +514,14 @@ impl Proxy {
         ] {
             if configured {
                 return Err(Error::Other(format!(
-                    "start_with_handler does not support ProxyConfig::{field}"
+                    "custom handlers do not support ProxyConfig::{field}"
                 )));
             }
         }
         #[cfg(feature = "scripting")]
         if self.config.script_path.is_some() {
             return Err(Error::Other(
-                "start_with_handler does not support ProxyConfig::script_path".to_owned(),
+                "custom handlers do not support ProxyConfig::script_path".to_owned(),
             ));
         }
 
@@ -506,7 +542,7 @@ impl Proxy {
             .as_ref()
             .map(|proxy| proxy.destination().to_string());
         let native_pool = Arc::new(http1::new_pool(outbound, Arc::clone(&tls_config)));
-        let listener = TcpListener::bind(self.config.addr).await?;
+        let Listener::Tcp(listener) = listener.into();
         let listen_addr = listener.local_addr()?;
         tracing::info!("Proxy listening on {listen_addr}");
         tokio::pin!(shutdown);
