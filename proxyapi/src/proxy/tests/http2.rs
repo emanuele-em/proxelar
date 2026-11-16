@@ -7,7 +7,9 @@ fn service(context: &Context) -> ForwardH2Service<CapturingHandler> {
     let pool = context.pool();
     ForwardH2Service {
         scheme: Scheme::HTTP,
-        remote_addr: "127.0.0.1:12345".parse().unwrap(),
+        context: HttpContext {
+            remote_addr: "127.0.0.1:12345".parse().unwrap(),
+        },
         handler: context.handler.clone(),
         ca: context.ca.clone(),
         native_pool: Some(pool.clone()),
@@ -77,7 +79,9 @@ async fn reverse_reports_uri_rewrite_and_connection_failures() {
     ] {
         for websocket in [false, true] {
             let mut service = ReverseH2Service {
-                remote_addr: "127.0.0.1:12345".parse().unwrap(),
+                context: HttpContext {
+                    remote_addr: "127.0.0.1:12345".parse().unwrap(),
+                },
                 handler: context.handler.clone(),
                 target: target.parse().unwrap(),
                 upstream: NativeUpstream::shared(context.pool(), None),
@@ -203,7 +207,9 @@ async fn websocket_rejection_from_upstream_is_forwarded() {
         req,
         context.handler,
         upstream,
-        "127.0.0.1:1".parse().unwrap(),
+        HttpContext {
+            remote_addr: "127.0.0.1:1".parse().unwrap(),
+        },
         None,
     )
     .await
@@ -243,7 +249,9 @@ async fn request_rules_short_circuit_forward_reverse_and_websocket_requests() {
             }
             let response = if reverse {
                 let mut service = ReverseH2Service {
-                    remote_addr: "127.0.0.1:1".parse().unwrap(),
+                    context: HttpContext {
+                        remote_addr: "127.0.0.1:1".parse().unwrap(),
+                    },
                     handler: context.handler.clone(),
                     target: "http://unreachable.invalid/".parse().unwrap(),
                     upstream: NativeUpstream::shared(context.pool(), None),

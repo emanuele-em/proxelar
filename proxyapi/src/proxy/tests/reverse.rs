@@ -42,7 +42,7 @@ async fn reverse_http1_websocket_relays_frames_and_records_lifecycle() {
         let handler = context.handler.clone();
         let task = tokio::spawn(async move {
             let (stream, remote) = listener.accept().await.unwrap();
-            handle_connection(stream, remote, handler, config).await;
+            handle_connection(stream, HttpContext { remote_addr: remote }, handler, config).await;
         });
         let mut stream = TcpStream::connect(addr).await.unwrap();
         stream.write_all(format!("GET /chat HTTP/1.1\r\nHost: {addr}\r\nConnection: Upgrade\r\nUpgrade: websocket\r\nSec-WebSocket-Version: 13\r\nSec-WebSocket-Key: dGhlIHNhbXBsZSBub25jZQ==\r\n\r\n").as_bytes()).await.unwrap();

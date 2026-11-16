@@ -32,7 +32,7 @@ const TUNNEL_BUFFER_CAPACITY: usize = 64 * 1024;
 pub(super) async fn serve_forward<I, H>(
     io: I,
     scheme: Scheme,
-    remote_addr: SocketAddr,
+    context: HttpContext,
     handler: H,
     ca: Arc<Ssl>,
     native_pool: Arc<NativePool>,
@@ -46,7 +46,7 @@ where
     serve_with_upstream(
         io,
         scheme,
-        remote_addr,
+        context,
         handler,
         ca,
         NativeUpstream::shared(Arc::clone(&native_pool), route.clone()),
@@ -61,7 +61,7 @@ where
 pub(super) async fn serve_with_upstream<I, H>(
     io: I,
     scheme: Scheme,
-    remote_addr: SocketAddr,
+    context: HttpContext,
     handler: H,
     ca: Arc<Ssl>,
     upstream: NativeUpstream,
@@ -75,7 +75,7 @@ where
 {
     let service = ForwardH2Service {
         scheme,
-        remote_addr,
+        context,
         handler,
         ca,
         native_pool,
@@ -94,7 +94,7 @@ pub(super) async fn serve_pinned<I, U, H>(
     upstream_io: U,
     authority: Authority,
     scheme: Scheme,
-    remote_addr: SocketAddr,
+    context: HttpContext,
     handler: H,
     ca: Arc<Ssl>,
     listen_addr: SocketAddr,
@@ -107,7 +107,7 @@ where
     serve_with_upstream(
         io,
         scheme,
-        remote_addr,
+        context,
         handler,
         ca,
         NativeUpstream::pinned(upstream_io, authority),
@@ -120,7 +120,7 @@ where
 
 pub(super) async fn serve_reverse<I>(
     io: I,
-    remote_addr: SocketAddr,
+    context: HttpContext,
     handler: CapturingHandler,
     target: Uri,
     upstream: NativeUpstream,
@@ -129,7 +129,7 @@ where
     I: AsyncRead + AsyncWrite + Unpin + Send + 'static,
 {
     let service = ReverseH2Service {
-        remote_addr,
+        context,
         handler,
         target,
         upstream,
@@ -142,7 +142,7 @@ where
 #[derive(Clone)]
 struct ForwardH2Service<H> {
     scheme: Scheme,
-    remote_addr: SocketAddr,
+    context: HttpContext,
     handler: H,
     ca: Arc<Ssl>,
     native_pool: Option<Arc<NativePool>>,
@@ -179,7 +179,7 @@ impl<H: HttpHandler> ForwardH2Service<H> {
                     request,
                     self.handler,
                     self.upstream,
-                    self.remote_addr,
+                    self.context,
                     None,
                 )
                 .await;
@@ -209,9 +209,7 @@ impl<H: HttpHandler> ForwardH2Service<H> {
                 Some(self.listen_addr),
             ));
         }
-        let context = HttpContext {
-            remote_addr: self.remote_addr,
-        };
+        let context = self.context;
         let mut handler = self.handler;
         let request = match handler.handle_request(&context, request).await {
             RequestOrResponse::Request(request) => request,
@@ -233,7 +231,7 @@ impl<H: HttpHandler> ForwardH2Service<H> {
 
 #[derive(Clone)]
 struct ReverseH2Service {
-    remote_addr: SocketAddr,
+    context: HttpContext,
     handler: CapturingHandler,
     target: Uri,
     upstream: NativeUpstream,
@@ -247,15 +245,14 @@ impl HttpService for ReverseH2Service {
         let mut handler = self.handler.clone();
         let target = self.target.clone();
         let upstream = self.upstream.clone();
-        let remote_addr = self.remote_addr;
+        let context = self.context.clone();
         Box::pin(async move {
-            let context = HttpContext { remote_addr };
             if is_extended_websocket(&request) {
                 return handle_extended_websocket(
                     request,
                     handler,
                     upstream,
-                    remote_addr,
+                    context,
                     Some(target),
                 )
                 .await;
@@ -294,7 +291,7 @@ async fn handle_extended_websocket<H: HttpHandler>(
     mut request: ProxyRequest,
     mut handler: H,
     upstream: NativeUpstream,
-    remote_addr: SocketAddr,
+    context: HttpContext,
     reverse_target: Option<Uri>,
 ) -> Result<ProxyResponse, ProtocolError> {
     let inbound = std::mem::replace(&mut request.body, crate::ProxyBody::empty());
@@ -302,7 +299,6 @@ async fn handle_extended_websocket<H: HttpHandler>(
     // which cannot represent pseudo-headers. The protocol was validated by
     // the h2 adapter and is restored immediately after the hooks run.
     request.head.headers.remove(":protocol");
-    let context = HttpContext { remote_addr };
     let mut request = match handler.handle_request(&context, request).await {
         RequestOrResponse::Request(request) => request,
         RequestOrResponse::Response(response) => return Ok(response),
@@ -493,7 +489,7 @@ async fn handle_connect_tunnel<H: HttpHandler>(
             if let Err(error) = serve_forward(
                 tunnel,
                 Scheme::HTTP,
-                service.remote_addr,
+                service.context,
                 service.handler,
                 service.ca,
                 native_pool,
@@ -512,7 +508,7 @@ async fn handle_connect_tunnel<H: HttpHandler>(
                 service.handler,
                 service.ca,
                 service.upstream,
-                service.remote_addr,
+                service.context,
                 service.listen_addr,
             )
             .await
@@ -546,7 +542,7 @@ async fn handle_connect_tunnel<H: HttpHandler>(
                 if let Err(error) = serve_forward(
                     stream,
                     Scheme::HTTPS,
-                    service.remote_addr,
+                    service.context,
                     service.handler,
                     service.ca,
                     native_pool,
@@ -563,7 +559,7 @@ async fn handle_connect_tunnel<H: HttpHandler>(
                 service.handler,
                 service.ca,
                 service.upstream,
-                service.remote_addr,
+                service.context,
                 service.listen_addr,
             )
             .await
@@ -572,10 +568,11 @@ async fn handle_connect_tunnel<H: HttpHandler>(
             }
         }
         StreamProtocol::Unknown => {
-            let context = HttpContext {
-                remote_addr: service.remote_addr,
-            };
-            match service.handler.handle_tunnel(&context, &authority).await {
+            match service
+                .handler
+                .handle_tunnel(&service.context, &authority)
+                .await
+            {
                 TunnelDecision::Forward => {}
                 TunnelDecision::Close => {
                     tracing::debug!("HTTP/2 CONNECT raw tunnel closed by handler");

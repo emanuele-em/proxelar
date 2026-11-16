@@ -1,3 +1,4 @@
+#[cfg(feature = "http3")]
 use std::net::SocketAddr;
 use std::sync::{Arc, Mutex as StdMutex};
 
@@ -56,7 +57,7 @@ impl ReverseConnectionConfig {
 
 pub(super) async fn handle_connection(
     mut stream: TcpStream,
-    remote_addr: SocketAddr,
+    context: HttpContext,
     handler: CapturingHandler,
     config: ReverseConnectionConfig,
 ) {
@@ -103,7 +104,7 @@ pub(super) async fn handle_connection(
             .clone();
         let upstream =
             NativeUpstream::negotiated(outbound, (*upstream_tls).clone(), client_alpn_offers);
-        serve_tcp_stream(stream, h2, remote_addr, handler, target, upstream).await;
+        serve_tcp_stream(stream, h2, context, handler, target, upstream).await;
         return;
     }
 
@@ -117,7 +118,7 @@ pub(super) async fn handle_connection(
     let h2 = is_h2_preface(&buffered);
     let stream = Rewind::new_buffered(stream, buffered);
     let upstream = NativeUpstream::shared(native_pool, route);
-    serve_tcp_stream(stream, h2, remote_addr, handler, target, upstream).await;
+    serve_tcp_stream(stream, h2, context, handler, target, upstream).await;
 }
 
 #[derive(Debug)]
@@ -148,7 +149,7 @@ impl rustls::server::ResolvesServerCert for AlpnCaptureResolver {
 async fn serve_tcp_stream<I>(
     stream: I,
     h2: bool,
-    remote_addr: SocketAddr,
+    context: HttpContext,
     handler: CapturingHandler,
     target: Uri,
     upstream: NativeUpstream,
@@ -158,7 +159,7 @@ async fn serve_tcp_stream<I>(
     if !h2 {
         let upgrade = Arc::new(AsyncMutex::new(None));
         let service = ReverseHttp1Service {
-            remote_addr,
+            context,
             handler,
             target,
             upstream: upstream.clone(),
@@ -187,7 +188,7 @@ async fn serve_tcp_stream<I>(
     }
 
     if let Err(error) =
-        super::http2::serve_reverse(stream, remote_addr, handler, target, upstream).await
+        super::http2::serve_reverse(stream, context, handler, target, upstream).await
     {
         if !is_benign_shutdown_error(error.as_ref()) {
             tracing::debug!("Reverse HTTP/2 connection error: {error}");
@@ -243,7 +244,7 @@ impl ReverseH3Server {
     pub(super) async fn serve(self) -> Result<(), crate::Error> {
         self.listener
             .serve(move |remote_addr| ReverseH3Service {
-                remote_addr,
+                context: HttpContext { remote_addr },
                 handler: self.handler.clone(),
                 target: self.target.clone(),
                 upstream: self.upstream.clone(),
@@ -256,7 +257,7 @@ impl ReverseH3Server {
 #[cfg(feature = "http3")]
 #[derive(Clone)]
 struct ReverseH3Service {
-    remote_addr: SocketAddr,
+    context: HttpContext,
     handler: CapturingHandler,
     target: Uri,
     upstream: super::http3::ReverseH3Upstream,
@@ -271,9 +272,8 @@ impl HttpService for ReverseH3Service {
         let mut handler = self.handler.clone();
         let target = self.target.clone();
         let upstream = self.upstream.clone();
-        let remote_addr = self.remote_addr;
+        let context = self.context.clone();
         Box::pin(async move {
-            let context = HttpContext { remote_addr };
             if super::http3::is_extended_websocket(&request) {
                 let wire_target = h3_wire_target(&target).map_err(|error| {
                     ProtocolError::new(
@@ -284,7 +284,7 @@ impl HttpService for ReverseH3Service {
                 return super::http3::handle_extended_websocket(
                     request,
                     handler,
-                    remote_addr,
+                    context,
                     Some(wire_target),
                     move |mut request| async move {
                         super::prepare_upstream_protocol_request(&mut request, false)?;
@@ -333,7 +333,7 @@ fn h3_wire_target(target: &Uri) -> Result<Uri, crate::Error> {
 }
 
 struct ReverseHttp1Service {
-    remote_addr: SocketAddr,
+    context: HttpContext,
     handler: CapturingHandler,
     target: Uri,
     upstream: NativeUpstream,
@@ -355,9 +355,8 @@ impl HttpService for ReverseHttp1Service {
         let target = self.target.clone();
         let upstream = self.upstream.clone();
         let upgrade = Arc::clone(&self.upgrade);
-        let remote_addr = self.remote_addr;
+        let ctx = self.context.clone();
         Box::pin(async move {
-            let ctx = HttpContext { remote_addr };
             let request = match handler.handle_request(&ctx, request).await {
                 RequestOrResponse::Request(request) => request,
                 RequestOrResponse::Response(response) => return Ok(response),

@@ -54,7 +54,7 @@ pub(super) enum StreamProtocol {
 #[allow(clippy::too_many_arguments)]
 pub(super) async fn handle_connection<H: HttpHandler>(
     mut stream: TcpStream,
-    remote_addr: SocketAddr,
+    context: HttpContext,
     handler: H,
     ca: Arc<Ssl>,
     native_pool: Arc<NativePool>,
@@ -78,7 +78,7 @@ pub(super) async fn handle_connection<H: HttpHandler>(
             handler,
             ca,
             upstream,
-            remote_addr,
+            context,
             listen_addr,
         )
         .await
@@ -91,7 +91,7 @@ pub(super) async fn handle_connection<H: HttpHandler>(
     if let Err(error) = super::http2::serve_forward(
         stream,
         Scheme::HTTP,
-        remote_addr,
+        context,
         handler,
         ca,
         native_pool,
@@ -120,7 +120,7 @@ struct ForwardHttp1Service<H> {
     handler: H,
     ca: Arc<Ssl>,
     upstream: NativeUpstream,
-    remote_addr: SocketAddr,
+    context: HttpContext,
     listen_addr: SocketAddr,
     upgrade: Arc<Mutex<Option<NativeUpgradePlan<H>>>>,
 }
@@ -134,7 +134,7 @@ impl<H: HttpHandler> HttpService for ForwardHttp1Service<H> {
         let mut handler = self.handler.clone();
         let ca = Arc::clone(&self.ca);
         let upstream = self.upstream.clone();
-        let remote_addr = self.remote_addr;
+        let ctx = self.context.clone();
         let listen_addr = self.listen_addr;
         let upgrade = Arc::clone(&self.upgrade);
         Box::pin(async move {
@@ -174,7 +174,6 @@ impl<H: HttpHandler> HttpService for ForwardHttp1Service<H> {
             }
 
             let websocket = is_protocol_websocket_upgrade(&request);
-            let ctx = HttpContext { remote_addr };
             let request = match handler.handle_request(&ctx, request).await {
                 RequestOrResponse::Request(request) => request,
                 RequestOrResponse::Response(response) => return Ok(response),
@@ -237,7 +236,7 @@ pub(super) async fn serve_native_stream<H: HttpHandler>(
     handler: H,
     ca: Arc<Ssl>,
     upstream: NativeUpstream,
-    remote_addr: SocketAddr,
+    context: HttpContext,
     listen_addr: SocketAddr,
 ) -> Result<(), BoxError> {
     let upgrade = Arc::new(Mutex::new(None));
@@ -246,7 +245,7 @@ pub(super) async fn serve_native_stream<H: HttpHandler>(
         handler: handler.clone(),
         ca: Arc::clone(&ca),
         upstream: upstream.clone(),
-        remote_addr,
+        context: context.clone(),
         listen_addr,
         upgrade: Arc::clone(&upgrade),
     };
@@ -267,7 +266,7 @@ pub(super) async fn serve_native_stream<H: HttpHandler>(
                 handler,
                 ca,
                 upstream,
-                remote_addr,
+                context,
                 listen_addr,
             )
             .await;
@@ -404,7 +403,7 @@ async fn handle_native_connect<H: HttpHandler>(
     mut handler: H,
     ca: Arc<Ssl>,
     upstream: NativeUpstream,
-    remote_addr: SocketAddr,
+    context: HttpContext,
     listen_addr: SocketAddr,
 ) {
     let mut stream = Rewind::new_buffered(upgraded.io, upgraded.read_ahead);
@@ -426,7 +425,7 @@ async fn handle_native_connect<H: HttpHandler>(
                     handler,
                     ca,
                     upstream,
-                    remote_addr,
+                    context,
                     listen_addr,
                 )
                 .await
@@ -437,7 +436,7 @@ async fn handle_native_connect<H: HttpHandler>(
                     handler,
                     ca,
                     upstream,
-                    remote_addr,
+                    context,
                     listen_addr,
                 ))
                 .await
@@ -469,7 +468,7 @@ async fn handle_native_connect<H: HttpHandler>(
                     handler,
                     ca,
                     upstream,
-                    remote_addr,
+                    context,
                     listen_addr,
                 )
                 .await
@@ -480,7 +479,7 @@ async fn handle_native_connect<H: HttpHandler>(
                     handler,
                     ca,
                     upstream,
-                    remote_addr,
+                    context,
                     listen_addr,
                 ))
                 .await
@@ -490,8 +489,7 @@ async fn handle_native_connect<H: HttpHandler>(
             }
         }
         StreamProtocol::Unknown => {
-            let ctx = HttpContext { remote_addr };
-            match handler.handle_tunnel(&ctx, &authority).await {
+            match handler.handle_tunnel(&context, &authority).await {
                 TunnelDecision::Forward => {}
                 TunnelDecision::Close => {
                     tracing::debug!("Native CONNECT raw tunnel closed by handler");
@@ -561,7 +559,7 @@ where
 #[allow(clippy::too_many_arguments)]
 pub(super) async fn handle_captured_stream<I, H>(
     mut stream: I,
-    remote_addr: SocketAddr,
+    context: HttpContext,
     mut handler: H,
     ca: Arc<Ssl>,
     native_pool: Arc<NativePool>,
@@ -590,7 +588,7 @@ pub(super) async fn handle_captured_stream<I, H>(
                     handler,
                     ca,
                     NativeUpstream::shared(Arc::clone(&native_pool), route.clone()),
-                    remote_addr,
+                    context,
                     listen_addr,
                 )
                 .await
@@ -601,7 +599,7 @@ pub(super) async fn handle_captured_stream<I, H>(
                     handler,
                     ca,
                     NativeUpstream::shared(native_pool, route),
-                    remote_addr,
+                    context,
                     listen_addr,
                 )
                 .await
@@ -633,7 +631,7 @@ pub(super) async fn handle_captured_stream<I, H>(
                     handler,
                     ca,
                     NativeUpstream::shared(Arc::clone(&native_pool), route.clone()),
-                    remote_addr,
+                    context,
                     listen_addr,
                 )
                 .await
@@ -644,7 +642,7 @@ pub(super) async fn handle_captured_stream<I, H>(
                     handler,
                     ca,
                     NativeUpstream::shared(native_pool, route),
-                    remote_addr,
+                    context,
                     listen_addr,
                 )
                 .await
@@ -654,8 +652,7 @@ pub(super) async fn handle_captured_stream<I, H>(
             }
         }
         StreamProtocol::Unknown => {
-            let ctx = HttpContext { remote_addr };
-            match handler.handle_tunnel(&ctx, &authority).await {
+            match handler.handle_tunnel(&context, &authority).await {
                 TunnelDecision::Forward => {}
                 TunnelDecision::Close => {
                     tracing::debug!("Captured TCP tunnel closed by handler");
@@ -694,7 +691,7 @@ pub(super) async fn serve_stream<I, H>(
     handler: H,
     ca: Arc<Ssl>,
     upstream: NativeUpstream,
-    remote_addr: SocketAddr,
+    context: HttpContext,
     listen_addr: SocketAddr,
 ) -> Result<(), BoxError>
 where
@@ -704,7 +701,7 @@ where
     super::http2::serve_with_upstream(
         stream,
         scheme,
-        remote_addr,
+        context,
         handler,
         ca,
         upstream,
@@ -726,7 +723,7 @@ pub(super) async fn serve_pinned_stream<I, U, H>(
     scheme: Scheme,
     handler: H,
     ca: Arc<Ssl>,
-    remote_addr: SocketAddr,
+    context: HttpContext,
     listen_addr: SocketAddr,
 ) -> Result<(), BoxError>
 where
@@ -743,7 +740,7 @@ where
             upstream,
             authority,
             scheme,
-            remote_addr,
+            context,
             handler,
             ca,
             listen_addr,
@@ -757,7 +754,7 @@ where
         handler,
         ca,
         NativeUpstream::pinned(upstream, authority),
-        remote_addr,
+        context,
         listen_addr,
     )
     .await

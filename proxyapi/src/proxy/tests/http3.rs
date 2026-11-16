@@ -670,7 +670,9 @@ async fn websocket_rejections_preserve_http_error_responses() {
         let response = handle_extended_websocket(
             request,
             context.handler,
-            "127.0.0.1:12345".parse().unwrap(),
+            crate::HttpContext {
+                remote_addr: "127.0.0.1:12345".parse().unwrap(),
+            },
             target,
             move |_| async move {
                 assert!(

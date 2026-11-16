@@ -28,7 +28,7 @@ const ADDRESS_IPV6: u8 = 4;
 
 pub async fn handle_connection(
     mut stream: TcpStream,
-    remote_addr: SocketAddr,
+    context: HttpContext,
     mut handler: CapturingHandler,
     ca: Arc<Ssl>,
     mut outbound: OutboundConnector,
@@ -74,7 +74,7 @@ pub async fn handle_connection(
                 Scheme::HTTP,
                 handler,
                 ca,
-                remote_addr,
+                context,
                 listen_addr,
             )
             .await
@@ -121,7 +121,7 @@ pub async fn handle_connection(
                 Scheme::HTTPS,
                 handler,
                 ca,
-                remote_addr,
+                context,
                 listen_addr,
             )
             .await
@@ -132,8 +132,7 @@ pub async fn handle_connection(
         StreamProtocol::Unknown => {
             // The SOCKS5 negotiation has already connected the upstream,
             // so Close only prevents the relay.
-            let ctx = HttpContext { remote_addr };
-            match handler.handle_tunnel(&ctx, &authority).await {
+            match handler.handle_tunnel(&context, &authority).await {
                 TunnelDecision::Forward => {}
                 TunnelDecision::Close => {
                     tracing::debug!("SOCKS5 TCP tunnel closed by handler");
