@@ -70,8 +70,27 @@ pub enum TunnelDecision {
 
 /// Metadata about the incoming connection.
 #[derive(Clone, Debug, Eq, Hash, PartialEq)]
+#[non_exhaustive]
 pub struct HttpContext {
-    pub remote_addr: SocketAddr,
+    /// The client that opened the connection.
+    pub client: ClientInfo,
+}
+
+impl HttpContext {
+    /// Create the context of a connection opened by `client`.
+    pub const fn new(client: ClientInfo) -> Self {
+        Self { client }
+    }
+}
+
+/// The client of a proxied connection, as identified by the proxy.
+#[derive(Clone, Debug, Eq, Hash, PartialEq)]
+#[non_exhaustive]
+pub enum ClientInfo {
+    /// A client connected over IP, with its address and port as seen by
+    /// the proxy. In WireGuard mode, this is the source address inside the
+    /// tunnel.
+    Ip(SocketAddr),
 }
 
 /// Trait for intercepting and modifying proxied HTTP traffic.

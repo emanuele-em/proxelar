@@ -485,9 +485,7 @@ async fn tcp_loop(
                     .map_err(|_| invalid_input("invalid WireGuard TCP destination"))?;
                 tokio::spawn(forward::handle_captured_stream(
                     stream,
-                    crate::HttpContext {
-                        remote_addr: source,
-                    },
+                    crate::HttpContext::new(crate::ClientInfo::Ip(source)),
                     handler.clone(),
                     Arc::clone(&ca),
                     Arc::clone(&native_pool),
@@ -773,9 +771,7 @@ async fn run_h3_flow(runtime: H3FlowRuntime) {
     } = runtime;
     let upstreams = Arc::new(tokio::sync::Mutex::new(HashMap::new()));
     let serving = listener.serve(move |_| WireGuardH3Service {
-        context: crate::HttpContext {
-            remote_addr: key.source,
-        },
+        context: crate::HttpContext::new(crate::ClientInfo::Ip(key.source)),
         destination: key.destination,
         handler: handler.clone(),
         verifier: Arc::clone(&verifier),

@@ -244,7 +244,7 @@ impl ReverseH3Server {
     pub(super) async fn serve(self) -> Result<(), crate::Error> {
         self.listener
             .serve(move |remote_addr| ReverseH3Service {
-                context: HttpContext { remote_addr },
+                context: HttpContext::new(crate::ClientInfo::Ip(remote_addr)),
                 handler: self.handler.clone(),
                 target: self.target.clone(),
                 upstream: self.upstream.clone(),

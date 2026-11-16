@@ -26,7 +26,7 @@ use crate::handler::CapturingHandler;
 use crate::intercept::InterceptConfig;
 #[cfg(feature = "scripting")]
 use crate::scripting::ScriptEngine;
-use crate::{HttpContext, HttpHandler};
+use crate::{ClientInfo, HttpContext, HttpHandler};
 
 pub use dns::{DnsConfig, DnsDecision, DnsHandler};
 pub use outbound::UpstreamProxyConfig;
@@ -342,7 +342,7 @@ impl Proxy {
                             continue;
                         }
                     };
-                    let context = HttpContext { remote_addr };
+                    let context = HttpContext::new(ClientInfo::Ip(remote_addr));
                     let mut handler = CapturingHandler::new(self.config.event_tx.clone())
                         .with_body_capture_limit(self.config.body_capture_limit);
                     if let Some(ref ic) = self.config.intercept {
@@ -521,7 +521,7 @@ impl Proxy {
                             continue;
                         }
                     };
-                    let context = HttpContext { remote_addr };
+                    let context = HttpContext::new(ClientInfo::Ip(remote_addr));
                     let handler = handler.clone();
                     let ca = Arc::clone(&ca);
                     let native_pool = Arc::clone(&native_pool);

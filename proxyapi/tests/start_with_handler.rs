@@ -10,8 +10,8 @@ use hyper::service::service_fn;
 use hyper::{Request, Response};
 use hyper_util::rt::TokioIo;
 use proxyapi::{
-    HttpContext, HttpHandler, Proxy, ProxyConfig, ProxyMode, ProxyRequest, ProxyResponse,
-    RequestOrResponse, TunnelDecision, UpstreamTlsConfig,
+    ClientInfo, HttpContext, HttpHandler, Proxy, ProxyConfig, ProxyMode, ProxyRequest,
+    ProxyResponse, RequestOrResponse, TunnelDecision, UpstreamTlsConfig,
 };
 use std::net::SocketAddr;
 use std::sync::{Arc, Mutex};
@@ -291,7 +291,7 @@ async fn test_start_with_handler_forwards_allowed_raw_tunnel() {
     assert!(handle.await.unwrap().is_ok());
     assert_eq!(
         *seen_tunnels.lock().unwrap(),
-        [(client_addr, echo_addr.to_string())],
+        [(ClientInfo::Ip(client_addr), echo_addr.to_string())],
         "the handler should have seen the client and the connection target"
     );
 }
@@ -354,7 +354,7 @@ async fn test_start_with_handler_closes_denied_raw_tunnel() {
     assert!(handle.await.unwrap().is_ok());
     assert_eq!(
         *seen_tunnels.lock().unwrap(),
-        [(client_addr, target.to_string())],
+        [(ClientInfo::Ip(client_addr), target.to_string())],
         "the handler should have seen the client and the connection target"
     );
 }
@@ -445,7 +445,7 @@ impl HttpHandler for AddHeaderHandler {
 #[derive(Clone)]
 struct TunnelPolicyHandler {
     allowed_authority: String,
-    seen_tunnels: Arc<Mutex<Vec<(SocketAddr, String)>>>,
+    seen_tunnels: Arc<Mutex<Vec<(ClientInfo, String)>>>,
 }
 
 #[async_trait::async_trait]
@@ -466,7 +466,7 @@ impl HttpHandler for TunnelPolicyHandler {
         self.seen_tunnels
             .lock()
             .unwrap()
-            .push((ctx.remote_addr, authority.to_string()));
+            .push((ctx.client.clone(), authority.to_string()));
         if authority.as_str() == self.allowed_authority {
             TunnelDecision::Forward
         } else {

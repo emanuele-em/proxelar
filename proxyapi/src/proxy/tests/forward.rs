@@ -39,9 +39,8 @@ async fn native_connect_and_captured_stream_inspect_each_tcp_http_protocol() {
                     let pool = context.pool();
                     let handler = context.handler.clone();
                     let ca = context.ca.clone();
-                    let remote = HttpContext {
-                        remote_addr: "127.0.0.1:23456".parse().unwrap(),
-                    };
+                    let remote =
+                        HttpContext::new(crate::ClientInfo::Ip("127.0.0.1:23456".parse().unwrap()));
                     let listen = "127.0.0.1:8080".parse().unwrap();
                     let authority = "proxel.ar:443".parse().unwrap();
                     let task = tokio::spawn(async move {
@@ -105,9 +104,7 @@ async fn captured_raw_stream_forwards_initial_bytes_and_records_close() {
     let (mut client, server) = tokio::io::duplex(65536);
     let task = tokio::spawn(handle_captured_stream(
         server,
-        HttpContext {
-            remote_addr: "127.0.0.1:23456".parse().unwrap(),
-        },
+        HttpContext::new(crate::ClientInfo::Ip("127.0.0.1:23456".parse().unwrap())),
         context.handler.clone(),
         context.ca.clone(),
         context.pool(),
@@ -141,9 +138,8 @@ async fn truncated_tls_handshakes_close_native_and_captured_streams() {
         let ca = context.ca.clone();
         let handler = context.handler.clone();
         let task = tokio::spawn(async move {
-            let remote = HttpContext {
-                remote_addr: "127.0.0.1:23456".parse().unwrap(),
-            };
+            let remote =
+                HttpContext::new(crate::ClientInfo::Ip("127.0.0.1:23456".parse().unwrap()));
             let listen = "127.0.0.1:8080".parse().unwrap();
             let authority = "proxel.ar:443".parse().unwrap();
             if captured {
@@ -229,9 +225,7 @@ async fn pinned_stream_preserves_destination_for_http1_and_http2() {
                 Scheme::HTTP,
                 context.handler.clone(),
                 context.ca.clone(),
-                HttpContext {
-                    remote_addr: "127.0.0.1:2".parse().unwrap(),
-                },
+                HttpContext::new(crate::ClientInfo::Ip("127.0.0.1:2".parse().unwrap())),
                 "127.0.0.1:8080".parse().unwrap(),
             ));
             if h2 {
