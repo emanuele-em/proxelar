@@ -2,8 +2,8 @@ use std::time::Duration;
 
 use proxelar_proto::{BoxFuture, HttpService, ProtocolError};
 use proxyapi::{
-    CapturingHandler, HttpContext, HttpHandler, InterceptConfig, InterceptDecision, ProxyBody,
-    ProxyEvent, ProxyRequest, ProxyResponse, RequestOrResponse, ResponseHead,
+    CapturingHandler, ClientInfo, HttpContext, HttpHandler, InterceptConfig, InterceptDecision,
+    ProxyBody, ProxyEvent, ProxyRequest, ProxyResponse, RequestOrResponse, ResponseHead,
 };
 use proxyapi_models::HeaderBlock;
 use tokio::io::{AsyncReadExt as _, AsyncWriteExt as _};
@@ -16,9 +16,7 @@ impl HttpService for InterceptService {
         request: ProxyRequest,
     ) -> BoxFuture<'_, Result<ProxyResponse, ProtocolError>> {
         Box::pin(async move {
-            let context = HttpContext {
-                remote_addr: "127.0.0.1:12345".parse().unwrap(),
-            };
+            let context = HttpContext::new(ClientInfo::Ip("127.0.0.1:12345".parse().unwrap()));
             match self.0.handle_request(&context, request).await {
                 RequestOrResponse::Response(response) => Ok(response),
                 RequestOrResponse::Request(_) => Ok(ProxyResponse::new(

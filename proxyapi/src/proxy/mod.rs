@@ -17,6 +17,8 @@ use std::{error::Error as StdError, future::Future, net::SocketAddr, path::PathB
 use http::Uri;
 use proxyapi_models::ProxiedRequest;
 use tokio::net::{TcpListener, TcpStream};
+#[cfg(unix)]
+use tokio::net::{UnixListener, UnixStream};
 use tokio::sync::mpsc;
 
 use crate::ca::Ssl;
@@ -26,7 +28,9 @@ use crate::handler::CapturingHandler;
 use crate::intercept::InterceptConfig;
 #[cfg(feature = "scripting")]
 use crate::scripting::ScriptEngine;
-use crate::HttpHandler;
+#[cfg(unix)]
+use crate::UnixClient;
+use crate::{ClientInfo, HttpContext, HttpHandler};
 
 pub use dns::{DnsConfig, DnsDecision, DnsHandler};
 pub use outbound::UpstreamProxyConfig;
@@ -108,6 +112,9 @@ fn trim_header_ows(mut value: &[u8]) -> &[u8] {
 /// Configuration for creating a [`Proxy`].
 pub struct ProxyConfig {
     /// Address to listen on.
+    ///
+    /// Ignored by [`Proxy::serve_with_handler`], which serves a listener
+    /// bound by the caller.
     pub addr: SocketAddr,
     /// Listener and capture mode.
     pub mode: ProxyMode,
@@ -148,6 +155,59 @@ pub enum ProxyMode {
     Udp { target: SocketAddr },
     /// Privilege-free WireGuard endpoint with userspace TCP/UDP reconstruction.
     WireGuard { config: WireGuardConfig },
+}
+
+/// A listener bound by the caller, served by [`Proxy::serve_with_handler`].
+#[derive(Debug)]
+#[non_exhaustive]
+pub enum Listener {
+    /// Accept clients over TCP.
+    Tcp(TcpListener),
+    /// Accept clients over a Unix socket, identified by the credentials of
+    /// their process ([`ClientInfo::Unix`]). A client whose credentials
+    /// cannot be read is disconnected.
+    ///
+    /// The proxy never removes the socket file: whoever bound it does.
+    #[cfg(unix)]
+    Unix(UnixListener),
+}
+
+impl From<TcpListener> for Listener {
+    fn from(listener: TcpListener) -> Self {
+        Self::Tcp(listener)
+    }
+}
+
+#[cfg(unix)]
+impl From<UnixListener> for Listener {
+    fn from(listener: UnixListener) -> Self {
+        Self::Unix(listener)
+    }
+}
+
+impl Listener {
+    async fn accept(&self) -> std::io::Result<(ClientStream, ClientInfo)> {
+        match self {
+            Self::Tcp(listener) => {
+                let (stream, address) = listener.accept().await?;
+                Ok((ClientStream::Tcp(stream), ClientInfo::Ip(address)))
+            }
+            #[cfg(unix)]
+            Self::Unix(listener) => {
+                let (stream, _) = listener.accept().await?;
+                let cred = stream.peer_cred()?;
+                let client = UnixClient::new(cred.uid(), cred.gid(), cred.pid());
+                Ok((ClientStream::Unix(stream), ClientInfo::Unix(client)))
+            }
+        }
+    }
+}
+
+/// A client connection accepted from a [`Listener`].
+enum ClientStream {
+    Tcp(TcpStream),
+    #[cfg(unix)]
+    Unix(UnixStream),
 }
 
 /// The proxy server.
@@ -342,6 +402,7 @@ impl Proxy {
                             continue;
                         }
                     };
+                    let context = HttpContext::new(ClientInfo::Ip(remote_addr));
                     let mut handler = CapturingHandler::new(self.config.event_tx.clone())
                         .with_body_capture_limit(self.config.body_capture_limit);
                     if let Some(ref ic) = self.config.intercept {
@@ -364,12 +425,12 @@ impl Proxy {
                         ProxyMode::Forward => {
                             tokio::spawn(forward::handle_connection(
                                 stream,
-                                remote_addr,
+                                context,
                                 handler,
                                 ca,
                                 native_pool,
                                 native_route,
-                                listen_addr,
+                                Some(listen_addr),
                             ));
                         }
                         ProxyMode::Reverse { target } => {
@@ -383,7 +444,7 @@ impl Proxy {
                             );
                             tokio::spawn(reverse::handle_connection(
                                 stream,
-                                remote_addr,
+                                context,
                                 handler,
                                 config,
                             ));
@@ -391,7 +452,7 @@ impl Proxy {
                         ProxyMode::Socks5 => {
                             tokio::spawn(socks::handle_connection(
                                 stream,
-                                remote_addr,
+                                context,
                                 handler,
                                 ca,
                                 outbound,
@@ -451,20 +512,39 @@ impl Proxy {
     /// `body_capture_limit`, `replay_rx`, and `script_path` when scripting is
     /// enabled) are also rejected. The supplied handler controls its own
     /// capture and event emission.
+    ///
+    /// Binds [`ProxyConfig::addr`] and serves it like
+    /// [`Proxy::serve_with_handler`].
     pub async fn start_with_handler<H: HttpHandler>(
         self,
         handler: H,
         shutdown: impl Future<Output = ()>,
     ) -> Result<(), Error> {
+        let listener = TcpListener::bind(self.config.addr).await?;
+        self.serve_with_handler(listener, handler, shutdown).await
+    }
+
+    /// Like [`Proxy::start_with_handler`], but serve clients from a
+    /// `listener` the caller has already bound. [`ProxyConfig::addr`] is
+    /// ignored.
+    ///
+    /// Binding first lets the caller pick an ephemeral port and read it
+    /// back, and handle bind errors before starting the proxy. Connections
+    /// made in between wait in the listener's backlog.
+    pub async fn serve_with_handler<H: HttpHandler>(
+        self,
+        listener: impl Into<Listener>,
+        handler: H,
+        shutdown: impl Future<Output = ()>,
+    ) -> Result<(), Error> {
         if !matches!(self.config.mode, ProxyMode::Forward) {
             return Err(Error::Other(
-                "start_with_handler is only supported in forward mode".to_owned(),
+                "custom handlers are only supported in forward mode".to_owned(),
             ));
         }
         if self.route_rules.is_some() {
             return Err(Error::Other(
-                "start_with_handler does not apply route rules. Handle them in the handler"
-                    .to_owned(),
+                "custom handlers do not apply route rules. Handle them in the handler".to_owned(),
             ));
         }
         for (configured, field) in [
@@ -477,14 +557,14 @@ impl Proxy {
         ] {
             if configured {
                 return Err(Error::Other(format!(
-                    "start_with_handler does not support ProxyConfig::{field}"
+                    "custom handlers do not support ProxyConfig::{field}"
                 )));
             }
         }
         #[cfg(feature = "scripting")]
         if self.config.script_path.is_some() {
             return Err(Error::Other(
-                "start_with_handler does not support ProxyConfig::script_path".to_owned(),
+                "custom handlers do not support ProxyConfig::script_path".to_owned(),
             ));
         }
 
@@ -505,34 +585,61 @@ impl Proxy {
             .as_ref()
             .map(|proxy| proxy.destination().to_string());
         let native_pool = Arc::new(http1::new_pool(outbound, Arc::clone(&tls_config)));
-        let listener = TcpListener::bind(self.config.addr).await?;
-        let listen_addr = listener.local_addr()?;
-        tracing::info!("Proxy listening on {listen_addr}");
+        let listener = listener.into();
+        let listen_addr = match &listener {
+            Listener::Tcp(listener) => {
+                let address = listener.local_addr()?;
+                tracing::info!("Proxy listening on {address}");
+                Some(address)
+            }
+            #[cfg(unix)]
+            Listener::Unix(listener) => {
+                tracing::info!("Proxy listening on {:?}", listener.local_addr()?);
+                None
+            }
+        };
         tokio::pin!(shutdown);
 
         loop {
             tokio::select! {
                 result = listener.accept() => {
-                    let (stream, remote_addr) = match result {
+                    let (stream, client) = match result {
                         Ok(conn) => conn,
                         Err(e) => {
                             tracing::warn!("Failed to accept connection: {e}");
                             continue;
                         }
                     };
+                    let context = HttpContext::new(client);
                     let handler = handler.clone();
                     let ca = Arc::clone(&ca);
                     let native_pool = Arc::clone(&native_pool);
                     let native_route = native_route.clone();
-                    tokio::spawn(forward::handle_connection(
-                        stream,
-                        remote_addr,
-                        handler,
-                        ca,
-                        native_pool,
-                        native_route,
-                        listen_addr,
-                    ));
+                    match stream {
+                        ClientStream::Tcp(stream) => {
+                            tokio::spawn(forward::handle_connection(
+                                stream,
+                                context,
+                                handler,
+                                ca,
+                                native_pool,
+                                native_route,
+                                listen_addr,
+                            ));
+                        }
+                        #[cfg(unix)]
+                        ClientStream::Unix(stream) => {
+                            tokio::spawn(forward::handle_connection(
+                                stream,
+                                context,
+                                handler,
+                                ca,
+                                native_pool,
+                                native_route,
+                                listen_addr,
+                            ));
+                        }
+                    }
                 }
                 () = &mut shutdown => {
                     tracing::info!("Proxy shutting down");

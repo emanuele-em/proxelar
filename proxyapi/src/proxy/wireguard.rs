@@ -485,12 +485,12 @@ async fn tcp_loop(
                     .map_err(|_| invalid_input("invalid WireGuard TCP destination"))?;
                 tokio::spawn(forward::handle_captured_stream(
                     stream,
-                    source,
+                    crate::HttpContext::new(crate::ClientInfo::Ip(source)),
                     handler.clone(),
                     Arc::clone(&ca),
                     Arc::clone(&native_pool),
                     native_route.clone(),
-                    SocketAddr::new(IpAddr::V4(SERVER_ADDRESS), 80),
+                    Some(SocketAddr::new(IpAddr::V4(SERVER_ADDRESS), 80)),
                     authority,
                 ));
             }
@@ -771,7 +771,7 @@ async fn run_h3_flow(runtime: H3FlowRuntime) {
     } = runtime;
     let upstreams = Arc::new(tokio::sync::Mutex::new(HashMap::new()));
     let serving = listener.serve(move |_| WireGuardH3Service {
-        remote_addr: key.source,
+        context: crate::HttpContext::new(crate::ClientInfo::Ip(key.source)),
         destination: key.destination,
         handler: handler.clone(),
         verifier: Arc::clone(&verifier),
@@ -823,7 +823,7 @@ async fn run_h3_flow(runtime: H3FlowRuntime) {
 #[cfg(feature = "http3")]
 #[derive(Clone)]
 struct WireGuardH3Service {
-    remote_addr: SocketAddr,
+    context: crate::HttpContext,
     destination: SocketAddr,
     handler: CapturingHandler,
     verifier: Arc<dyn ServerCertVerifier>,
@@ -837,19 +837,18 @@ impl HttpService for WireGuardH3Service {
         request: ProxyRequest,
     ) -> BoxFuture<'_, Result<ProxyResponse, ProtocolError>> {
         let mut handler = self.handler.clone();
-        let remote_addr = self.remote_addr;
+        let context = self.context.clone();
         let destination = self.destination;
         let verifier = Arc::clone(&self.verifier);
         let upstreams = Arc::clone(&self.upstreams);
         Box::pin(async move {
-            let context = crate::HttpContext { remote_addr };
             if super::http3::is_extended_websocket(&request) {
                 let websocket_upstreams = Arc::clone(&upstreams);
                 let websocket_verifier = Arc::clone(&verifier);
                 return super::http3::handle_extended_websocket(
                     request,
                     handler,
-                    remote_addr,
+                    context,
                     None,
                     move |request| async move {
                         let authority = request.head.uri.authority().cloned().ok_or_else(|| {
