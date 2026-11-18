@@ -51,7 +51,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     } else if let Some(path) = &args.import_har {
         import_har(path)?
     } else {
-        proxyapi_models::TrafficSession::new(chrono::Utc::now().timestamp_millis())
+        proxyapi_models::TrafficSession::new(jiff::Timestamp::now().as_millisecond())
     };
     let initial_events = session_events(&initial_session);
     let recorder = Arc::new(RwLock::new(SessionRecorder::from_session(initial_session)?));

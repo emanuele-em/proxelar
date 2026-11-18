@@ -428,11 +428,13 @@ fn bytes_contain(bytes: &[u8], needle: &str) -> bool {
 }
 
 fn format_time(millis: i64) -> String {
-    use chrono::TimeZone as _;
-    chrono::Local
-        .timestamp_millis_opt(millis)
-        .single()
-        .map(|value| value.format("%H:%M:%S").to_string())
+    jiff::Timestamp::from_millisecond(millis)
+        .map(|value| {
+            value
+                .to_zoned_datetime(jiff::tz::TimeZone::system())
+                .strftime("%H:%M:%S")
+                .to_string()
+        })
         .unwrap_or_default()
 }
 
