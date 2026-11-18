@@ -435,21 +435,28 @@ mod tests {
     /// Writes a root shaped like the ones older releases generated: Basic
     /// Constraints and Key Usage only, no Subject Key Identifier.
     fn write_legacy_ca(dir: &Path) -> Vec<u8> {
+        let mut subject = rcgen::DistinguishedName::new();
+        subject.push(DnType::CommonName, "proxelar");
+        subject.push(DnType::OrganizationName, "Proxelar");
+        // `SEQUENCE { BOOLEAN TRUE }`: a CA with no path length constraint.
+        write_root_without_key_identifier(dir, vec![0x30, 0x03, 0x01, 0x01, 0xff], subject)
+    }
+
+    /// Writes a self-signed root with only the given Basic Constraints value
+    /// and Key Usage, and returns its DER.
+    fn write_root_without_key_identifier(
+        dir: &Path,
+        basic_constraints: Vec<u8>,
+        subject: rcgen::DistinguishedName,
+    ) -> Vec<u8> {
         let mut params = CertificateParams::new(Vec::<String>::new()).unwrap();
-        // rcgen always adds a Subject Key Identifier to a CA, so the CA flag is
-        // written by hand as `SEQUENCE { BOOLEAN TRUE }`.
-        let mut basic_constraints = rcgen::CustomExtension::from_oid_content(
-            &[2, 5, 29, 19],
-            vec![0x30, 0x03, 0x01, 0x01, 0xff],
-        );
+        // rcgen always adds a Subject Key Identifier to a CA, so Basic
+        // Constraints is written by hand.
+        let mut basic_constraints =
+            rcgen::CustomExtension::from_oid_content(&[2, 5, 29, 19], basic_constraints);
         basic_constraints.set_criticality(true);
         params.custom_extensions.push(basic_constraints);
-        params
-            .distinguished_name
-            .push(DnType::CommonName, "proxelar");
-        params
-            .distinguished_name
-            .push(DnType::OrganizationName, "Proxelar");
+        params.distinguished_name = subject;
         params.key_usages = vec![KeyUsagePurpose::KeyCertSign, KeyUsagePurpose::CrlSign];
         let key_pair = KeyPair::generate().unwrap();
         let certificate = params.self_signed(&key_pair).unwrap();
@@ -558,6 +565,76 @@ mod tests {
             certificate.pem().as_bytes()
         );
         assert!(!directory.path().join(LEGACY_CA_BACKUP).exists());
+    }
+
+    #[test]
+    fn legacy_ca_path_length_and_printable_subject_survive_reissue() {
+        let directory = tempfile::tempdir().unwrap();
+        let mut subject = rcgen::DistinguishedName::new();
+        subject.push(
+            DnType::CommonName,
+            DnValue::PrintableString("proxelar".try_into().unwrap()),
+        );
+        // `SEQUENCE { BOOLEAN TRUE, INTEGER 0 }`: a CA with pathLen 0.
+        let legacy = write_root_without_key_identifier(
+            directory.path(),
+            vec![0x30, 0x06, 0x01, 0x01, 0xff, 0x02, 0x01, 0x00],
+            subject,
+        );
+
+        Ssl::load_or_generate(directory.path()).unwrap();
+
+        let reissued =
+            pem_to_der(&std::fs::read(directory.path().join("proxelar-ca.pem")).unwrap());
+        assert!(subject_key_identifier(&reissued).is_some());
+        let (_, old) = x509_parser::parse_x509_certificate(&legacy).unwrap();
+        let (_, new) = x509_parser::parse_x509_certificate(&reissued).unwrap();
+        assert_eq!(new.subject().as_raw(), old.subject().as_raw());
+        let constraints = new.basic_constraints().unwrap().unwrap().value;
+        assert!(constraints.ca);
+        assert_eq!(constraints.path_len_constraint, Some(0));
+    }
+
+    #[test]
+    fn legacy_ca_with_unsupported_subject_encoding_is_kept_as_is() {
+        let directory = tempfile::tempdir().unwrap();
+        let mut subject = rcgen::DistinguishedName::new();
+        subject.push(
+            DnType::CommonName,
+            DnValue::Ia5String("proxelar".try_into().unwrap()),
+        );
+        let legacy = write_root_without_key_identifier(
+            directory.path(),
+            vec![0x30, 0x03, 0x01, 0x01, 0xff],
+            subject,
+        );
+
+        let ssl = Ssl::load_or_generate(directory.path()).unwrap();
+
+        let cert_pem = std::fs::read(directory.path().join("proxelar-ca.pem")).unwrap();
+        assert_eq!(pem_to_der(&cert_pem).as_ref(), legacy.as_slice());
+        assert_eq!(ssl.ca_cert_pem(), cert_pem);
+        assert!(!directory.path().join(LEGACY_CA_BACKUP).exists());
+    }
+
+    #[test]
+    fn non_ca_certificate_is_not_reissued() {
+        let directory = tempfile::tempdir().unwrap();
+        let mut subject = rcgen::DistinguishedName::new();
+        subject.push(DnType::CommonName, "proxelar");
+        // `SEQUENCE {}`: Basic Constraints with the CA flag left at FALSE.
+        write_root_without_key_identifier(directory.path(), vec![0x30, 0x00], subject);
+        let cert_pem = std::fs::read(directory.path().join("proxelar-ca.pem")).unwrap();
+        let key_pair = KeyPair::from_pem(
+            &std::fs::read_to_string(directory.path().join("proxelar-ca.key")).unwrap(),
+        )
+        .unwrap();
+
+        let reissued =
+            reissue_with_subject_key_identifier(std::str::from_utf8(&cert_pem).unwrap(), &key_pair)
+                .unwrap();
+
+        assert_eq!(reissued, None);
     }
 
     #[cfg(feature = "http3")]
