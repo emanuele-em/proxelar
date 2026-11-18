@@ -44,7 +44,7 @@ tokio = { version = "1.52", features = ["rt", "net", "io-util", "macros", "sync"
 tokio-util = { version = "0.7", features = ["rt"] }
 async-trait = "0.1"
 bstr = "1.11"
-chrono = "0.4"
+jiff = "1"
 thiserror = "2.0"
 tracing = "0.1"
 tower-service = "0.3"

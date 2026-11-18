@@ -50,7 +50,7 @@ clap = { version = "4.6", features = ["derive"] }
 dirs = "7"
 tokio = { version = "1.52", features = ["rt-multi-thread", "macros", "sync", "signal", "time", "net"] }
 tokio-util = "0.7"
-chrono = "0.4"
+jiff = "1"
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 rustls = { version = "0.23.46", default-features = false, features = ["ring"] }

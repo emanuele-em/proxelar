@@ -1,7 +1,6 @@
 use std::collections::VecDeque;
 use std::ops::Range;
 
-use chrono::{Local, TimeZone};
 use http::Uri;
 use proxyapi_models::{
     CapturedDnsExchange, CapturedTcpStream, CapturedUdpExchange, HeaderBlock, StreamDirection,
@@ -1062,11 +1061,13 @@ fn dns_query_type(query_type: u16) -> &'static str {
 }
 
 fn format_time(millis: i64) -> String {
-    Local
-        .timestamp_millis_opt(millis)
-        .single()
-        .map(|dt| dt.format("%H:%M:%S").to_string())
-        .unwrap_or_else(|| "-".to_string())
+    jiff::Timestamp::from_millisecond(millis)
+        .map(|ts| {
+            ts.to_zoned_datetime(jiff::tz::TimeZone::system())
+                .strftime("%H:%M:%S")
+                .to_string()
+        })
+        .unwrap_or_else(|_| "-".to_string())
 }
 
 fn path_and_query(uri: &Uri) -> String {
