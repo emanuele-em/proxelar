@@ -36,6 +36,7 @@ rustls = { version = "0.23.46", default-features = false, features = ["ring", "l
 rustls-pki-types = "1.14"
 webpki-roots = "1.0"
 rcgen = { version = "0.14.9", default-features = false, features = ["pem", "ring", "x509-parser"] }
+x509-parser = "0.18"
 getrandom = "0.4"
 time = "0.3"
 moka = { version = "0.12", features = ["future"] }
@@ -69,7 +70,6 @@ reqwest = { version = "0.13", features = ["rustls"] }
 rustls = { version = "0.23.46", features = ["ring"] }
 tempfile = "3"
 stats_alloc = "0.1"
-x509-parser = "0.18"
 
 [[bench]]
 name = "protocol_baseline"

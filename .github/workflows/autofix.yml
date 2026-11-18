@@ -89,10 +89,15 @@ jobs:
     name: Coverage
     needs: fmt
     runs-on: ubuntu-latest
+    env:
+      # Measured line coverage shifts between compiler releases, so the
+      # coverage gates run on a pinned toolchain. Bump it deliberately.
+      RUSTUP_TOOLCHAIN: "1.99.1"
     steps:
       - uses: actions/checkout@v7
-      - uses: dtolnay/rust-toolchain@stable
+      - uses: dtolnay/rust-toolchain@master
         with:
+          toolchain: ${{ env.RUSTUP_TOOLCHAIN }}
           components: llvm-tools-preview
       - uses: Swatinem/rust-cache@v2
       - uses: taiki-e/install-action@cargo-llvm-cov

@@ -23,6 +23,7 @@
 
 ### Fixed
 
+- Re-issue a root CA certificate that has no Subject Key Identifier, as written by older releases, so clients that verify in strict X.509 mode (Python 3.13+ by default) accept intercepted connections instead of failing with `Missing Subject Key Identifier`. The certificate is re-issued in place on startup around the same key, subject and validity, so clients that already trust the old root keep working; the previous certificate is kept as `proxelar-ca.legacy.pem`. Strict clients that use a trust store holding the old root need the new `proxelar-ca.pem` installed there.
 - Update rustls to 0.23.46 (and require at least that version) and quinn-proto to 0.11.18 to address TLS/QUIC security advisories. ([#200](https://github.com/emanuele-em/proxelar/pull/200) by @emanuele-em)
 - Select test ports available for both TCP and UDP so Windows reverse-HTTPS tests can start their HTTP/3 listener. ([#200](https://github.com/emanuele-em/proxelar/pull/200) by @emanuele-em)
 
