@@ -32,4 +32,4 @@ Native sessions preserve data exactly, including secrets, and are created with o
 
 ## Release artifacts
 
-Release automation produces SHA-256 checksums, an SPDX SBOM, and GitHub artifact provenance attestations. Consumers should verify the artifact they install and still apply normal host/package-manager controls.
+Release automation produces SHA-256 checksums, an SPDX SBOM per target, and GitHub artifact provenance attestations. Consumers should verify the artifact they install and still apply normal host/package-manager controls.

@@ -93,6 +93,17 @@ jobs:
         run: |
           Compress-Archive -Path "target/${{ matrix.target }}/release/proxelar.exe" -DestinationPath "proxelar-${env:RELEASE_TAG}-${{ matrix.target }}.zip"
 
+      - name: Install sbom-attest
+        run: cargo install sbom-attest --version 0.3.0 --locked
+
+      - name: Generate SPDX SBOM
+        shell: bash
+        run: |
+          bin="target/${{ matrix.target }}/release/proxelar"
+          [[ -f "$bin.exe" ]] && bin="$bin.exe"
+          sbom-attest generate --package proxelar --target ${{ matrix.target }} --features http3 --locked \
+            --binary "$bin" --spdx "proxelar-${RELEASE_TAG}-${{ matrix.target }}.spdx.json"
+
       - name: Upload artifact
         uses: actions/upload-artifact@v7
         with:
@@ -141,15 +152,6 @@ jobs:
         with:
           path: artifacts
           merge-multiple: true
-
-      - name: Generate SPDX SBOM
-        uses: anchore/sbom-action@v0
-        with:
-          path: .
-          format: spdx-json
-          output-file: artifacts/proxelar-${{ env.RELEASE_TAG }}.spdx.json
-          upload-artifact: false
-          upload-release-assets: false
 
       - name: Generate SHA-256 checksums
         working-directory: artifacts
