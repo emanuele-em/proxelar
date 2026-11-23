@@ -9,11 +9,11 @@
 
 ### New features
 
-- **Serve your own listener:** `Proxy::serve_with_handler` serves a custom `HttpHandler` on a listener you bound yourself: a TCP listener, e.g. on an ephemeral port whose address you read back, or a Unix socket. Unix socket clients are identified by the credentials of their process (`ClientInfo::Unix`, `UnixClient`). See the `unix_socket` example in `proxyapi/examples/` (thanks @ajanon).
+- **Serve your own listener:** `Proxy::serve_with_handler` serves a custom `HttpHandler` on a listener you bound yourself: a TCP listener, e.g. on an ephemeral port whose address you read back, or a Unix socket. Unix socket clients are identified by the credentials of their process (`ClientInfo::Unix`, `UnixClient`). See the `unix_socket` example in `proxyapi/examples/` (thanks @ajanon). ([#215](https://github.com/emanuele-em/proxelar/pull/215) by @ajanon)
 
 ### Updating from 0.7
 
-- **Client identity in the Rust API:** `HttpContext::remote_addr` is replaced by `HttpContext::client`, a `ClientInfo`. TCP clients are `ClientInfo::Ip(addr)`, carrying the address `remote_addr` held. `HttpContext` is now `#[non_exhaustive]`: build it with `HttpContext::new`.
+- **Client identity in the Rust API:** `HttpContext::remote_addr` is replaced by `HttpContext::client`, a `ClientInfo`. TCP clients are `ClientInfo::Ip(addr)`, carrying the address `remote_addr` held. `HttpContext` is now `#[non_exhaustive]`: build it with `HttpContext::new`. ([#215](https://github.com/emanuele-em/proxelar/pull/215) by @ajanon)
 
 ## [0.7.0] - 2026-11-18
 
