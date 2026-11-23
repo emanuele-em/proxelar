@@ -1620,9 +1620,7 @@ mod tests {
             ),
             body::empty(),
         );
-        let context = HttpContext {
-            remote_addr: "127.0.0.1:12345".parse().unwrap(),
-        };
+        let context = HttpContext::new(crate::ClientInfo::Ip("127.0.0.1:12345".parse().unwrap()));
 
         let RequestOrResponse::Request(forwarded) = handler.handle_request(&context, request).await
         else {
@@ -1646,9 +1644,7 @@ mod tests {
             Version::HTTP_11,
             HeaderBlock::from_fields([HeaderField::new("Link", "</style.css>").unwrap()]),
         )]);
-        let context = HttpContext {
-            remote_addr: "127.0.0.1:12345".parse().unwrap(),
-        };
+        let context = HttpContext::new(crate::ClientInfo::Ip("127.0.0.1:12345".parse().unwrap()));
 
         let forwarded = handler.handle_response(&context, response).await;
 
@@ -1696,9 +1692,7 @@ mod tests {
             ),
             body::full(Bytes::from_static(b"request")),
         );
-        let context = HttpContext {
-            remote_addr: "127.0.0.1:12345".parse().unwrap(),
-        };
+        let context = HttpContext::new(crate::ClientInfo::Ip("127.0.0.1:12345".parse().unwrap()));
 
         let RequestOrResponse::Request(forwarded) = handler.handle_request(&context, request).await
         else {
@@ -2284,9 +2278,8 @@ mod tests {
                     Ok(BodyFrame::Trailers(trailers.clone())),
                 ]),
             );
-            let context = HttpContext {
-                remote_addr: "127.0.0.1:12345".parse().unwrap(),
-            };
+            let context =
+                HttpContext::new(crate::ClientInfo::Ip("127.0.0.1:12345".parse().unwrap()));
             let RequestOrResponse::Request(request) =
                 handler.handle_request(&context, request).await
             else {
@@ -2325,9 +2318,7 @@ mod tests {
             ),
             ProxyBody::empty(),
         );
-        let context = HttpContext {
-            remote_addr: "127.0.0.1:12345".parse().unwrap(),
-        };
+        let context = HttpContext::new(crate::ClientInfo::Ip("127.0.0.1:12345".parse().unwrap()));
         let RequestOrResponse::Response(response) = handler.handle_request(&context, request).await
         else {
             panic!("expected short-circuit response");

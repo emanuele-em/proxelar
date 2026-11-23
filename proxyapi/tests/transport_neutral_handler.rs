@@ -1,7 +1,7 @@
 use bytes::Bytes;
 use proxyapi::{
-    BodyFrame, HttpContext, HttpHandler, ProxyBody, ProxyRequest, ProxyResponse, RequestHead,
-    RequestOrResponse, ResponseHead,
+    BodyFrame, ClientInfo, HttpContext, HttpHandler, ProxyBody, ProxyRequest, ProxyResponse,
+    RequestHead, RequestOrResponse, ResponseHead,
 };
 use proxyapi_models::{HeaderBlock, HeaderField};
 
@@ -30,9 +30,7 @@ impl HttpHandler for NeutralHandler {
 
 #[tokio::test]
 async fn public_handler_boundary_preserves_transport_neutral_frames() {
-    let context = HttpContext {
-        remote_addr: "127.0.0.1:12345".parse().unwrap(),
-    };
+    let context = HttpContext::new(ClientInfo::Ip("127.0.0.1:12345".parse().unwrap()));
     let mut handler = NeutralHandler;
     let request = ProxyRequest::new(
         RequestHead::new(

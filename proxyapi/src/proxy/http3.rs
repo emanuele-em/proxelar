@@ -497,7 +497,7 @@ pub(super) fn is_extended_websocket(request: &ProxyRequest) -> bool {
 pub(super) async fn handle_extended_websocket<F, Fut>(
     mut request: ProxyRequest,
     mut handler: crate::handler::CapturingHandler,
-    remote_addr: SocketAddr,
+    context: crate::HttpContext,
     reverse_target: Option<Uri>,
     send_upstream: F,
 ) -> Result<ProxyResponse, ProtocolError>
@@ -510,7 +510,6 @@ where
     // represent pseudo-headers. Restore the already-validated protocol after
     // the request hook, matching the RFC 8441 path.
     request.head.headers.remove(":protocol");
-    let context = crate::HttpContext { remote_addr };
     let mut request = match handler.handle_request(&context, request).await {
         crate::RequestOrResponse::Request(request) => request,
         crate::RequestOrResponse::Response(response) => return Ok(response),

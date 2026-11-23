@@ -61,7 +61,7 @@ async fn h3_service_reports_missing_authority_and_untrusted_upstream() {
     let destination = listener.local_addr().unwrap();
     let server = tokio::spawn(listener.serve(|_| RejectService));
     let mut service = WireGuardH3Service {
-        remote_addr: "10.0.0.2:12345".parse().unwrap(),
+        context: crate::HttpContext::new(crate::ClientInfo::Ip("10.0.0.2:12345".parse().unwrap())),
         destination,
         handler: context.handler,
         verifier: super::super::tls::h3_server_verifier(&crate::UpstreamTlsConfig::default())
