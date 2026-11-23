@@ -13,7 +13,7 @@
 
 ### Dependencies
 
-- Fixed a stack overflow advisory in `url` (RUSTSEC-2026-0592): it is now at least 2.5.9. heapless is updated to 0.9.4 for RUSTSEC-2026-0578.
+- Fixed a stack overflow advisory in `url` (RUSTSEC-2026-0592): it is now at least 2.5.9. heapless is updated to 0.9.4 for RUSTSEC-2026-0578. ([#223](https://github.com/emanuele-em/proxelar/pull/223) by @emanuele-em)
 
 ### Updating from 0.7
 
