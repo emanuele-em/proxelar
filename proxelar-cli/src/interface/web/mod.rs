@@ -889,7 +889,7 @@ async fn handle_client_message(text: &str, state: &WebState) {
                 tracing::warn!("Invalid URI in browser replay");
                 return;
             };
-            let now = chrono::Local::now().timestamp_millis();
+            let now = jiff::Timestamp::now().as_millisecond();
             let Ok(body) = body.try_into_bytes() else {
                 tracing::warn!("Invalid structured body in browser replay");
                 return;

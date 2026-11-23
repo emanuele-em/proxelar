@@ -7,25 +7,38 @@
 
 ## [Unreleased]
 
-### Added
+### New features
 
-- Publish multi-platform Linux container images for AMD64 and ARM64, built and smoke-tested on native runners with HTTP/3 enabled. ([#201](https://github.com/emanuele-em/proxelar/pull/201) by @emanuele-em)
-- Add `Proxy::start_with_handler` for embedding a forward proxy with a custom `HttpHandler`, instead of only `CapturingHandler`. See the `allowlist` example in `proxyapi/examples/`. ([#196](https://github.com/emanuele-em/proxelar/pull/196) by @ajanon)
-- Add `DnsHandler` and `Proxy::start_with_dns_handler` for embedding a DNS proxy that filters queries: blocked queries are answered with NXDOMAIN without contacting the upstream resolver. See the `dns_allowlist` example in `proxyapi/examples/`. ([#200](https://github.com/emanuele-em/proxelar/pull/200) by @ajanon)
-- Add `HttpHandler::handle_tunnel` and `TunnelDecision` for filtering raw TCP tunnels (CONNECT payloads that are neither TLS nor HTTP) by target: closed tunnels never contact the target. See the `allowlist` example in `proxyapi/examples/`. ([#205](https://github.com/emanuele-em/proxelar/pull/205) by @ajanon)
-- Add `Proxy::serve_with_handler` and `Listener` for serving a custom `HttpHandler` on a listener bound by the caller: a TCP listener, e.g. on an ephemeral port, or a Unix socket. Unix socket clients are identified by the credentials of their process (`ClientInfo::Unix`, `UnixClient`). See the `unix_socket` example in `proxyapi/examples/`.
+- **Serve your own listener:** `Proxy::serve_with_handler` serves a custom `HttpHandler` on a listener you bound yourself: a TCP listener, e.g. on an ephemeral port whose address you read back, or a Unix socket. Unix socket clients are identified by the credentials of their process (`ClientInfo::Unix`, `UnixClient`). See the `unix_socket` example in `proxyapi/examples/` (thanks @ajanon).
 
-### Changed
+### Updating from 0.7
 
-- Use byte-preserving `DnsName` values for DNS handlers, overrides, query events, and captured exchanges (breaking Rust API change). Names compare whole labels with ASCII case insensitivity and serialize as escaped DNS presentation strings; ordinary domain strings retain their existing JSON shape. ([#200](https://github.com/emanuele-em/proxelar/pull/200) by @ajanon and @emanuele-em)
-- Bump native sessions to format v3 for escaped DNS names. Older session versions are rejected with an explicit version error; no migration is provided. ([#200](https://github.com/emanuele-em/proxelar/pull/200) by @emanuele-em)
+- **Client identity in the Rust API:** `HttpContext::remote_addr` is replaced by `HttpContext::client`, a `ClientInfo`. TCP clients are `ClientInfo::Ip(addr)`, carrying the address `remote_addr` held. `HttpContext` is now `#[non_exhaustive]`: build it with `HttpContext::new`.
 
-- Make forward and HTTP/2 proxy paths generic over `HttpHandler`. ([#196](https://github.com/emanuele-em/proxelar/pull/196) by @ajanon)
+## [0.7.0] - 2026-11-18
 
-### Fixed
+### New features
 
-- Update rustls to 0.23.46 (and require at least that version) and quinn-proto to 0.11.18 to address TLS/QUIC security advisories. ([#200](https://github.com/emanuele-em/proxelar/pull/200) by @emanuele-em)
-- Select test ports available for both TCP and UDP so Windows reverse-HTTPS tests can start their HTTP/3 listener. ([#200](https://github.com/emanuele-em/proxelar/pull/200) by @emanuele-em)
+- **Use your own handler:** `Proxy::start_with_handler` runs a forward proxy with any `HttpHandler`, not only `CapturingHandler`. The `allowlist` example in `proxyapi/examples/` shows how (thanks @ajanon). ([#196](https://github.com/emanuele-em/proxelar/pull/196))
+- **Filter DNS queries:** `DnsHandler` and `Proxy::start_with_dns_handler` run a DNS proxy that decides on each query. Blocked queries get NXDOMAIN and never reach the upstream resolver. See the `dns_allowlist` example (thanks @ajanon). ([#200](https://github.com/emanuele-em/proxelar/pull/200))
+- **Filter raw TCP tunnels:** `HttpHandler::handle_tunnel` returns a `TunnelDecision` for CONNECT tunnels that carry neither TLS nor HTTP. A tunnel you close never contacts its target. The `allowlist` example covers it too (thanks @ajanon). ([#205](https://github.com/emanuele-em/proxelar/pull/205))
+- **ARM64 containers:** the Linux container image now comes for both AMD64 and ARM64, built and smoke-tested on native runners, with HTTP/3 enabled. ([#201](https://github.com/emanuele-em/proxelar/pull/201))
+
+### Bug fixes
+
+- Fixed Python 3.13+ and other strict X.509 clients rejecting intercepted connections with `Missing Subject Key Identifier`. A root CA created by an older release is re-issued at startup with the same key, subject and validity, so clients that already trust it keep working. The previous certificate is kept as `proxelar-ca.legacy.pem`. ([#216](https://github.com/emanuele-em/proxelar/pull/216))
+
+### Dependencies
+
+- Fixed TLS and QUIC security advisories: rustls is now at least 0.23.46, quinn-proto 0.11.19 and quinn-udp 0.5.16. ([#200](https://github.com/emanuele-em/proxelar/pull/200), [#216](https://github.com/emanuele-em/proxelar/pull/216))
+- Replaced chrono, which is no longer maintained, with jiff. ([#217](https://github.com/emanuele-em/proxelar/pull/217))
+- Updated boring to 5.4 and quiche to 0.30 (both used for HTTP/3), tokio to 1.54 and toml to 1.2. ([#195](https://github.com/emanuele-em/proxelar/pull/195), [#209](https://github.com/emanuele-em/proxelar/pull/209), [#211](https://github.com/emanuele-em/proxelar/pull/211), [#213](https://github.com/emanuele-em/proxelar/pull/213))
+
+### Updating from 0.6
+
+- **Saved sessions:** sessions are now saved in format v3. Files saved by 0.6 or earlier are rejected with a version error, and there is no migration. ([#200](https://github.com/emanuele-em/proxelar/pull/200))
+- **DNS names in the Rust API:** DNS handlers, overrides, query events and captured exchanges use `DnsName` instead of strings. Names compare whole labels, ignoring ASCII case, and serialize as escaped DNS presentation strings; ordinary domain names keep the same JSON shape. ([#200](https://github.com/emanuele-em/proxelar/pull/200))
+- **The re-issued root:** clients that read `proxelar-ca.pem` from disk (`--cacert`, `SSL_CERT_FILE`, `REQUESTS_CA_BUNDLE`) pick it up with no further step. If you installed the old root into a trust store, such as the system keychain, a strict client keeps failing until you install the new `proxelar-ca.pem` there. ([#216](https://github.com/emanuele-em/proxelar/pull/216))
 
 ## [0.6.1] - 2026-09-22
 

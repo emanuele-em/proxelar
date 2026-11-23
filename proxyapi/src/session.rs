@@ -8,7 +8,6 @@ use std::path::Path;
 
 use base64::Engine as _;
 use bytes::Bytes;
-use chrono::{TimeZone as _, Utc};
 use http::{HeaderName, Method, StatusCode, Uri, Version};
 use proxyapi_models::{
     BodyMetadata, CapturedDnsExchange, CapturedFlow, CapturedTcpStream, CapturedWebSocket,
@@ -171,7 +170,7 @@ pub struct SessionRecorder {
 
 impl Default for SessionRecorder {
     fn default() -> Self {
-        Self::new(Utc::now().timestamp_millis())
+        Self::new(jiff::Timestamp::now().as_millisecond())
     }
 }
 
@@ -542,11 +541,7 @@ fn har_entry(flow: &CapturedFlow, redaction: Option<&RedactionPolicy>) -> Value 
         .map(|policy| policy.redact_response(&flow.response))
         .unwrap_or_else(|| flow.response.clone());
     let duration = response.time().saturating_sub(request.time()).max(0);
-    let started = Utc
-        .timestamp_millis_opt(request.time())
-        .single()
-        .unwrap_or_else(Utc::now)
-        .to_rfc3339();
+    let started = har_started_date_time(request.time());
     let request_body = har_content(request.body(), request.headers(), request.body_metadata());
     let response_body = har_content(
         response.body(),
@@ -610,6 +605,20 @@ fn har_headers(headers: &HeaderBlock) -> Vec<Value> {
             })
         })
         .collect()
+}
+
+/// Formats epoch milliseconds as an RFC 3339 UTC timestamp for HAR
+/// `startedDateTime`, e.g. `2020-01-02T03:04:05.123+00:00`. Fractional
+/// seconds are omitted when zero. Out-of-range values fall back to now.
+fn har_started_date_time(millis: i64) -> String {
+    let timestamp =
+        jiff::Timestamp::from_millisecond(millis).unwrap_or_else(|_| jiff::Timestamp::now());
+    let format = if timestamp.subsec_millisecond() == 0 {
+        "%Y-%m-%dT%H:%M:%S+00:00"
+    } else {
+        "%Y-%m-%dT%H:%M:%S%.3f+00:00"
+    };
+    timestamp.strftime(format).to_string()
 }
 
 fn har_content(body: &Bytes, headers: &HeaderBlock, metadata: BodyMetadata) -> Value {
@@ -777,7 +786,7 @@ pub fn import_har(path: impl AsRef<Path>) -> Result<TrafficSession, SessionError
         .pointer("/log/entries")
         .and_then(Value::as_array)
         .ok_or_else(|| SessionError::InvalidHar("missing log.entries array".to_owned()))?;
-    let mut session = TrafficSession::new(Utc::now().timestamp_millis());
+    let mut session = TrafficSession::new(jiff::Timestamp::now().as_millisecond());
     for (index, entry) in entries.iter().enumerate() {
         session.flows.push(import_har_entry(index, entry)?);
     }
@@ -814,11 +823,9 @@ fn import_har_entry(index: usize, entry: &Value) -> Result<CapturedFlow, Session
     let started = entry
         .get("startedDateTime")
         .and_then(Value::as_str)
-        .and_then(|value| chrono::DateTime::parse_from_rfc3339(value).ok())
-        .map_or_else(
-            || Utc::now().timestamp_millis(),
-            |value| value.timestamp_millis(),
-        );
+        .and_then(|value| value.parse::<jiff::Timestamp>().ok())
+        .unwrap_or_else(jiff::Timestamp::now)
+        .as_millisecond();
     let duration = entry.get("time").and_then(Value::as_f64).unwrap_or(0.0) as i64;
     let request_headers = import_har_headers(request.get("headers"))?;
     let response_headers = import_har_headers(response.get("headers"))?;
@@ -1436,6 +1443,8 @@ mod tests {
         }]}}));
         let imported = import_har(&path).unwrap();
         assert_eq!(imported.flows.len(), 1);
+        assert_eq!(imported.flows[0].request.time(), 1_577_934_245_000);
+        assert_eq!(imported.flows[0].response.time(), 1_577_934_245_012);
         assert_eq!(imported.flows[0].request.version(), Version::HTTP_2);
         assert_eq!(imported.flows[0].response.version(), Version::HTTP_3);
         assert_eq!(imported.flows[0].request.body().as_ref(), b"hello");
@@ -1447,6 +1456,30 @@ mod tests {
                 .count(),
             2
         );
+    }
+
+    #[test]
+    fn formats_and_parses_har_started_date_time() {
+        assert_eq!(
+            har_started_date_time(1_577_934_245_000),
+            "2020-01-02T03:04:05+00:00"
+        );
+        assert_eq!(
+            har_started_date_time(1_577_934_245_123),
+            "2020-01-02T03:04:05.123+00:00"
+        );
+        assert_eq!(har_started_date_time(0), "1970-01-01T00:00:00+00:00");
+        // Out-of-range input falls back to the current time instead of failing.
+        assert!(!har_started_date_time(i64::MAX).is_empty());
+
+        for (value, expected) in [
+            ("2020-01-02T03:04:05Z", 1_577_934_245_000),
+            ("2020-01-02T03:04:05.123+00:00", 1_577_934_245_123),
+            ("2020-01-02T05:04:05+02:00", 1_577_934_245_000),
+        ] {
+            let parsed = value.parse::<jiff::Timestamp>().unwrap();
+            assert_eq!(parsed.as_millisecond(), expected, "{value}");
+        }
     }
 
     #[test]

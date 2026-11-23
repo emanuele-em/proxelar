@@ -1,6 +1,6 @@
 [package]
 name = "proxelar"
-version = "0.6.1"
+version = "0.7.0"
 edition = "2021"
 rust-version.workspace = true
 authors = ["Emanuele Micheletti <micheletti.emanuele@hotmail.com>"]
@@ -8,7 +8,6 @@ description = "MITM proxy for HTTP/HTTPS traffic"
 license = "MIT"
 repository = "https://github.com/emanuele-em/proxelar"
 homepage = "https://proxelar.micheletti.io"
-documentation = "https://proxelar.micheletti.io"
 readme = "../README.md"
 categories = ["command-line-utilities", "development-tools", "network-programming"]
 keywords = ["proxy", "mitm", "http", "https", "lua"]
@@ -43,15 +42,15 @@ vendored-lua = ["proxyapi/vendored-lua"]
 http3 = ["proxyapi/http3"]
 
 [dependencies]
-proxyapi = { version = "0.6.1", path = "../proxyapi" }
+proxyapi = { version = "0.7.0", path = "../proxyapi" }
 bytes = "1.9"
 http = "1.4"
-proxyapi_models = { version = "0.6.1", path = "../proxyapi_models" }
+proxyapi_models = { version = "0.7.0", path = "../proxyapi_models" }
 clap = { version = "4.6", features = ["derive"] }
 dirs = "7"
 tokio = { version = "1.52", features = ["rt-multi-thread", "macros", "sync", "signal", "time", "net"] }
 tokio-util = "0.7"
-chrono = "0.4"
+jiff = "1"
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 rustls = { version = "0.23.46", default-features = false, features = ["ring"] }

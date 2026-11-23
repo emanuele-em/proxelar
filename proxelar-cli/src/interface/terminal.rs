@@ -75,7 +75,7 @@ fn render_event(event: &ProxyEvent) -> TerminalOutput {
             request,
             response,
         } => {
-            let now = chrono::Local::now().format("%H:%M:%S");
+            let now = jiff::ZonedDateTime::now().strftime("%H:%M:%S");
             let method = request.method().as_str();
             let status = response.status().as_u16();
             let uri = request.uri().to_string();
@@ -111,11 +111,11 @@ fn render_event(event: &ProxyEvent) -> TerminalOutput {
         }
         ProxyEvent::Error { message } => TerminalOutput::Stderr(format!(
             "[{}] {}",
-            chrono::Local::now().format("%H:%M:%S"),
+            jiff::ZonedDateTime::now().strftime("%H:%M:%S"),
             message.as_str().with(Color::Red)
         )),
         ProxyEvent::WebSocketConnected { id, request, .. } => {
-            let now = chrono::Local::now().format("%H:%M:%S");
+            let now = jiff::ZonedDateTime::now().strftime("%H:%M:%S");
             let uri = request.uri().to_string();
             TerminalOutput::Stdout(format!(
                 "[{now}] #{id} {} WS\u{21c4} {uri}",
@@ -127,12 +127,12 @@ fn render_event(event: &ProxyEvent) -> TerminalOutput {
         }
         ProxyEvent::TcpConnected { id, target, .. } => TerminalOutput::Stdout(format!(
             "[{}] #{id} TCP⇄ {target}",
-            chrono::Local::now().format("%H:%M:%S")
+            jiff::ZonedDateTime::now().strftime("%H:%M:%S")
         )),
         ProxyEvent::TcpData { .. } => TerminalOutput::Ignore,
         ProxyEvent::TcpClosed { stream_id } => TerminalOutput::Stdout(format!(
             "[{}] #{stream_id} TCP closed",
-            chrono::Local::now().format("%H:%M:%S")
+            jiff::ZonedDateTime::now().strftime("%H:%M:%S")
         )),
         ProxyEvent::DnsQuery {
             id,
@@ -141,7 +141,7 @@ fn render_event(event: &ProxyEvent) -> TerminalOutput {
             ..
         } => TerminalOutput::Stdout(format!(
             "[{}] #{id} DNS {name} type={query_type}",
-            chrono::Local::now().format("%H:%M:%S")
+            jiff::ZonedDateTime::now().strftime("%H:%M:%S")
         )),
         ProxyEvent::DnsResponse {
             id,
@@ -149,13 +149,13 @@ fn render_event(event: &ProxyEvent) -> TerminalOutput {
             overridden,
         } => TerminalOutput::Stdout(format!(
             "[{}] #{id} DNS {}{}",
-            chrono::Local::now().format("%H:%M:%S"),
+            jiff::ZonedDateTime::now().strftime("%H:%M:%S"),
             answers.join(", "),
             if *overridden { " [override]" } else { "" }
         )),
         ProxyEvent::UdpExchange { exchange } => TerminalOutput::Stdout(format!(
             "[{}] #{} UDP {} -> {} ({} / {})",
-            chrono::Local::now().format("%H:%M:%S"),
+            jiff::ZonedDateTime::now().strftime("%H:%M:%S"),
             exchange.id,
             exchange.client,
             exchange.target,

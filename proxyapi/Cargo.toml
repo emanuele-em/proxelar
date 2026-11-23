@@ -1,6 +1,6 @@
 [package]
 name = "proxyapi"
-version = "0.6.1"
+version = "0.7.0"
 edition = "2021"
 rust-version.workspace = true
 authors = ["Emanuele Micheletti <micheletti.emanuele@hotmail.com>"]
@@ -36,6 +36,7 @@ rustls = { version = "0.23.46", default-features = false, features = ["ring", "l
 rustls-pki-types = "1.14"
 webpki-roots = "1.0"
 rcgen = { version = "0.14.9", default-features = false, features = ["pem", "ring", "x509-parser"] }
+x509-parser = "0.18"
 getrandom = "0.4"
 time = "0.3"
 moka = { version = "0.12", features = ["future"] }
@@ -43,7 +44,7 @@ tokio = { version = "1.52", features = ["rt", "net", "io-util", "macros", "sync"
 tokio-util = { version = "0.7", features = ["rt"] }
 async-trait = "0.1"
 bstr = "1.11"
-chrono = "0.4"
+jiff = "1"
 thiserror = "2.0"
 tracing = "0.1"
 tower-service = "0.3"
@@ -55,8 +56,8 @@ tokio-tungstenite = { version = "0.30", default-features = false }
 futures-util = { version = "0.3", default-features = false, features = ["sink"] }
 boringtun = { version = "0.7.1", default-features = false }
 netstack-smoltcp = "0.2.4"
-proxyapi_models = { version = "0.6.1", path = "../proxyapi_models" }
-proxelar-proto = { version = "0.6.1", path = "../proxelar-proto" }
+proxyapi_models = { version = "0.7.0", path = "../proxyapi_models" }
+proxelar-proto = { version = "0.7.0", path = "../proxelar-proto" }
 quiche = { version = "0.30.0", optional = true }
 boring = { version = "5.2", optional = true }
 
@@ -69,7 +70,6 @@ reqwest = { version = "0.13", features = ["rustls"] }
 rustls = { version = "0.23.46", features = ["ring"] }
 tempfile = "3"
 stats_alloc = "0.1"
-x509-parser = "0.18"
 
 [[bench]]
 name = "protocol_baseline"

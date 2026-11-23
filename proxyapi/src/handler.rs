@@ -179,7 +179,7 @@ impl RequestBody {
 }
 
 pub(crate) fn now_millis() -> i64 {
-    chrono::Local::now().timestamp_millis()
+    jiff::Timestamp::now().as_millisecond()
 }
 
 #[derive(Clone)]
@@ -590,24 +590,18 @@ impl CapturingHandler {
 
     fn should_buffer_response(&self) -> bool {
         #[cfg(feature = "scripting")]
-        if self.script_engine.is_some() {
-            return true;
+        {
+            self.script_engine.is_some()
         }
 
-        false
+        #[cfg(not(feature = "scripting"))]
+        {
+            false
+        }
     }
 
     fn should_buffer_request(&self) -> bool {
-        if self.intercept.as_ref().is_some_and(|cfg| cfg.is_enabled()) {
-            return true;
-        }
-
-        #[cfg(feature = "scripting")]
-        if self.script_engine.is_some() {
-            return true;
-        }
-
-        false
+        self.intercept.as_ref().is_some_and(|cfg| cfg.is_enabled()) || self.should_buffer_response()
     }
 
     /// Take the pending flow ID so the WS path can claim it before response
