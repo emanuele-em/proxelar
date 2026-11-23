@@ -11,6 +11,10 @@
 
 - **Serve your own listener:** `Proxy::serve_with_handler` serves a custom `HttpHandler` on a listener you bound yourself: a TCP listener, e.g. on an ephemeral port whose address you read back, or a Unix socket. Unix socket clients are identified by the credentials of their process (`ClientInfo::Unix`, `UnixClient`). See the `unix_socket` example in `proxyapi/examples/` (thanks @ajanon).
 
+### Dependencies
+
+- Fixed a stack overflow advisory in `url` (RUSTSEC-2026-0592): it is now at least 2.5.9. heapless is updated to 0.9.4 for RUSTSEC-2026-0578.
+
 ### Updating from 0.7
 
 - **Client identity in the Rust API:** `HttpContext::remote_addr` is replaced by `HttpContext::client`, a `ClientInfo`. TCP clients are `ClientInfo::Ip(addr)`, carrying the address `remote_addr` held. `HttpContext` is now `#[non_exhaustive]`: build it with `HttpContext::new`.
